@@ -3,6 +3,7 @@ import SwiftUI
 struct SourceListView: View {
     @EnvironmentObject private var store: BookSourceStore
     @State private var showImport = false
+    @State private var showScan = false
 
     var body: some View {
         List {
@@ -33,16 +34,29 @@ struct SourceListView: View {
         }
         .navigationTitle("书源（\(store.sources.count)）")
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showImport = true
-                } label: {
-                    Image(systemName: "plus")
+            ToolbarItem(placement: .navigationBarLeading) {
+                EditButton()
+            }
+            ToolbarItem(placement: .navigationBarTrailing) {
+                HStack(spacing: 16) {
+                    Button {
+                        showScan = true
+                    } label: {
+                        Image(systemName: "qrcode.viewfinder")
+                    }
+                    Button {
+                        showImport = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
                 }
             }
         }
         .sheet(isPresented: $showImport) {
             ImportSourceView()
+        }
+        .sheet(isPresented: $showScan) {
+            QRSourceScanSheet()
         }
         .overlay {
             if store.sources.isEmpty {

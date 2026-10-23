@@ -4,7 +4,6 @@ import UniformTypeIdentifiers
 struct BookshelfView: View {
     @EnvironmentObject private var bookStore: BookStore
 
-    @State private var showQR = false
     @State private var showDocPicker = false
     @State private var showURLSheet = false
     @State private var message: String?
@@ -42,13 +41,11 @@ struct BookshelfView: View {
         }
         .navigationTitle("书架（\(bookStore.books.count)）")
         .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                EditButton()
+            }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
-                    Button {
-                        showQR = true
-                    } label: {
-                        Label("扫一扫添加书源", systemImage: "qrcode.viewfinder")
-                    }
                     Button {
                         showDocPicker = true
                     } label: {
@@ -64,20 +61,8 @@ struct BookshelfView: View {
                 }
             }
         }
-        .sheet(isPresented: $showQR) {
-            QRSourceScanSheet()
-        }
-        .fileImporter(
-            isPresented: $showDocPicker,
-            allowedContentTypes: [UTType.text, UTType.epub],
-            allowsMultipleSelection: false
-        ) { result in
-            switch result {
-            case .success(let urls):
-                if let url = urls.first { handlePicked(url) }
-            case .failure:
-                break
-            }
+        .sheet(isPresented: $showDocPicker) {
+            DocumentImporter(onPick: handlePicked, onCancel: { showDocPicker = false })
         }
         .sheet(isPresented: $showURLSheet) {
             AddBookByURLView { msg, isErr in
@@ -91,7 +76,7 @@ struct BookshelfView: View {
                 ContentUnavailableView(
                     "书架还是空的",
                     systemImage: "books.vertical",
-                    description: Text("右上角 + ：扫码加书源 / 本地导入 / URL 添加书籍")
+                    description: Text("右上角 + ：本地导入 / URL 添加书籍")
                 )
             }
         }
