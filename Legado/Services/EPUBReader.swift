@@ -195,7 +195,7 @@ final class EPUBReader {
     private func parseContainerXML(_ xml: String) throws -> String {
         do {
             let doc = try SwiftSoup.parse(xml)
-            guard let rootfile = (try? doc.select("rootfile")).first() else {
+            guard let rootfile = (try? doc.select("rootfile"))?.first() else {
                 throw EPUBError.noOPF
             }
             guard let path = (try? rootfile.attr("full-path")), !path.isEmpty else { throw EPUBError.noOPF }
@@ -243,7 +243,7 @@ final class EPUBReader {
         let doc = try SwiftSoup.parse(html)
         // 去除脚本与样式内容
         try? doc.select("script, style").remove()
-        let body = (try? doc.select("body")).first() ?? doc
+        let body = (try? doc.select("body"))?.first() ?? doc
         let text = (try? body.text()) ?? ""
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
