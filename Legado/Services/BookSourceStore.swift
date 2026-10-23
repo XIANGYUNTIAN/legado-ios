@@ -63,6 +63,18 @@ final class BookSourceStore: ObservableObject {
         return imported.count
     }
 
+    /// 二维码/链接统一入口：单行 http(s) 链接先抓取再解析；否则按 JSON 文本解析
+    @discardableResult
+    func importFromTextOrLink(_ input: String) async throws -> Int {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw RuleError.invalidJSON }
+        if let url = Self.linkIfAny(trimmed) {
+            let body = try await Self.fetchText(from: url)
+            return try importSources(from: body)
+        }
+        return try importSources(from: trimmed)
+    }
+
     /// 仅当输入为单行 http(s) 链接时返回 URL，避免把多行 JSON 误判为链接
     static func linkIfAny(_ text: String) -> URL? {
         guard !text.contains("\n"), !text.contains("\r") else { return nil }
