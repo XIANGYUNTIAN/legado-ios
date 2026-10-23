@@ -245,7 +245,7 @@ final class EPUBReader {
         // 去除脚本与样式内容
         try? doc.select("script, style").remove()
         let body = doc.select("body").first() ?? doc
-        let text = body.text()
+        let text = (try? body.text()) ?? ""
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

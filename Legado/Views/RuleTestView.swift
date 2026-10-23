@@ -79,7 +79,7 @@ case .css: return "@css:ul.chapters li a@text"
         Form {
             Section {
                 Picker("模式", selection: $mode) {
-                    ForEach(TestMode.allCases) { m in
+                    ForEach(TestMode.allCases, id: \.self) { m in
                         Text(m.rawValue).tag(m)
                     }
                 }

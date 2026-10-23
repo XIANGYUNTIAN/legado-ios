@@ -351,10 +351,15 @@ final class XPathEvaluator {
         return .element(text)
     }
 
+    private static let positionPredicateRegex = try! NSRegularExpression(pattern: #"^position\(\)\s*=\s*(\d+)$"#)
+    private static let attrTildeRegex = try! NSRegularExpression(pattern: #"^([A-Za-z0-9_-]+)\s*~=\s*"([^"]*)"$"#)
+    private static let attrEqualsRegex = try! NSRegularExpression(pattern: #"^([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"$"#)
+    private static let quoteSet = CharacterSet(charactersIn: "\"'")
+
     private static func parsePredicate(_ inner: String) throws -> Predicate {
         if inner == "last()" { return .last }
-        if let m = inner.range(of: #"^position\(\)\s*=\s*(\d+)$"#, options: .regularExpression) {
-            let num = Int(inner[m.range(at: 1, in: inner)!]) ?? 0
+        if let m = positionPredicateRegex.firstMatch(in: inner, range: NSRange(inner.startIndex..., in: inner)) {
+            let num = Int((inner as NSString).substring(with: m.range(at: 1))) ?? 0
             return .positionEquals(num)
         }
         if let num = Int(inner) { return .position(num) }
@@ -363,15 +368,15 @@ final class XPathEvaluator {
         if inner.hasPrefix("@") {
             let rest = String(inner.dropFirst()).trimmingCharacters(in: .whitespaces)
             // @attr~="v"
-            if let m = rest.range(of: #"^([A-Za-z0-9_-]+)\s*~=\s*"([^"]*)"$"#, options: .regularExpression) {
-                let name = String(rest[m.range(at: 1, in: rest)!])
-                let value = String(rest[m.range(at: 2, in: rest)!])
+            if let m = attrTildeRegex.firstMatch(in: rest, range: NSRange(rest.startIndex..., in: rest)) {
+                let name = String((rest as NSString).substring(with: m.range(at: 1)))
+                let value = String((rest as NSString).substring(with: m.range(at: 2)))
                 return .attrContainsWord(name, value)
             }
             // @attr="v"
-            if let m = rest.range(of: #"^([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"$"#, options: .regularExpression) {
-                let name = String(rest[m.range(at: 1, in: rest)!])
-                let value = String(rest[m.range(at: 2, in: rest)!])
+            if let m = attrEqualsRegex.firstMatch(in: rest, range: NSRange(rest.startIndex..., in: rest)) {
+                let name = String((rest as NSString).substring(with: m.range(at: 1)))
+                let value = String((rest as NSString).substring(with: m.range(at: 2)))
                 return .attrEquals(name, value)
             }
             // @attr
@@ -385,7 +390,7 @@ final class XPathEvaluator {
             let attr = args[0].trimmingCharacters(in: .whitespaces)
             guard attr.hasPrefix("@") else { throw XPathError.parseError("contains 第一个参数需为 @attr") }
             let name = String(attr.dropFirst())
-            let value = args[1].trimmingCharacters(in: .whitespacesAndDoubleQuotes)
+            let value = args[1].trimmingCharacters(in: .whitespaces.union(quoteSet))
             return .attrContains(name, value)
         }
 
@@ -396,7 +401,7 @@ final class XPathEvaluator {
             let attr = args[0].trimmingCharacters(in: .whitespaces)
             guard attr.hasPrefix("@") else { throw XPathError.parseError("starts-with 第一个参数需为 @attr") }
             let name = String(attr.dropFirst())
-            let value = args[1].trimmingCharacters(in: .whitespacesAndDoubleQuotes)
+            let value = args[1].trimmingCharacters(in: .whitespaces.union(quoteSet))
             return .attrStartsWith(name, value)
         }
 
@@ -447,7 +452,7 @@ final class HtmlRuleEngine {
         let extractor = rule.extractor ?? .text
         var output: [String] = []
         for element in elements {
-            let value = value(for: element, extractor: extractor)
+            let value = Self.value(for: element, extractor: extractor)
             if !value.isEmpty { output.append(value) }
         }
         return output

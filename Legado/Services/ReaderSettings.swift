@@ -62,9 +62,18 @@ final class ReaderSettings: ObservableObject {
         load()
     }
 
+    private struct SettingsData: Codable {
+        var theme: Theme
+        var fontFamily: FontFamily
+        var fontSize: Double
+        var lineSpacing: Double
+        var justified: Bool
+        var showChapterHeader: Bool
+    }
+
     func load() {
         guard let data = try? Data(contentsOf: fileURL),
-              let decoded = try? JSONDecoder().decode(ReaderSettings.self, from: data) else {
+              let decoded = try? JSONDecoder().decode(SettingsData.self, from: data) else {
             return
         }
         theme = decoded.theme
@@ -76,8 +85,11 @@ final class ReaderSettings: ObservableObject {
     }
 
     func save() {
-        let encoder = JSONEncoder()
-        guard let data = try? encoder.encode(self) else { return }
+        let dataObj = SettingsData(
+            theme: theme, fontFamily: fontFamily, fontSize: fontSize,
+            lineSpacing: lineSpacing, justified: justified, showChapterHeader: showChapterHeader
+        )
+        guard let data = try? JSONEncoder().encode(dataObj) else { return }
         try? data.write(to: fileURL, options: .atomic)
     }
 
