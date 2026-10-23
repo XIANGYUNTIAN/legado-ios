@@ -6,6 +6,8 @@ struct ImportSourceView: View {
     @State private var text = ""
     @State private var message: String?
     @State private var importedCount = 0
+    @State private var isLoading = false
+    @State private var messageColor: Color = .red
 
     var body: some View {
         NavigationStack {
@@ -22,27 +24,25 @@ struct ImportSourceView: View {
                 if let message = message {
                     Text(message)
                         .font(.callout)
-                        .foregroundStyle(importedCount > 0 ? Color.green : Color.red)
+                        .foregroundStyle(messageColor)
                         .padding(.horizontal)
                 }
 
                 Button {
-                    do {
-                        let count = try store.importSources(from: text)
-                        importedCount = count
-                        message = "成功导入 \(count) 个书源"
-                        text = ""
-                    } catch {
-                        importedCount = 0
-                        message = error.localizedDescription
-                    }
+                    startImport()
                 } label: {
-                    Text("导入")
-                        .frame(maxWidth: .infinity)
+                    Group {
+                        if isLoading {
+                            ProgressView()
+                        } else {
+                            Text("导入")
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .padding(.horizontal)
-                .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(isLoading || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                 Spacer()
             }
@@ -54,6 +54,40 @@ struct ImportSourceView: View {
                     Button("关闭") { dismiss() }
                 }
             }
+        }
+    }
+
+    /// 支持两种输入：① 直接粘贴书源 JSON；② 粘贴单行 http(s) 链接自动抓取
+    @MainActor
+    private func startImport() {
+        let input = text
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isLink = BookSourceStore.linkIfAny(trimmed) != nil
+
+        isLoading = true
+        importedCount = 0
+        messageColor = .secondary
+        message = isLink ? "正在获取书源…" : nil
+
+        Task {
+            do {
+                let body: String
+                if let url = BookSourceStore.linkIfAny(trimmed) {
+                    body = try await BookSourceStore.fetchText(from: url)
+                } else {
+                    body = trimmed
+                }
+                let count = try store.importSources(from: body)
+                importedCount = count
+                messageColor = .green
+                message = "成功导入 \(count) 个书源"
+                text = ""
+            } catch {
+                importedCount = 0
+                messageColor = .red
+                message = error.localizedDescription
+            }
+            isLoading = false
         }
     }
 }
