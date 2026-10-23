@@ -184,10 +184,10 @@ final class EPUBReader {
             guard let out = outBase else { throw EPUBError.unsupportedCompression }
             return try data.withUnsafeBytes { inBytes -> Int in
                 let inBase = inBytes.bindMemory(to: UInt8.self).baseAddress
-                guard let in = inBase else { throw EPUBError.unsupportedCompression }
+                guard let inPtr = inBase else { throw EPUBError.unsupportedCompression }
                 return Int(compression_decode(
                     out, outCapacity,
-                    in, data.count,
+                    inPtr, data.count,
                     nil, COMPRESSION_ZLIB
                 ))
             }
