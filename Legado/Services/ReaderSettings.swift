@@ -36,6 +36,15 @@ final class ReaderSettings: ObservableObject {
         case heiti = "黑体"
         case kaiti = "楷体"
 
+        var design: Font.Design {
+            switch self {
+            case .system: return .default
+            case .songti: return .serif
+            case .heiti: return .default
+            case .kaiti: return .serif
+            }
+        }
+
         var font: Font {
             switch self {
             case .system: return .body

@@ -54,7 +54,7 @@ struct BookReaderView: View {
             .sheet(isPresented: $showSettings) { settingsSheet }
             .navigationTitle(currentChapter?.title ?? book.displayTitle)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar(visibility: .hidden, for: .tabBar)
+            .toolbar(.hidden, for: .tabBar)
             .onAppear { load() }
         }
     }
@@ -67,15 +67,13 @@ struct BookReaderView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     if settings.showChapterHeader, let chapter = currentChapter {
                         Text(chapter.title)
-                            .font(settings.fontFamily.font)
-                            .fontSize(settings.fontSize)
+                            .font(.system(size: settings.fontSize, design: settings.fontFamily.design))
                             .foregroundStyle(settings.theme.foreground)
                             .multilineTextAlignment(.center)
                             .padding(.bottom, settings.lineSpacing * 2)
                     }
                     Text(displayText)
-                        .font(settings.fontFamily.font)
-                        .fontSize(settings.fontSize)
+                        .font(.system(size: settings.fontSize, design: settings.fontFamily.design))
                         .lineSpacing(settings.lineSpacing)
                         .multilineTextAlignment(.leading)
                         .foregroundStyle(settings.theme.foreground)
@@ -197,13 +195,13 @@ struct BookReaderView: View {
                 }
 
                 Section("字号：\(Int(settings.fontSize))pt") {
-                    Slider(value: $settings.fontSize, in: 12, in: 28, step: 1)
-                        .tint(.tint)
+                    Slider(value: $settings.fontSize, in: 12...28, step: 1)
+                        .tint(.accentColor)
                 }
 
                 Section("行距：\(Int(settings.lineSpacing))pt") {
-                    Slider(value: $settings.lineSpacing, in: 0, in: 24, step: 1)
-                        .tint(.tint)
+                    Slider(value: $settings.lineSpacing, in: 0...24, step: 1)
+                        .tint(.accentColor)
                 }
             }
             .navigationTitle("阅读设置")
@@ -325,7 +323,7 @@ struct BookReaderView: View {
               let rules = source.ruleToc, !rules.isEmpty else {
             throw RuleError.unsupportedMode("书源缺少目录规则")
         }
-        guard let bookURL = URL(string: book.bookUrl) else {
+        guard let bookUrlStr = book.bookUrl, let bookURL = URL(string: bookUrlStr) else {
             throw RuleError.unsupportedMode("书籍 URL 无效")
         }
         let html = try await NetworkService.shared.fetchText(from: bookURL)

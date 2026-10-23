@@ -168,11 +168,32 @@ final class EPUBReader {
             Data([0x78, 0xda]) + raw,  // 最佳压缩
         ]
         for candidate in candidates {
-            if let result = try? candidate.decompressed(using: .zlib), !result.isEmpty {
+            if let result = try? decompressZlib(candidate), !result.isEmpty {
                 return result
             }
         }
         throw EPUBError.unsupportedCompression
+    }
+
+    /// 使用 Compression 框架的 compression_decode 做 zlib 解压
+    private func decompressZlib(_ data: Data) throws -> Data {
+        let outCapacity = data.count * 10
+        var out = Data(count: outCapacity)
+        let decompressedSize = try out.withUnsafeMutableBytes { outBytes -> Int in
+            let outBase = outBytes.bindMemory(to: UInt8.self).baseAddress
+            guard let out = outBase else { throw EPUBError.unsupportedCompression }
+            return try data.withUnsafeBytes { inBytes -> Int in
+                let inBase = inBytes.bindMemory(to: UInt8.self).baseAddress
+                guard let in = inBase else { throw EPUBError.unsupportedCompression }
+                return Int(compression_decode(
+                    out, outCapacity,
+                    in, data.count,
+                    nil, COMPRESSION_ZLIB
+                ))
+            }
+        }
+        guard decompressedSize > 0 else { throw EPUBError.unsupportedCompression }
+        return out.prefix(decompressedSize)
     }
 
     // MARK: - 小端读取
