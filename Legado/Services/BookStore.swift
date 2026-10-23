@@ -83,29 +83,27 @@ final class BookStore: ObservableObject {
             throw BookImportError.invalidURL
         }
 
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 30
-        request.setValue(
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-            forHTTPHeaderField: "User-Agent"
-        )
-
         let data: Data
-        let response: URLResponse
+        let http: HTTPURLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
-        } catch {
-            if let err = error as? URLError, err.code == .timedOut {
+            (data, http) = try await NetworkService.shared.fetchDataWithResponse(
+                from: url,
+                timeout: 30
+            )
+        } catch let error as NetworkError {
+            switch error {
+            case .timeout:
                 throw BookImportError.downloadFailed("请求超时，请检查网络或链接")
+            case .badStatus(let code):
+                throw BookImportError.badStatus(code)
+            default:
+                throw BookImportError.downloadFailed(error.localizedDescription)
             }
+        } catch {
             throw BookImportError.downloadFailed(error.localizedDescription)
         }
 
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            throw BookImportError.badStatus(http.statusCode)
-        }
-
-        let ext = inferExtension(url: url, response: response)
+        let ext = inferExtension(url: url, response: http)
         let rawName = (url.pathComponents.last?.removingPercentEncoding ?? "remote")
         let name = (rawName as NSString).deletingPathExtension
         return try importBookData(data, suggestedName: name, ext: ext, remoteURL: trimmed)
@@ -176,6 +174,12 @@ final class BookStore: ObservableObject {
             }
         }
         books.remove(atOffsets: offsets)
+        persist()
+    }
+
+    /// 添加规则阅读书籍（保留 sourceId + bookUrl，不落本地文件）
+    func addBook(_ book: Book) {
+        books.append(book)
         persist()
     }
 }

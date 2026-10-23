@@ -1,0 +1,504 @@
+import Foundation
+import SwiftSoup
+
+// MARK: - 提取器
+
+/// legado 规则串尾部的抽取器关键字（@text / @html / @href …）
+/// 与 Android 端 AnalyzeRule 的 getElements / Element 的 attr/text 取值方式对齐。
+enum HtmlExtractor: String {
+    case text
+    case html
+    case ownText
+    case href
+    case src
+    case srcset
+    case dataSrc
+    case className
+    case id
+    case tag
+
+    /// 大小写与常见别名（data-srcset / class / classname）统一映射
+    static let table: [String: HtmlExtractor] = [
+        "text": .text,
+        "html": .html,
+        "owntext": .ownText,
+        "ownText": .ownText,
+        "own_text": .ownText,
+        "href": .href,
+        "src": .src,
+        "srcset": .srcset,
+        "data-src": .dataSrc,
+        "data-srcset": .dataSrc,
+        "datasrc": .dataSrc,
+        "data_src": .dataSrc,
+        "class": .className,
+        "classname": .className,
+        "id": .id,
+        "tag": .tag,
+    ]
+}
+
+/// 解析后的 CSS 规则：选择器 + 抽取器（抽取器为 nil 时默认取文本）
+struct CssRule {
+    let selector: String
+    let extractor: HtmlExtractor?
+}
+
+enum CssRuleError: LocalizedError {
+    case parseError(String)
+    case selectError(String)
+    case htmlParseError(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .parseError(let msg): return "规则解析错误：\(msg)"
+        case .selectError(let sel): return "CSS 选择器无效：\(sel)"
+        case .htmlParseError(let msg): return "HTML 解析失败：\(msg)"
+        }
+    }
+}
+
+// MARK: - CSS 规则解析
+
+/// 从 `@css:selector@extractor`（或 `@@selector@extractor`）切出选择器与抽取器。
+/// 抽取器只认规则串**末尾**的 `@<关键字>`，避免误伤选择器内部的 `@`。
+final class CssRuleParser {
+    static let shared = CssRuleParser()
+
+    /// 末尾抽取器匹配：@ 后跟字母/数字/下划线/连字符，且必须是已知关键字
+    private static let extractorRegex = try? NSRegularExpression(
+        pattern: "@([A-Za-z0-9_-]+)$",
+        options: []
+    )
+
+    func parse(_ body: String) -> CssRule {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let regex = Self.extractorRegex else {
+            return CssRule(selector: trimmed, extractor: nil)
+        }
+        let ns = trimmed as NSString
+        let matches = regex.matches(in: trimmed, range: NSRange(location: 0, length: ns.length))
+        // 从最后一个匹配向前找第一个已知关键字（选择器本身可能不含 @，故通常只有一个）
+        for match in matches.reversed() {
+            let word = ns.substring(with: match.range(at: 1)).lowercased()
+            if let extractor = HtmlExtractor.table[word] {
+                let selector = ns.substring(to: match.range.location)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return CssRule(selector: selector, extractor: extractor)
+            }
+        }
+        return CssRule(selector: trimmed, extractor: nil)
+    }
+}
+
+// MARK: - XPath 引擎
+
+/// 最小可用的 XPath 子集求值器，基于 SwiftSoup 的 Element 树。
+///
+/// 支持的语法（覆盖 legado 书源常见写法）：
+/// - 轴：`/` 子轴，`//` 后代轴（含自身）
+/// - 节点测试：元素名（或 `*`）、`text()`、`@attr`
+/// - 谓词：`[n]`、`[last()]`、`[position()=n]`、`[@attr]`、`[@attr="v"]`、
+///   `[@attr~="v"]`（词包含）、`contains(@attr,"v")`、`starts-with(@attr,"v")`
+///
+/// 不支持的语法（如轴 sibling/following/preceding、`contains(text(),"x")` 等）
+/// 会抛出 `XPathError.unsupported`，由调用方给出友好提示，不会崩溃。
+enum XPathError: LocalizedError {
+    case parseError(String)
+    case unsupported(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .parseError(let msg): return "XPath 解析错误：\(msg)"
+        case .unsupported(let feat): return "XPath 暂不支持该语法：\(feat)（可改用 @css: 选择器）"
+        }
+    }
+}
+
+final class XPathEvaluator {
+    static let shared = XPathEvaluator()
+
+    // MARK: 轴 / 节点测试 / 谓词
+
+    private enum Axis { case child, descendant }
+
+    private enum NodeTest {
+        case element(String)   // 元素名或 "*"
+        case text
+        case attribute(String)
+    }
+
+    private enum Predicate {
+        case position(Int)
+        case last
+        case positionEquals(Int)
+        case attrExists(String)
+        case attrEquals(String, String)
+        case attrContainsWord(String, String)
+        case attrContains(String, String)
+        case attrStartsWith(String, String)
+    }
+
+    // MARK: 入口
+
+    /// 对给定 HTML 求值 XPath，返回命中的字符串列表（空数组表示无命中，由调用方转 nil）
+    func evaluate(_ path: String, rootHTML: String) throws -> [String] {
+        let document = try Self.parseHTML(rootHTML)
+        let steps = try Self.parse(path)
+        guard let lastStep = steps.last else { return [] }
+
+        var current: [Element] = [document]
+        for step in steps {
+            var collected: [Element] = []
+            for node in current {
+                collected.append(contentsOf: candidates(node, axis: step.axis))
+            }
+            // 去重（// 轴可能产生重复节点），保持原文顺序
+            var seen = Set<ObjectIdentifier>()
+            var unique: [Element] = []
+            for e in collected {
+                if seen.insert(ObjectIdentifier(e)).inserted { unique.append(e) }
+            }
+            // 按节点测试 + 谓词过滤（谓词可引用位置）
+            var next: [Element] = []
+            let total = unique.count
+            for (index, element) in unique.enumerated() {
+                guard matchesTest(element, step.test) else { continue }
+                let position = index + 1
+                guard matchesPredicates(element, step.predicates, position: position, last: total) else { continue }
+                next.append(element)
+            }
+            current = next
+        }
+
+        var output: [String] = []
+        for element in current {
+            let value = outputValue(element, test: lastStep.test)
+            if !value.isEmpty { output.append(value) }
+        }
+        return output
+    }
+
+    // MARK: 节点测试匹配
+
+    private func matchesTest(_ element: Element, _ test: NodeTest) -> Bool {
+        switch test {
+        case .element("*"):
+            return true
+        case .element(let name):
+            return element.tagName().lowercased() == name.lowercased()
+        case .text:
+            return true
+        case .attribute:
+            return true
+        }
+    }
+
+    private func matchesPredicates(_ element: Element, _ predicates: [Predicate], position: Int, last: Int) -> Bool {
+        for predicate in predicates {
+            switch predicate {
+            case .position(let n):
+                if position != n { return false }
+            case .last:
+                if position != last { return false }
+            case .positionEquals(let n):
+                if position != n { return false }
+            case .attrExists(let name):
+                if attr(element, name).isEmpty { return false }
+            case .attrEquals(let name, let value):
+                if attr(element, name) != value { return false }
+            case .attrContainsWord(let name, let value):
+                let words = attr(element, name).components(separatedBy: .whitespacesAndNewlines)
+                if !words.contains(value) { return false }
+            case .attrContains(let name, let value):
+                if !attr(element, name).contains(value) { return false }
+            case .attrStartsWith(let name, let value):
+                if !attr(element, name).hasPrefix(value) { return false }
+            }
+        }
+        return true
+    }
+
+    private func outputValue(_ element: Element, test: NodeTest) -> String {
+        switch test {
+        case .element, .text:
+            return ((try? element.text()) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        case .attribute(let name):
+            return attr(element, name)
+        }
+    }
+
+    /// `Element.attr` 在 SwiftSoup 中会抛异常，这里统一吞掉并返回空字符串
+    private func attr(_ element: Element, _ name: String) -> String {
+        (try? element.attr(name)) ?? ""
+    }
+
+    // MARK: 轴候选
+
+    private func candidates(_ node: Element, axis: Axis) -> [Element] {
+        switch axis {
+        case .child:
+            return Array(node.children())
+        case .descendant:
+            var result: [Element] = [node]
+            var stack: [Element] = Array(node.children())
+            while let element = stack.popLast() {
+                result.append(element)
+                stack.append(contentsOf: Array(element.children()))
+            }
+            return result
+        }
+    }
+
+    // MARK: HTML 解析
+
+    static func parseHTML(_ html: String) throws -> Document {
+        do {
+            return try SwiftSoup.parse(html)
+        } catch {
+            throw XPathError.parseError(error.localizedDescription)
+        }
+    }
+
+    // MARK: - 解析器
+
+    private struct Step {
+        let axis: Axis
+        let test: NodeTest
+        let predicates: [Predicate]
+    }
+
+    /// 词法分析：按 `/` / `//` 切步，每步 = 轴 + 节点测试 + 若干谓词
+    private static func parse(_ path: String) throws -> [Step] {
+        let s = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { throw XPathError.parseError("路径为空") }
+
+        var steps: [Step] = []
+        var index = 0
+        var axis: Axis = .child
+        let chars = Array(s)
+
+        while index < chars.count {
+            // 轴标记
+            if chars[index] == "/" {
+                if index + 1 < chars.count, chars[index + 1] == "/" {
+                    axis = .descendant
+                    index += 2
+                } else {
+                    axis = .child
+                    index += 1
+                }
+                // 轴后紧跟 "/" 会再走一次循环（合法：/// 不常见，忽略）
+                if index < chars.count, chars[index] == "/" { continue }
+                continue
+            }
+
+            // 读取节点测试（到 '/' 或 '[' 或结束）
+            let testStart = index
+            while index < chars.count, chars[index] != "/", chars[index] != "[" {
+                index += 1
+            }
+            let testText = String(chars[testStart..<index]).trimmingCharacters(in: .whitespaces)
+            let test = try parseNodeTest(testText)
+
+            // 读取谓词
+            var predicates: [Predicate] = []
+            while index < chars.count, chars[index] == "[" {
+                let end = try matchingBracket(chars, start: index)
+                let inner = String(chars[(index + 1)..<end]).trimmingCharacters(in: .whitespaces)
+                predicates.append(try parsePredicate(inner))
+                index = end + 1
+            }
+
+            steps.append(Step(axis: axis, test: test, predicates: predicates))
+            axis = .child
+        }
+
+        guard !steps.isEmpty else { throw XPathError.parseError("路径为空") }
+        return steps
+    }
+
+    private static func matchingBracket(_ chars: [Character], start: Int) throws -> Int {
+        var index = start + 1
+        var inQuote = false
+        while index < chars.count {
+            let c = chars[index]
+            if inQuote {
+                if c == "\"" { inQuote = false }
+            } else {
+                if c == "\"" { inQuote = true }
+                else if c == "]" { return index }
+            }
+            index += 1
+        }
+        throw XPathError.parseError("谓词未闭合")
+    }
+
+    private static func parseNodeTest(_ text: String) throws -> NodeTest {
+        if text == "*" { return .element("*") }
+        if text == "text()" || text == "node()" { return .text }
+        if text.hasPrefix("@") {
+            let name = String(text.dropFirst()).trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty else { throw XPathError.parseError("属性名为空") }
+            return .attribute(name)
+        }
+        guard !text.isEmpty else { throw XPathError.parseError("节点测试为空") }
+        // 元素名：只允许字母、数字、连字符、冒号（命名空间）、下划线、点（含点作元素名）
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-:_.")
+        if text.rangeOfCharacter(from: allowed.inverted) != nil {
+            throw XPathError.parseError("无法识别的节点测试：\(text)")
+        }
+        return .element(text)
+    }
+
+    private static func parsePredicate(_ inner: String) throws -> Predicate {
+        if inner == "last()" { return .last }
+        if let m = inner.range(of: #"^position\(\)\s*=\s*(\d+)$"#, options: .regularExpression) {
+            let num = Int(inner[m.range(at: 1, in: inner)!]) ?? 0
+            return .positionEquals(num)
+        }
+        if let num = Int(inner) { return .position(num) }
+
+        // @attr
+        if inner.hasPrefix("@") {
+            let rest = String(inner.dropFirst()).trimmingCharacters(in: .whitespaces)
+            // @attr~="v"
+            if let m = rest.range(of: #"^([A-Za-z0-9_-]+)\s*~=\s*"([^"]*)"$"#, options: .regularExpression) {
+                let name = String(rest[m.range(at: 1, in: rest)!])
+                let value = String(rest[m.range(at: 2, in: rest)!])
+                return .attrContainsWord(name, value)
+            }
+            // @attr="v"
+            if let m = rest.range(of: #"^([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"$"#, options: .regularExpression) {
+                let name = String(rest[m.range(at: 1, in: rest)!])
+                let value = String(rest[m.range(at: 2, in: rest)!])
+                return .attrEquals(name, value)
+            }
+            // @attr
+            return .attrExists(rest)
+        }
+
+        // contains(@attr,"v")
+        if inner.hasPrefix("contains(") {
+            let args = try extractFunctionArgs(inner)
+            guard args.count == 2 else { throw XPathError.parseError("contains 参数错误") }
+            let attr = args[0].trimmingCharacters(in: .whitespaces)
+            guard attr.hasPrefix("@") else { throw XPathError.parseError("contains 第一个参数需为 @attr") }
+            let name = String(attr.dropFirst())
+            let value = args[1].trimmingCharacters(in: .whitespacesAndDoubleQuotes)
+            return .attrContains(name, value)
+        }
+
+        // starts-with(@attr,"v")
+        if inner.hasPrefix("starts-with(") {
+            let args = try extractFunctionArgs(inner)
+            guard args.count == 2 else { throw XPathError.parseError("starts-with 参数错误") }
+            let attr = args[0].trimmingCharacters(in: .whitespaces)
+            guard attr.hasPrefix("@") else { throw XPathError.parseError("starts-with 第一个参数需为 @attr") }
+            let name = String(attr.dropFirst())
+            let value = args[1].trimmingCharacters(in: .whitespacesAndDoubleQuotes)
+            return .attrStartsWith(name, value)
+        }
+
+        throw XPathError.parseError("不支持的谓词：\(inner)")
+    }
+
+    /// 从 `func(@attr,"v")` 中提取逗号分隔的参数（简单实现：按顶层逗号切分，忽略引号内逗号）
+    private static func extractFunctionArgs(_ s: String) throws -> [String] {
+        guard let open = s.firstIndex(of: "("),
+              let close = s.lastIndex(of: ")"), close > open else {
+            throw XPathError.parseError("函数调用格式错误")
+        }
+        let body = String(s[s.index(after: open)..<close])
+        var args: [String] = []
+        var current = ""
+        var inQuote = false
+        for c in body {
+            if inQuote {
+                if c == "\"" { inQuote = false }
+                current.append(c)
+            } else {
+                if c == "\"" { inQuote = true; current.append(c) }
+                else if c == "," { args.append(current); current = "" }
+                else { current.append(c) }
+            }
+        }
+        args.append(current)
+        return args
+    }
+}
+
+// MARK: - HTML 规则引擎（CSS / XPath 统一入口）
+
+/// 对 legado 的 @css / @xpath 规则做统一求值，返回 `[String]`（无命中返回空数组）。
+final class HtmlRuleEngine {
+    static let shared = HtmlRuleEngine()
+
+    /// CSS 求值。body 为 `selector@extractor`（抽取器可缺省，默认 text）。
+    func evaluateCss(_ body: String, rootHTML: String) throws -> [String] {
+        let rule = CssRuleParser.shared.parse(body)
+        let document = try XPathEvaluator.parseHTML(rootHTML)
+        let elements: Elements
+        do {
+            elements = try document.select(rule.selector)
+        } catch {
+            throw CssRuleError.selectError(rule.selector)
+        }
+        let extractor = rule.extractor ?? .text
+        var output: [String] = []
+        for element in elements {
+            let value = value(for: element, extractor: extractor)
+            if !value.isEmpty { output.append(value) }
+        }
+        return output
+    }
+
+    /// XPath 求值。
+    func evaluateXPath(_ path: String, rootHTML: String) throws -> [String] {
+        try XPathEvaluator.shared.evaluate(path, rootHTML: rootHTML)
+    }
+
+    static func value(for element: Element, extractor: HtmlExtractor) -> String {
+        switch extractor {
+        case .text:
+            return (try? element.text()) ?? ""
+        case .html:
+            return (try? element.outerHtml()) ?? ""
+        case .ownText:
+            return element.ownText()
+        case .href:
+            return (try? element.attr("href")) ?? ""
+        case .src:
+            return (try? element.attr("src")) ?? ""
+        case .srcset:
+            return (try? element.attr("srcset")) ?? ""
+        case .dataSrc:
+            return (try? element.attr("data-src")) ?? ""
+        case .className:
+            return (try? element.className()) ?? ""
+        case .id:
+            return element.id()
+        case .tag:
+            return element.tagName()
+        }
+    }
+
+    /// 对单个元素求值规则：支持裸抽取器（@text / @href …）与完整规则（@css:… / @xpath:…）。
+    /// 供目录 / 发现的逐元素提取复用。
+    static func extractValue(_ rule: String, on element: Element) -> String {
+        let trimmed = rule.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        if lower.hasPrefix("@") && !lower.hasPrefix("@css:") && !lower.hasPrefix("@xpath:")
+            && !lower.hasPrefix("@json:") && !lower.hasPrefix("@js:") && !lower.hasPrefix("@get:")
+            && !lower.hasPrefix("@put:") && !trimmed.hasPrefix("@@") {
+            let key = String(trimmed.dropFirst()).lowercased()
+            if let extractor = HtmlExtractor.table[key] {
+                return Self.value(for: element, extractor: extractor)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        let fragment = (try? element.outerHtml()) ?? ""
+        return ((try? RuleEngine().getString(rule, content: fragment)) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}

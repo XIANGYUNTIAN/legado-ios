@@ -9,7 +9,7 @@ struct SourceListView: View {
         List {
             ForEach(store.sources) { source in
                 NavigationLink {
-                    SourceDetailView(source: source)
+                    SourceExploreView(source: source)
                 } label: {
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {

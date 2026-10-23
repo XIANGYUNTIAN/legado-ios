@@ -1,9 +1,11 @@
 import SwiftUI
 
-/// 书籍详情（阅读器将在后续版本开放）
+/// 书籍详情：展示书籍元信息，并提供入口跳转到阅读器。
 struct BookDetailView: View {
     let book: Book
     @EnvironmentObject private var bookStore: BookStore
+    @EnvironmentObject private var sourceStore: BookSourceStore
+    @State private var showReader = false
 
     var body: some View {
         List {
@@ -19,11 +21,23 @@ struct BookDetailView: View {
             if let u = book.remoteURL {
                 LabeledContent("来源链接", value: u)
             }
+            if book.supportsRuleReading {
+                LabeledContent("阅读方式", value: "书源规则阅读")
+            }
         }
         .navigationTitle(book.title)
         .safeAreaInset(edge: .bottom) {
-            if bookStore.fileURL(for: book) != nil {
-                Text("阅读器将于后续版本开放")
+            if canRead {
+                Button {
+                    showReader = true
+                } label: {
+                    Label("开始阅读", systemImage: "book.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .padding()
+            } else {
+                Text("该书籍暂不支持阅读")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
@@ -31,5 +45,13 @@ struct BookDetailView: View {
                     .background(.bar)
             }
         }
+        .navigationDestination(isPresented: $showReader) {
+            BookReaderView(book: book)
+        }
+    }
+
+    /// 可阅读条件：有本地文件，或已关联书源与书籍 URL
+    private var canRead: Bool {
+        bookStore.fileURL(for: book) != nil || book.supportsRuleReading
     }
 }

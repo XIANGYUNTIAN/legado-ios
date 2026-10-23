@@ -4,6 +4,10 @@ options:
   createIntermediateGroups: true
   deploymentTarget:
     iOS: "17.0"
+packages:
+  SwiftSoup:
+    url: https://github.com/scinfu/SwiftSoup.git
+    from: 2.7.0
 targets:
   Legado:
     type: application
@@ -11,6 +15,8 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - path: Legado
+    dependencies:
+      - package: SwiftSoup
     info:
       path: Legado/Info.plist
     settings:

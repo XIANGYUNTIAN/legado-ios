@@ -83,38 +83,33 @@ final class BookSourceStore: ObservableObject {
         return URL(string: text)
     }
 
-    /// 抓取远端文本（书源 JSON），附带移动端 UA 以规避部分站点拦截
+    /// 抓取远端文本（书源 JSON），委托给统一网络层（移动端 UA + UTF-8/GB18030 解码）
     static func fetchText(from url: URL) async throws -> String {
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 25
-        request.setValue(
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-            forHTTPHeaderField: "User-Agent"
-        )
-        request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            throw SourceFetchError.badStatus(http.statusCode)
+        do {
+            return try await NetworkService.shared.fetchText(
+                from: url,
+                headers: ["Accept": "application/json, text/plain, */*"]
+            )
+        } catch let error as NetworkError {
+            throw Self.mapNetworkError(error)
+        } catch {
+            throw SourceFetchError.encodingFailed
         }
-        guard !data.isEmpty else { throw SourceFetchError.emptyResponse }
-
-        if let text = String(data: data, encoding: .utf8) {
-            return Self.stripBOM(text)
-        }
-        let gbRaw = CFStringConvertEncodingToNSStringEncoding(
-            CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)
-        )
-        if let text = String(data: data, encoding: String.Encoding(rawValue: gbRaw)) {
-            return Self.stripBOM(text)
-        }
-        throw SourceFetchError.encodingFailed
     }
 
+    /// 保留旧接口语义（去除 BOM / 首尾空白），供其他模块复用
     static func stripBOM(_ text: String) -> String {
-        var s = text
-        if s.hasPrefix("\u{FEFF}") { s.removeFirst() }
-        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+        NetworkService.stripBOM(text)
+    }
+
+    /// 将网络层错误映射为书源抓取错误，保持调用方既有提示文案
+    private static func mapNetworkError(_ error: NetworkError) -> Error {
+        switch error {
+        case .badStatus(let code): return SourceFetchError.badStatus(code)
+        case .emptyResponse: return SourceFetchError.emptyResponse
+        case .encodingFailed: return SourceFetchError.encodingFailed
+        default: return SourceFetchError.encodingFailed
+        }
     }
 
     func toggle(_ source: BookSource) {

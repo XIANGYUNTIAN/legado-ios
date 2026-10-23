@@ -158,9 +158,6 @@ final class RuleEngine {
         if rule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return input
         }
-        if rule.hasPrefix("@@") {
-            rule = String(rule.dropFirst(2))
-        }
 
         // ① @put:{"k":"v"} —— 先剥离并求值存入变量
         let putRules = RuleSplitter.extractPutRules(&rule)
@@ -179,9 +176,9 @@ final class RuleEngine {
         case .json:
             return try applyJson(rule, input: input, content: content)
         case .css:
-            throw RuleError.unsupportedMode("CSS（HTML 选择器）")
+            return try applyCssOrXPath(rule, input: input, content: content)
         case .xpath:
-            throw RuleError.unsupportedMode("XPath")
+            return try applyCssOrXPath(rule, input: input, content: content)
         case .webJs:
             throw RuleError.unsupportedMode("WebJs（后台 WebView）")
         case .plain:
@@ -214,6 +211,50 @@ final class RuleEngine {
     private func isPlainLiteral(_ rule: String) -> Bool {
         let syntaxCharacters = CharacterSet(charactersIn: ".#@[]>")
         return rule.rangeOfCharacter(from: syntaxCharacters) == nil
+    }
+
+    // MARK: - CSS / XPath 模式（P1：SwiftSoup）
+
+    /// 统一入口：剥离 `@css:` / `@@` / `@xpath:` 前缀后分别调用 HTML 规则引擎。
+    /// 求值失败时抛出的错误会沿调用链向上给出友好提示，不会导致应用崩溃。
+    private func applyCssOrXPath(_ rule: String, input: Any?, content: String) throws -> Any? {
+        let trimmed = rule.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        if lower.hasPrefix("@css:") {
+            let body = String(trimmed.dropFirst(5))
+            return try applyCss(body, input: input, content: content)
+        }
+        if trimmed.hasPrefix("@@") {
+            let body = String(trimmed.dropFirst(2))
+            return try applyCss(body, input: input, content: content)
+        }
+        if lower.hasPrefix("@xpath:") {
+            let body = String(trimmed.dropFirst(7))
+            return try applyXPath(body, input: input, content: content)
+        }
+        // 裸 XPath（以 / 或 // 开头，由 detectMode 归为 .xpath）
+        return try applyXPath(trimmed, input: input, content: content)
+    }
+
+    private func applyCss(_ body: String, input: Any?, content: String) throws -> Any? {
+        let html = cssRoot(input, content: content)
+        let results = try HtmlRuleEngine.shared.evaluateCss(body, rootHTML: html)
+        return results.isEmpty ? nil : results
+    }
+
+    private func applyXPath(_ path: String, input: Any?, content: String) throws -> Any? {
+        let html = cssRoot(input, content: content)
+        let results = try HtmlRuleEngine.shared.evaluateXPath(path, rootHTML: html)
+        return results.isEmpty ? nil : results
+    }
+
+    /// CSS / XPath 的求值根：优先使用上一步产出的 HTML 片段（支持 @html 链式），
+    /// 否则使用页面原文 content。
+    private func cssRoot(_ input: Any?, content: String) -> String {
+        if let text = input as? String, !text.isEmpty, text.contains("<") {
+            return text
+        }
+        return content
     }
 
     // MARK: - JSON 模式

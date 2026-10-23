@@ -19,5 +19,15 @@ struct Book: Identifiable, Codable, Equatable {
     var addedAt: Date
     var fileSize: Int64?
 
+    /// 规则阅读专用：书籍所在书源的 bookSourceUrl（为空表示本地书籍）
+    var sourceId: String?
+    /// 规则阅读专用：书籍在书源站点上的原始 URL（目录/正文抓取的起点）
+    var bookUrl: String?
+
     var displayTitle: String { title.isEmpty ? "未命名" : title }
+
+    /// 是否走规则阅读（需要书源 + 书籍 URL）
+    var supportsRuleReading: Bool {
+        (sourceId?.isEmpty ?? true) == false && (bookUrl?.isEmpty ?? true) == false
+    }
 }
