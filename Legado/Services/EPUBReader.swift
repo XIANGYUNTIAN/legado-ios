@@ -195,11 +195,10 @@ final class EPUBReader {
     private func parseContainerXML(_ xml: String) throws -> String {
         do {
             let doc = try SwiftSoup.parse(xml)
-            guard let rootfile = doc.select("rootfile").first() else {
+            guard let rootfile = (try? doc.select("rootfile")).first() else {
                 throw EPUBError.noOPF
             }
-            let path = rootfile.attr("full-path")
-            guard !path.isEmpty else { throw EPUBError.noOPF }
+            guard let path = (try? rootfile.attr("full-path")), !path.isEmpty else { throw EPUBError.noOPF }
             return path
         } catch let error as EPUBError {
             throw error
@@ -214,19 +213,19 @@ final class EPUBReader {
             // manifest: id -> href
             var manifest: [String: String] = [:]
             var titles: [String: String] = [:]
-            for item in doc.select("manifest item") {
-                let id = item.attr("id")
-                let href = item.attr("href")
-                let title = item.attr("title")
-                if !id.isEmpty, !href.isEmpty {
-                    manifest[id] = href
-                    if !title.isEmpty { titles[id] = title }
-                }
+            guard let manifestItems = (try? doc.select("manifest item")) else { return [] }
+            for item in manifestItems {
+                guard let id = (try? item.attr("id")), !id.isEmpty else { continue }
+                guard let href = (try? item.attr("href")), !href.isEmpty else { continue }
+                let title = (try? item.attr("title")) ?? ""
+                manifest[id] = href
+                if !title.isEmpty { titles[id] = title }
             }
             // spine itemref
             var spine: [SpineItem] = []
-            for itemref in doc.select("spine itemref") {
-                let idref = itemref.attr("idref")
+            guard let spineItems = (try? doc.select("spine itemref")) else { return [] }
+            for itemref in spineItems {
+                guard let idref = (try? itemref.attr("idref")) else { continue }
                 guard let href = manifest[idref] else { continue }
                 let title = titles[idref] ?? (href as NSString).deletingPathExtension
                 spine.append(SpineItem(href: href, title: title))
@@ -244,7 +243,7 @@ final class EPUBReader {
         let doc = try SwiftSoup.parse(html)
         // 去除脚本与样式内容
         try? doc.select("script, style").remove()
-        let body = doc.select("body").first() ?? doc
+        let body = (try? doc.select("body")).first() ?? doc
         let text = (try? body.text()) ?? ""
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
