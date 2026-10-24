@@ -74,7 +74,7 @@ struct RuleSetDetailView: View {
             ("bookUrl", ruleSet.bookUrl),
             ("coverUrl", ruleSet.coverUrl),
             ("wordCount", ruleSet.wordCount),
-            ("init", ruleSet.`init`),
+            ("init", ruleSet.initRule),
             ("tocUrl", ruleSet.tocUrl),
             ("downloadUrls", ruleSet.downloadUrls),
             ("chapterList", ruleSet.chapterList),

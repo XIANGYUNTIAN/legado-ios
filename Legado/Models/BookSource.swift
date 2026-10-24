@@ -27,7 +27,7 @@ struct SourceRuleSet: Codable, Equatable {
     var coverUrl: String?
     var wordCount: String?
     // 详情（BookInfoRule）
-    var `init`: String?
+    var initRule: String?
     var tocUrl: String?
     var downloadUrls: String?
     // 目录（TocRule）
@@ -65,7 +65,7 @@ struct SourceRuleSet: Codable, Equatable {
         bookUrl = Self.lenientString(c, .bookUrl)
         coverUrl = Self.lenientString(c, .coverUrl)
         wordCount = Self.lenientString(c, .wordCount)
-        `init` = Self.lenientString(c, .initRule)
+        initRule = Self.lenientString(c, .initRule)
         tocUrl = Self.lenientString(c, .tocUrl)
         downloadUrls = Self.lenientString(c, .downloadUrls)
         chapterList = Self.lenientString(c, .chapterList)
@@ -90,7 +90,7 @@ struct SourceRuleSet: Codable, Equatable {
 
     var isEmpty: Bool {
         [bookList, name, author, intro, kind, lastChapter, bookUrl, coverUrl, wordCount,
-         `init`, tocUrl, downloadUrls, chapterList, chapterName, chapterUrl, isVolume,
+         initRule, tocUrl, downloadUrls, chapterList, chapterName, chapterUrl, isVolume,
          nextTocUrl, content, nextContentUrl, subContent, title]
             .allSatisfy { $0?.isEmpty ?? true }
     }
