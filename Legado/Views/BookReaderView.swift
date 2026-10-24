@@ -68,6 +68,10 @@ struct BookReaderView: View {
     @State private var suppressTopSentinel = false
     /// 视口高度（由 ScrollView 背景几何测量，供底部预加载阈值使用）
     @State private var viewportHeight: CGFloat = 0
+    /// 最近一次测得的内容整体矩形（minY 反映滚动偏移、height 即内容高）。
+    /// 单独存下来是为了：哨兵「武装」晚于首帧布局时，仍能基于已有几何补做一次判定，
+    /// 否则短章（内容不足一屏）在武装前就已完成布局，之后再无偏好变化可触发，永远不衔接下一章。
+    @State private var contentRect: CGRect = .zero
 
     /// 连续加载的章节段上限，防止超长阅读会话内存无限增长
     private let maxSegments = 25
@@ -141,15 +145,12 @@ struct BookReaderView: View {
                         .id("segTop-\(chapterIndex)")
                     }
 
-                    // 底部哨兵：滚到此处自动衔接下一章。
-                    // id 绑定 lastLoadedIndex——追加后 id 变化，SwiftUI 视为新视图并重新触发 onAppear，
-                    // 与上方 PreferenceKey 预加载互为兜底，确保短章也能连续衔接。
+                    // 底部哨兵：仅作为内容末端标记与滚动余量。
+                    // 注意：VStack 非惰性容器，onAppear 在首帧即触发（此时哨兵尚未武装、且只会触发一次），
+                    // 因此不再依赖 onAppear 触发加载，统一由 evaluatePreload 的几何判定驱动。
                     Color.clear
                         .frame(height: 1)
-                        .id("bottomSentinel-\(lastLoadedIndex)")
-                        .onAppear {
-                            if sentinelsArmed, !isLoadingMore { loadNextSegment() }
-                        }
+                        .id("bottomSentinel")
 
                     if isLoadingMore {
                         ProgressView()
@@ -178,26 +179,26 @@ struct BookReaderView: View {
                 }
             )
             .onPreferenceChange(ScrollViewportKey.self) { h in
+                guard h > 0 else { return }
                 viewportHeight = h
+                // 视口高度常晚于内容首帧到达（首帧为 0）：补做一次判定，
+                // 否则首屏就落在底部时无人触发。
+                evaluatePreload(proxy: proxy)
             }
             .onPreferenceChange(ScrollContentKey.self) { rect in
+                guard rect.height > 0 else { return }
+                contentRect = rect
                 let offset = -rect.minY
-                let contentH = rect.height
-                let vpH = viewportHeight
                 furthestTopOffset = max(furthestTopOffset, offset)
                 // 向下滚动超过阈值后解除前插抑制，允许后续回顶预加载
                 if offset > 200 { suppressTopSentinel = false }
-                // 接近底部：预加载下一章
-                if offset + vpH >= contentH - 200 {
-                    if sentinelsArmed, !isLoadingMore { loadNextSegment() }
-                }
-                // 接近顶部：预加载上一章（需曾向下滚动超过阈值且未被前插抑制）
-                if offset <= 200 {
-                    guard sentinelsArmed, !isLoadingMore,
-                          !suppressTopSentinel, furthestTopOffset > 200 else { return }
-                    suppressTopSentinel = true
-                    loadPrevSegment(proxy: proxy)
-                }
+                evaluatePreload(proxy: proxy)
+            }
+            // 哨兵武装完成的瞬间补做一次判定：
+            // 短章/内容不足一屏时，武装前布局已结束、之后不再有偏好变化，
+            // 必须在此主动衔接，否则表现为「滑到底也不换章」。
+            .onChange(of: sentinelsArmed) { _, armed in
+                if armed { evaluatePreload(proxy: proxy) }
             }
             .onChange(of: scrollToTopTrigger) { _, _ in
                 withAnimation { proxy.scrollTo("topAnchor", anchor: .top) }
@@ -384,15 +385,40 @@ struct BookReaderView: View {
         bookStore.updateProgress(bookID: book.id, chapterIndex: index)
     }
 
+    /// 统一的预加载判定（唯一触发入口）。
+    /// - 底部：距内容末端 200pt 内即衔接下一章；内容不足一屏（短章）时同样成立，
+    ///   因此连续几个短章会被依次追加直至填满视口（追加后内容变高→偏好变化→再次判定）。
+    /// - 顶部：需曾向下滚动 >200pt、未被前插抑制、且确实存在上一章。
+    /// 之所以不再用「哨兵 onAppear」，是因为 VStack 会在首帧为所有子视图调用 onAppear，
+    /// 那一刻哨兵尚未武装，且之后不再重复调用 —— 正是「滑到底仍不换章」的成因。
+    private func evaluatePreload(proxy: ScrollViewProxy) {
+        guard sentinelsArmed, !isLoadingMore else { return }
+        guard contentRect.height > 0, viewportHeight > 0 else { return }
+        let offset = max(0, -contentRect.minY)
+        let nearBottom = offset + viewportHeight >= contentRect.height - 200
+        if nearBottom, lastLoadedIndex + 1 < chapters.count, segments.count < maxSegments {
+            // 首屏自动填充（用户尚未滚动过）只补正文、不推进书签，
+            // 否则刚打开一个短章就会把进度悄悄改到后面几章。
+            loadNextSegment(advanceProgress: furthestTopOffset > 1)
+            return
+        }
+        if offset <= 200, firstLoadedIndex > 0,
+           !suppressTopSentinel, furthestTopOffset > 200 {
+            suppressTopSentinel = true
+            loadPrevSegment(proxy: proxy)
+        }
+    }
+
     /// 滚动到底部：衔接下一章
-    private func loadNextSegment() {
+    /// - Parameter advanceProgress: 是否把阅读进度推进到新章节（首屏填充时为 false）
+    private func loadNextSegment(advanceProgress: Bool = true) {
         guard sentinelsArmed, !isLoadingMore else { return }
         let next = lastLoadedIndex + 1
         guard chapters.indices.contains(next), segments.count < maxSegments else { return }
         isLoadingMore = true
         let chapter = chapters[next]
         if let text = chapter.text {
-            appendSegment(chapter: chapter, text: text)
+            appendSegment(chapter: chapter, text: text, advanceProgress: advanceProgress)
             isLoadingMore = false
         } else {
             Task {
@@ -400,7 +426,7 @@ struct BookReaderView: View {
                 await MainActor.run {
                     // 期间用户可能已切章（segments 被重置），按首尾索引校验
                     if lastLoadedIndex == next - 1 {
-                        appendSegment(chapter: chapter, text: text)
+                        appendSegment(chapter: chapter, text: text, advanceProgress: advanceProgress)
                     }
                     isLoadingMore = false
                 }
@@ -431,9 +457,10 @@ struct BookReaderView: View {
         }
     }
 
-    private func appendSegment(chapter: ReaderChapter, text: String) {
+    private func appendSegment(chapter: ReaderChapter, text: String, advanceProgress: Bool = true) {
         segments.append(ReaderChapter(title: chapter.title, text: text, url: chapter.url))
         lastLoadedIndex += 1
+        guard advanceProgress else { return }
         currentIndex = lastLoadedIndex
         bookStore.updateProgress(bookID: book.id, chapterIndex: lastLoadedIndex)
     }
@@ -450,11 +477,13 @@ struct BookReaderView: View {
         proxy.scrollTo("segEnd-\(firstLoadedIndex)", anchor: .bottom)
     }
 
-    /// 切章后短暂解除哨兵武装，避免刚切到新章就自动衔接邻章
+    /// 切章后短暂解除哨兵武装，避免刚切到新章就自动衔接邻章。
+    /// 武装完成时会由 onChange(of: sentinelsArmed) 补做一次几何判定，
+    /// 因此这里可以把等待时间压到 250ms —— 既不误触发，又不会让用户滑到底后空等。
     private func rearmSentinels() {
         sentinelsArmed = false
         Task {
-            try? await Task.sleep(nanoseconds: 600_000_000)
+            try? await Task.sleep(nanoseconds: 250_000_000)
             await MainActor.run { sentinelsArmed = true }
         }
     }

@@ -22,12 +22,16 @@ targets:
       properties:
         CFBundleDisplayName: Legado
         CFBundleShortVersionString: "1.0.0"
-        CFBundleVersion: "3"
+        CFBundleVersion: "4"
         LSRequiresIPhoneOS: true
         NSCameraUsageDescription: 用于扫描书源二维码
+        # 【重要】只能保留 NSAllowsArbitraryLoads 一个键。
+        # Apple 文档：iOS 10+ 若同时存在 NSAllowsLocalNetworking /
+        # NSAllowsArbitraryLoadsInWebContent / NSAllowsArbitraryLoadsForMedia，
+        # 则 NSAllowsArbitraryLoads 会被「忽略并按 NO 处理」→ HTTP 仍被 ATS 拦截（-1022）。
+        # 曾因多加了 NSAllowsLocalNetworking 导致书源搜索全部报 ATS 错误。
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
-          NSAllowsLocalNetworking: true
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
