@@ -17,7 +17,6 @@ struct ExploredBook: Identifiable {
 
     init(name: String, author: String, intro: String, bookUrl: String,
          coverUrl: String, lastChapter: String, sourceId: String = "", sourceName: String = "") {
-        self.id = UUID()
         self.name = name
         self.author = author
         self.intro = intro
