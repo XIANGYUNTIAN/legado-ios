@@ -4,7 +4,6 @@ import UniformTypeIdentifiers
 struct BookshelfView: View {
     @EnvironmentObject private var bookStore: BookStore
 
-    @State private var showDocPicker = false
     @State private var showURLSheet = false
     @State private var showSearch = false
     @State private var message: String?
@@ -55,7 +54,13 @@ struct BookshelfView: View {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Button {
-                        showDocPicker = true
+                        // 顶层 VC 直接呈现文档选择器：绕开 SwiftUI 呈现栈
+                        // （.fileImporter 由 Menu 触发时可能不呈现），且系统
+                        // asCopy 拷贝本地文件，无安全作用域/iCloud 依赖
+                        DocumentImporter.present(
+                            onPick: { url in handlePickedURL(url) },
+                            onCancel: { }
+                        )
                     } label: {
                         Label("本地导入书籍（TXT / EPUB）", systemImage: "square.and.arrow.down.on.square")
                     }
@@ -69,34 +74,8 @@ struct BookshelfView: View {
                 }
             }
         }
-        // 本地导入：内容类型用 .data 兜底——书籍文件常无扩展名或来自云盘
-        // （UTI 不是 plain-text），按类型过滤会把它们藏掉导致"选不到文件"；
-        // 格式校验与内容嗅探在 importBookData 内完成，选错会给明确提示。
-        // fileImporter 的 success 回调里安全作用域 URL 才有效，必须同步读取。
-        .fileImporter(
-            isPresented: $showDocPicker,
-            allowedContentTypes: [.data],
-            allowsMultipleSelection: false
-        ) { result in
-            switch result {
-            case .success(let urls):
-                guard let url = urls.first else { return }
-                let secured = url.startAccessingSecurityScopedResource()
-                defer { if secured { url.stopAccessingSecurityScopedResource() } }
-                do {
-                    let data = try Data(contentsOf: url)
-                    handlePickedData(
-                        data,
-                        name: url.deletingPathExtension().lastPathComponent,
-                        ext: url.pathExtension.lowercased()
-                    )
-                } catch {
-                    showMessage("读取文件失败：\(error.localizedDescription)", true)
-                }
-            case .failure(let error):
-                showMessage(error.localizedDescription, true)
-            }
-        }
+        // 本地导入已改为 DocumentImporter.present（顶层 VC + asCopy），
+        // 不再依赖 SwiftUI .fileImporter 与安全作用域 URL。
         .sheet(isPresented: $showURLSheet) {
             AddBookByURLView { msg, isErr in
                 message = msg
@@ -128,10 +107,23 @@ struct BookshelfView: View {
         message = msg
         messageIsError = isError
         showMsg = true
-        showDocPicker = false
     }
 
-    /// 数据已在回调内同步读取，这里只做异步骤落盘与入清单
+    /// asCopy 模式给出的 URL 指向系统拷贝到本地临时目录的文件，可直接读
+    private func handlePickedURL(_ url: URL) {
+        do {
+            let data = try Data(contentsOf: url)
+            handlePickedData(
+                data,
+                name: url.deletingPathExtension().lastPathComponent,
+                ext: url.pathExtension.lowercased()
+            )
+        } catch {
+            showMessage("读取文件失败：\(error.localizedDescription)", true)
+        }
+    }
+
+    /// 数据已读取，这里只做异步骤落盘与入清单
     private func handlePickedData(_ data: Data, name: String, ext: String) {
         Task {
             do {

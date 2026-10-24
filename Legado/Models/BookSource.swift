@@ -149,12 +149,17 @@ struct BookSource: Codable, Identifiable, Equatable {
         return URLSanitizer.sanitize(raw) != nil
     }
 
-    /// 是否具备搜索能力（搜索地址 + 搜索规则容器）
+    /// 是否具备搜索能力（搜索地址 + 搜索规则容器）。
+    /// 占位符兼容两种：新格式 `{{key}}` 与遗留格式 `searchKey`
+    /// （legado ImportOldData 会把 searchKey 替换为 {{key}}，说明存量书源
+    /// 大量使用 searchKey，原生默认书源即是如此）。
     var supportsSearch: Bool {
         guard let raw = searchUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty else { return false }
-        guard raw.contains("{{key}}") else { return false }
-        guard URLSanitizer.sanitize(raw) != nil else { return false }
+        guard raw.contains("{{key}}") || raw.contains("searchKey") else { return false }
+        // 地址部分（截掉 ,{"method":...} 选项后缀）需为可请求链接
+        let address = raw.components(separatedBy: ",{").first ?? raw
+        guard URLSanitizer.sanitize(address) != nil else { return false }
         guard let list = ruleSearch?.bookList, !list.isEmpty else { return false }
         return true
     }

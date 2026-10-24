@@ -20,6 +20,37 @@ struct BookSearchView: View {
         sourceStore.sources.filter { $0.supportsSearch && $0.enabled }
     }
 
+    /// 无可用搜索书源时的可操作诊断：按条件逐层排查，告诉用户差在哪、怎么补
+    private var searchUnavailableReason: String {
+        let all = sourceStore.sources
+        guard !all.isEmpty else {
+            return "尚未导入任何书源。请到「书源」页，点右上角 + 或扫码导入 legado 书源 JSON。"
+        }
+        let trimmedSearchURLCount = all.filter {
+            !($0.searchUrl ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }.count
+        let withPlaceholder = all.filter {
+            let raw = $0.searchUrl ?? ""
+            return raw.contains("{{key}}") || raw.contains("searchKey")
+        }.count
+        let withRule = all.filter { !($0.ruleSearch?.bookList ?? "").isEmpty }.count
+        let disabledCount = all.filter { !$0.enabled }.count
+
+        if trimmedSearchURLCount < all.count {
+            return "已导入 \(all.count) 个书源，仅 \(trimmedSearchURLCount) 个带 searchUrl 字段。缺失该字段的多为旧版本导入（当时未持久化 searchUrl）——请到「书源」页重新导入同一份书源 JSON 即可刷新。"
+        }
+        if withPlaceholder < trimmedSearchURLCount {
+            return "书源的搜索地址均不含 {{key}} / searchKey 占位符，无法拼接搜索请求。"
+        }
+        if withRule < withPlaceholder {
+            return "书源缺少 ruleSearch.bookList 规则，无法解析搜索结果。"
+        }
+        if disabledCount == all.count {
+            return "全部 \(all.count) 个书源均被停用。请到「书源」页开启后再搜索。"
+        }
+        return "已导入 \(all.count) 个书源，但均不满足搜索条件（需 searchUrl 含 {{key}}/searchKey 占位符 + ruleSearch.bookList 规则，且书源处于启用状态）。"
+    }
+
     var body: some View {
         NavigationStack {
             Group {
@@ -27,7 +58,7 @@ struct BookSearchView: View {
                     ContentUnavailableView {
                         Label("没有可搜索的书源", systemImage: "magnifyingglass")
                     } description: {
-                        Text("请先导入带 searchUrl 与搜索规则的 legado 书源")
+                        Text(searchUnavailableReason)
                     }
                 } else {
                     searchContent
@@ -180,12 +211,18 @@ struct BookSearchView: View {
             urlPart = rawSearchURL
         }
 
-        guard urlPart.contains("{{key}}") else {
-            errorMessage = "该书源搜索地址缺少 {{key}} 占位符，暂不支持"
+        guard urlPart.contains("{{key}}") || urlPart.contains("searchKey") else {
+            errorMessage = "该书源搜索地址缺少 {{key}}（或遗留 searchKey）占位符，暂不支持"
             return
         }
         let encoded = trimmedKeyword.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? trimmedKeyword
-        let finalString = urlPart.replacingOccurrences(of: "{{key}}", with: encoded)
+        // 占位符替换：{{key}} / searchKey → 关键词；{{searchPage}} / searchPage → 页码。
+        // 顺序：先替换带花括号的页码占位符，避免 searchPage 先被换成 "1" 破坏 {{searchPage}}
+        var finalString = urlPart
+        finalString = finalString.replacingOccurrences(of: "{{key}}", with: encoded)
+        finalString = finalString.replacingOccurrences(of: "searchKey", with: encoded)
+        finalString = finalString.replacingOccurrences(of: "{{searchPage}}", with: "1")
+        finalString = finalString.replacingOccurrences(of: "searchPage", with: "1")
         guard let finalURL = URLSanitizer.sanitize(finalString) else {
             errorMessage = "搜索地址无效：\(urlPart)"
             return

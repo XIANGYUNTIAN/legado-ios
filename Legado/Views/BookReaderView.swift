@@ -17,6 +17,26 @@ extension Array {
     }
 }
 
+// MARK: - 哨兵可见性检测（Preference）
+
+/// 视口全局 frame
+private struct ViewportFrameKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
+}
+
+/// 顶部哨兵全局 minY
+private struct TopSentinelKey: PreferenceKey {
+    static var defaultValue: CGFloat = .greatestFiniteMagnitude
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+/// 底部哨兵全局 minY
+private struct BottomSentinelKey: PreferenceKey {
+    static var defaultValue: CGFloat = .greatestFiniteMagnitude
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
 // MARK: - 阅读器主视图
 
 /// 三种阅读模式统一入口：
@@ -49,6 +69,15 @@ struct BookReaderView: View {
     @State private var scrollToTopTrigger = 0
     /// 哨兵武装：切章后短暂关闭，防止刚切到新章就自动衔接邻章
     @State private var sentinelsArmed = false
+    /// 哨兵可见性检测：视口全局 frame 与两个哨兵的全局 minY
+    /// （onAppear 在内容增长后不重新触发，短章只衔接一次即停，故用逐帧 preference）
+    @State private var viewportFrame: CGRect = .zero
+    @State private var topSentinelMinY: CGFloat = .greatestFiniteMagnitude
+    @State private var bottomSentinelMinY: CGFloat = .greatestFiniteMagnitude
+    /// 顶部哨兵触发条件：曾向下滚动超过 120pt，且回到顶部 80pt 带内
+    @State private var furthestTopOffset: CGFloat = 0
+    /// 前插后抑制顶部哨兵，直到内容顶端回到视口上方（防过渡帧误触发）
+    @State private var suppressTopSentinel = false
 
     /// 连续加载的章节段上限，防止超长阅读会话内存无限增长
     private let maxSegments = 25
@@ -93,13 +122,16 @@ struct BookReaderView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    // 顶部哨兵：滚动到顶部自动衔接上一章
+                    // 顶部哨兵：滚动到顶部自动衔接上一章。
+                    // 用 GeometryReader preference 逐帧检测可见性——onAppear 在
+                    // 内容增长后不会重新触发，短章只会衔接一次即停。
                     Color.clear
                         .frame(height: 1)
                         .id("topAnchor")
-                        .onAppear {
-                            if sentinelsArmed { loadPrevSegment(proxy: proxy) }
-                        }
+                        .background(GeometryReader { g in
+                            Color.clear.preference(key: TopSentinelKey.self,
+                                                   value: g.frame(in: .global).minY)
+                        })
 
                     ForEach(Array(segments.enumerated()), id: \.element.id) { offset, segment in
                         let chapterIndex = firstLoadedIndex + offset
@@ -126,13 +158,13 @@ struct BookReaderView: View {
                         .id("segTop-\(chapterIndex)")
                     }
 
-                    // 底部哨兵：滚动到底部自动衔接下一章
+                    // 底部哨兵：滚动到底部自动衔接下一章（含 80pt 预加载缓冲）
                     Color.clear
                         .frame(height: 1)
-                        .id("bottom")
-                        .onAppear {
-                            if sentinelsArmed { loadNextSegment() }
-                        }
+                        .background(GeometryReader { g in
+                            Color.clear.preference(key: BottomSentinelKey.self,
+                                                   value: g.frame(in: .global).minY)
+                        })
 
                     if isLoadingMore {
                         ProgressView()
@@ -142,10 +174,49 @@ struct BookReaderView: View {
                 }
                 .padding(.horizontal, 20)
             }
+            .background(
+                GeometryReader { g in
+                    Color.clear.preference(key: ViewportFrameKey.self,
+                                           value: g.frame(in: .global))
+                }
+            )
+            .onPreferenceChange(ViewportFrameKey.self) { frame in
+                viewportFrame = frame
+            }
+            .onPreferenceChange(TopSentinelKey.self) { minY in
+                evaluateTopSentinel(minY, proxy: proxy)
+            }
+            .onPreferenceChange(BottomSentinelKey.self) { minY in
+                evaluateBottomSentinel(minY)
+            }
             .onChange(of: scrollToTopTrigger) { _, _ in
                 withAnimation { proxy.scrollTo("topAnchor", anchor: .top) }
             }
         }
+    }
+
+    // MARK: - 哨兵判定
+
+    /// 底部哨兵进入视口（含 80pt 预加载缓冲）→ 衔接下一章
+    private func evaluateBottomSentinel(_ minY: CGFloat) {
+        guard sentinelsArmed, !isLoadingMore, viewportFrame != .zero else { return }
+        if minY <= viewportFrame.maxY + 80 {
+            loadNextSegment()
+        }
+    }
+
+    /// 顶部哨兵：需同时满足——曾向下滚动超过 120pt（排除初始态/刚切章）、
+    /// 回到顶部 80pt 带内、未被前插抑制（排除前插后的过渡帧）。
+    private func evaluateTopSentinel(_ minY: CGFloat, proxy: ScrollViewProxy) {
+        guard sentinelsArmed, !isLoadingMore, viewportFrame != .zero else { return }
+        let scrolledDown = viewportFrame.minY - minY
+        // 内容顶端回到视口上方 → 解除前插抑制
+        if scrolledDown > 0 { suppressTopSentinel = false }
+        furthestTopOffset = max(furthestTopOffset, scrolledDown)
+        guard !suppressTopSentinel else { return }
+        guard furthestTopOffset > 120, scrolledDown <= 80 else { return }
+        suppressTopSentinel = true
+        loadPrevSegment(proxy: proxy)
     }
 
     private var currentChapter: ReaderChapter? {
@@ -320,6 +391,9 @@ struct BookReaderView: View {
             }
         }
         scrollToTopTrigger += 1
+        // 显式切章后重置顶部哨兵的滚动历史与抑制，避免刚切章就误衔接邻章
+        furthestTopOffset = 0
+        suppressTopSentinel = false
         rearmSentinels()
         bookStore.updateProgress(bookID: book.id, chapterIndex: index)
     }
@@ -383,6 +457,9 @@ struct BookReaderView: View {
         firstLoadedIndex -= 1
         currentIndex = firstLoadedIndex
         bookStore.updateProgress(bookID: book.id, chapterIndex: firstLoadedIndex)
+        // 前插后内容顶端暂落在视口下方，抑制顶部哨兵，直到 scrollTo 生效、
+        // 内容顶端回到视口上方后由 evaluateTopSentinel 自动解除
+        suppressTopSentinel = true
         // 视口保持：滚到新章节末尾，使原有阅读位置基本不变
         proxy.scrollTo("segEnd-\(firstLoadedIndex)", anchor: .bottom)
     }
@@ -428,6 +505,8 @@ struct BookReaderView: View {
                     }
                     isLoading = false
                     scrollToTopTrigger += 1
+                    furthestTopOffset = 0
+                    suppressTopSentinel = false
                     rearmSentinels()
                 }
                 // 网络章节需单独抓取正文
