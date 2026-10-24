@@ -15,6 +15,38 @@ struct ScrollViewportKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
+/// iOS 18 滚动几何触发器。
+///
+/// PreferenceKey + GeometryReader 的滚动偏移跟踪在某些 SwiftUI 版本/场景下会失效
+/// （坐标空间语义差异导致 minY 始终为 0），这正是「滑到底仍不换章」反复修复仍失败的根。
+/// iOS 18 的 onScrollGeometryChange 是官方推荐的一等方案，这里作为主触发；
+/// iOS 17 仍由 PreferenceKey 路径兜底（evaluatePreload 会回退到 contentRect）。
+private struct ScrollGeometryTriggerModifier: ViewModifier {
+    let proxy: ScrollViewProxy
+    @Binding var lastScrollGeo: (Double, Double, Double)
+    let evaluate: @MainActor (ScrollViewProxy) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content
+                // 跟踪 (visibleRect.minY, visibleRect.maxY, contentSize.height)：
+                // - 滚动时 visibleRect 变化 → 触发滑到底/回顶；
+                // - 内容增长（追加短章）时 contentSize.height 变化 → 触发连续填充。
+                // 三元组比 Bool 更稳：返回 Bool 时 action 只在翻转时触发一次，
+                // 短章填不满一屏时会卡在 true 不再触发。
+                .onScrollGeometryChange(for: (Double, Double, Double).self) { geo in
+                    (geo.visibleRect.minY, geo.visibleRect.maxY, geo.contentSize.height)
+                } action: { _, newValue in
+                    lastScrollGeo = newValue
+                    evaluate(proxy)
+                }
+        } else {
+            content
+        }
+    }
+}
+
 struct ReaderChapter: Identifiable {
     let id = UUID()
     let title: String
@@ -72,6 +104,10 @@ struct BookReaderView: View {
     /// 单独存下来是为了：哨兵「武装」晚于首帧布局时，仍能基于已有几何补做一次判定，
     /// 否则短章（内容不足一屏）在武装前就已完成布局，之后再无偏好变化可触发，永远不衔接下一章。
     @State private var contentRect: CGRect = .zero
+    /// iOS 18 onScrollGeometryChange 测得的 (visibleRect.minY, visibleRect.maxY, contentSize.height)。
+    /// 三元组在「滚动」与「内容增长」时都会变化，因此既能触发滑到底、也能触发短章连续填充。
+    /// 为 (0,0,0) 时表示当前未启用（iOS 17 回退到 contentRect/viewportHeight）。
+    @State private var lastScrollGeo: (Double, Double, Double) = (0, 0, 0)
 
     /// 连续加载的章节段上限，防止超长阅读会话内存无限增长
     private let maxSegments = 25
@@ -188,10 +224,9 @@ struct BookReaderView: View {
             .onPreferenceChange(ScrollContentKey.self) { rect in
                 guard rect.height > 0 else { return }
                 contentRect = rect
-                let offset = -rect.minY
-                furthestTopOffset = max(furthestTopOffset, offset)
-                // 向下滚动超过阈值后解除前插抑制，允许后续回顶预加载
-                if offset > 200 { suppressTopSentinel = false }
+                // furthestTopOffset / suppressTopSentinel 的维护统一在 evaluatePreload
+                // 内完成（同时覆盖 iOS 18 onScrollGeometryChange 与 iOS 17 PreferenceKey），
+                // 此处仅传递几何数据。
                 evaluatePreload(proxy: proxy)
             }
             // 哨兵武装完成的瞬间补做一次判定：
@@ -203,6 +238,13 @@ struct BookReaderView: View {
             .onChange(of: scrollToTopTrigger) { _, _ in
                 withAnimation { proxy.scrollTo("topAnchor", anchor: .top) }
             }
+            // iOS 18 主触发：onScrollGeometryChange（滚动与内容增长都会触发）。
+            // iOS 17 由上方 onPreferenceChange 兜底。
+            .modifier(ScrollGeometryTriggerModifier(
+                proxy: proxy,
+                lastScrollGeo: $lastScrollGeo,
+                evaluate: { [self] proxy in self.evaluatePreload(proxy: proxy) }
+            ))
         }
     }
 
@@ -387,22 +429,44 @@ struct BookReaderView: View {
 
     /// 统一的预加载判定（唯一触发入口）。
     /// - 底部：距内容末端 200pt 内即衔接下一章；内容不足一屏（短章）时同样成立，
-    ///   因此连续几个短章会被依次追加直至填满视口（追加后内容变高→偏好变化→再次判定）。
+    ///   因此连续几个短章会被依次追加直至填满视口（追加后内容变高→再次判定）。
     /// - 顶部：需曾向下滚动 >200pt、未被前插抑制、且确实存在上一章。
     /// 之所以不再用「哨兵 onAppear」，是因为 VStack 会在首帧为所有子视图调用 onAppear，
-    /// 那一刻哨兵尚未武装，且之后不再重复调用 —— 正是「滑到底仍不换章」的成因。
+    /// 那一刻哨兵尚未武装、且之后不再重复调用 —— 正是「滑到底仍不换章」的成因。
+    /// 优先使用 iOS 18 的 onScrollGeometryChange 几何（滚动与内容增长都会触发），
+    /// 回退到 iOS 17 的 PreferenceKey 几何。
     private func evaluatePreload(proxy: ScrollViewProxy) {
         guard sentinelsArmed, !isLoadingMore else { return }
-        guard contentRect.height > 0, viewportHeight > 0 else { return }
-        let offset = max(0, -contentRect.minY)
-        let nearBottom = offset + viewportHeight >= contentRect.height - 200
+        let nearBottom: Bool
+        let nearTop: Bool
+        // 滚动偏移量（距内容顶端的距离），两种几何路径各自换算后统一维护到
+        // furthestTopOffset，使「曾向下滚动过」的判定不依赖任一特定触发源。
+        let offset: CGFloat
+        if lastScrollGeo != (0, 0, 0) {
+            let (minY, maxY, contentH) = lastScrollGeo
+            guard contentH > 0 else { return }
+            // visibleRect 已含 safe area 内缩：maxY 即可视区域底边在内容坐标系中的位置，
+            // minY 即顶边；scroll offset = -minY（minY 为负时表示已向下滚动）。
+            offset = max(0, -minY)
+            nearBottom = maxY >= contentH - 200
+            nearTop = minY <= 200
+        } else {
+            guard contentRect.height > 0, viewportHeight > 0 else { return }
+            offset = max(0, -contentRect.minY)
+            nearBottom = offset + viewportHeight >= contentRect.height - 200
+            nearTop = offset <= 200
+        }
+        // 向下滚动超过阈值后解除前插抑制，允许后续回顶预加载；
+        // 此处统一维护，避免仅依赖 onPreferenceChange（iOS 18 上可能不可靠）。
+        furthestTopOffset = max(furthestTopOffset, offset)
+        if offset > 200 { suppressTopSentinel = false }
         if nearBottom, lastLoadedIndex + 1 < chapters.count, segments.count < maxSegments {
             // 首屏自动填充（用户尚未滚动过）只补正文、不推进书签，
             // 否则刚打开一个短章就会把进度悄悄改到后面几章。
             loadNextSegment(advanceProgress: furthestTopOffset > 1)
             return
         }
-        if offset <= 200, firstLoadedIndex > 0,
+        if nearTop, firstLoadedIndex > 0,
            !suppressTopSentinel, furthestTopOffset > 200 {
             suppressTopSentinel = true
             loadPrevSegment(proxy: proxy)
@@ -471,7 +535,8 @@ struct BookReaderView: View {
         currentIndex = firstLoadedIndex
         bookStore.updateProgress(bookID: book.id, chapterIndex: firstLoadedIndex)
         // 前插后内容顶端暂落在视口下方，抑制顶部预加载，直到用户再次向下
-        // 滚动超过阈值后由 onScrollGeometryChange 自动解除
+        // 滚动超过阈值后由 evaluatePreload 统一解除（覆盖 onScrollGeometryChange
+        // 与 PreferenceKey 两条几何路径）。
         suppressTopSentinel = true
         // 视口保持：滚到新章节末尾，使原有阅读位置基本不变
         proxy.scrollTo("segEnd-\(firstLoadedIndex)", anchor: .bottom)

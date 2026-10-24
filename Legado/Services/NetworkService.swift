@@ -207,6 +207,33 @@ final class NetworkService: ObservableObject {
             throw NetworkError.invalidURL
         }
 
+        var lastError: Error = NetworkError.network("请求失败")
+        // 瞬时错误（连接被丢弃 / 无法连接 / 超时）重试一次：
+        // 中文书源站点在弱网或反爬时偶发掉连接，单次重试可显著减少「全部失败」。
+        for attempt in 0..<2 {
+            do {
+                return try await attemptRequest(url: url, method: method, body: body,
+                                                headers: headers, timeout: timeout)
+            } catch let error as NetworkError {
+                guard Self.isTransient(error) else { throw error }
+                lastError = error
+            } catch {
+                throw NetworkError.network(error.localizedDescription)
+            }
+            if attempt == 0 {
+                if Task.isCancelled { throw NetworkError.cancelled }
+                try? await Task.sleep(nanoseconds: 600_000_000)  // 0.6s
+            }
+        }
+        throw lastError
+    }
+
+    /// 单次实际请求（不含重试逻辑）。
+    private func attemptRequest(url: URL,
+                                method: String,
+                                body: Data?,
+                                headers: [String: String]?,
+                                timeout: TimeInterval?) async throws -> (Data, HTTPURLResponse) {
         var request = URLRequest(url: url)
         request.httpMethod = method.uppercased()
         request.timeoutInterval = timeout ?? Self.defaultTimeout
@@ -246,10 +273,19 @@ final class NetworkService: ObservableObject {
             case .unsupportedURL:
                 throw NetworkError.invalidURL
             default:
-                throw NetworkError.network(urlError.localizedDescription)
+                // 附上错误码与 host，便于定位「连接被丢弃」是服务器问题还是代码问题
+                throw NetworkError.network("\(urlError.code.rawValue) \(url.host ?? "")：\(urlError.localizedDescription)")
             }
         } catch {
             throw NetworkError.network(error.localizedDescription)
+        }
+    }
+
+    /// 判定是否为值得重试的瞬时错误。
+    private static func isTransient(_ error: NetworkError) -> Bool {
+        switch error {
+        case .network, .timeout: return true
+        default: return false
         }
     }
 
