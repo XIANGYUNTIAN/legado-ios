@@ -11,6 +11,10 @@ enum BookSourceType: Int, Codable {
 
 /// 书源规则集：字段与 legado 书源 JSON 的 ruleSearch / ruleExplore /
 /// ruleBookInfo / ruleToc / ruleContent 完全对齐，未使用的字段留空。
+///
+/// 解码策略（对齐 GSON 的宽松语义）：
+/// - 所有字段可选，缺失 / null 均解析为 nil，绝不因单个字段失败；
+/// - 规则值在个别书源里可能是数字或布尔，统一强转为字符串。
 struct SourceRuleSet: Codable, Equatable {
     // 搜索 / 发现（BookListRule）
     var bookList: String?
@@ -38,11 +42,50 @@ struct SourceRuleSet: Codable, Equatable {
     var subContent: String?
     var title: String?
 
+    /// initRule 的 JSON 键名为 "init"（避开关键字作为 CodingKey 用例）
     enum CodingKeys: String, CodingKey {
         case bookList, name, author, intro, kind, lastChapter, bookUrl, coverUrl, wordCount
-        case `init`, tocUrl, downloadUrls
+        case initRule = "init", tocUrl, downloadUrls
         case chapterList, chapterName, chapterUrl, isVolume, nextTocUrl
         case content, nextContentUrl, subContent, title
+    }
+
+    init() {}
+
+    /// 宽松解码：字段缺失 / null → nil；数字、布尔强转为字符串。
+    /// 这样即使第三方工具导出的规则对象类型不纯，也不会整体导入失败。
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        bookList = Self.lenientString(c, .bookList)
+        name = Self.lenientString(c, .name)
+        author = Self.lenientString(c, .author)
+        intro = Self.lenientString(c, .intro)
+        kind = Self.lenientString(c, .kind)
+        lastChapter = Self.lenientString(c, .lastChapter)
+        bookUrl = Self.lenientString(c, .bookUrl)
+        coverUrl = Self.lenientString(c, .coverUrl)
+        wordCount = Self.lenientString(c, .wordCount)
+        `init` = Self.lenientString(c, .initRule)
+        tocUrl = Self.lenientString(c, .tocUrl)
+        downloadUrls = Self.lenientString(c, .downloadUrls)
+        chapterList = Self.lenientString(c, .chapterList)
+        chapterName = Self.lenientString(c, .chapterName)
+        chapterUrl = Self.lenientString(c, .chapterUrl)
+        isVolume = Self.lenientString(c, .isVolume)
+        nextTocUrl = Self.lenientString(c, .nextTocUrl)
+        content = Self.lenientString(c, .content)
+        nextContentUrl = Self.lenientString(c, .nextContentUrl)
+        subContent = Self.lenientString(c, .subContent)
+        title = Self.lenientString(c, .title)
+    }
+
+    /// 依次尝试 String → Int → Double → Bool，覆盖书源 JSON 里个别非字符串规则值
+    private static func lenientString(_ c: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) -> String? {
+        if let s = try? c.decodeIfPresent(String.self, forKey: key) { return s }
+        if let i = try? c.decodeIfPresent(Int.self, forKey: key) { return String(i) }
+        if let d = try? c.decodeIfPresent(Double.self, forKey: key) { return String(d) }
+        if let b = try? c.decodeIfPresent(Bool.self, forKey: key) { return String(b) }
+        return nil
     }
 
     var isEmpty: Bool {
@@ -54,7 +97,12 @@ struct SourceRuleSet: Codable, Equatable {
 }
 
 /// 书源实体：与 legado BookSource JSON 一一对应。
-/// 所有可选字段均带默认值，保证数组中个别字段异常不会导致整体导入失败。
+///
+/// 解码策略（对齐 GSON 的宽松语义，这是修复「不是合法的书源 JSON」误报的关键）：
+/// Swift 合成 Decodable **不会使用属性默认值**——非可选字段的键一旦缺失就整体抛
+/// keyNotFound。legado 原生模型里 `bookSourceComment` 等字段可空，GSON 导出时直接
+/// 省略该键，于是用户从阅读 App 导出的书源 JSON 普遍缺少这些键，导入必然失败。
+/// 因此这里全部改为 `decodeIfPresent` + 默认值，并对类型做宽松强转。
 struct BookSource: Codable, Identifiable, Equatable {
     var bookSourceUrl: String = ""
     var bookSourceName: String = ""
@@ -87,16 +135,151 @@ struct BookSource: Codable, Identifiable, Equatable {
         }
     }
 
-    /// 支持单个书源对象或书源数组（对应 ImportBookSourceViewModel 的四种输入之一）
+    enum CodingKeys: String, CodingKey {
+        case bookSourceUrl, bookSourceName, bookSourceGroup, bookSourceType
+        case bookSourceComment, enabled, enabledExplore
+        case header, loginUrl, jsLib, concurrentRate, exploreUrl, lastUpdateTime
+        case ruleSearch, ruleBookInfo, ruleToc, ruleContent, ruleExplore
+    }
+
+    /// 宽松解码：缺失 / null → 默认值；类型不符 → 尽力强转，绝不整体失败。
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        bookSourceUrl = Self.lenientString(c, .bookSourceUrl) ?? ""
+        bookSourceName = Self.lenientString(c, .bookSourceName) ?? ""
+        bookSourceGroup = Self.lenientString(c, .bookSourceGroup)
+        bookSourceType = Self.lenientSourceType(c)
+        bookSourceComment = Self.lenientString(c, .bookSourceComment) ?? ""
+        enabled = Self.lenientBool(c, .enabled, default: true)
+        enabledExplore = Self.lenientBool(c, .enabledExplore, default: true)
+        header = Self.lenientString(c, .header)
+        loginUrl = Self.lenientString(c, .loginUrl)
+        jsLib = Self.lenientString(c, .jsLib)
+        concurrentRate = Self.lenientString(c, .concurrentRate)
+        exploreUrl = Self.lenientString(c, .exploreUrl)
+        lastUpdateTime = Self.lenientInt64(c, .lastUpdateTime)
+        ruleSearch = try? c.decodeIfPresent(SourceRuleSet.self, forKey: .ruleSearch)
+        ruleBookInfo = try? c.decodeIfPresent(SourceRuleSet.self, forKey: .ruleBookInfo)
+        ruleToc = try? c.decodeIfPresent(SourceRuleSet.self, forKey: .ruleToc)
+        ruleContent = try? c.decodeIfPresent(SourceRuleSet.self, forKey: .ruleContent)
+        ruleExplore = try? c.decodeIfPresent(SourceRuleSet.self, forKey: .ruleExplore)
+    }
+
+    // MARK: - 宽松字段读取
+
+    private static func lenientString(_ c: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) -> String? {
+        if let s = try? c.decodeIfPresent(String.self, forKey: key) { return s }
+        if let i = try? c.decodeIfPresent(Int.self, forKey: key) { return String(i) }
+        if let d = try? c.decodeIfPresent(Double.self, forKey: key) { return String(d) }
+        if let b = try? c.decodeIfPresent(Bool.self, forKey: key) { return String(b) }
+        return nil
+    }
+
+    private static func lenientBool(_ c: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys, default def: Bool) -> Bool {
+        if let b = try? c.decodeIfPresent(Bool.self, forKey: key) { return b }
+        if let i = try? c.decodeIfPresent(Int.self, forKey: key) { return i != 0 }
+        if let s = try? c.decodeIfPresent(String.self, forKey: key) {
+            switch s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "true", "1", "yes", "on": return true
+            case "false", "0", "no", "off", "": return false
+            default: return def
+            }
+        }
+        return def
+    }
+
+    private static func lenientInt64(_ c: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) -> Int64 {
+        if let i = try? c.decodeIfPresent(Int64.self, forKey: key) { return i }
+        if let i = try? c.decodeIfPresent(Int.self, forKey: key) { return Int64(i) }
+        if let d = try? c.decodeIfPresent(Double.self, forKey: key) { return Int64(d) }
+        if let s = try? c.decodeIfPresent(String.self, forKey: key) {
+            return Int64(s.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        }
+        return 0
+    }
+
+    private static func lenientSourceType(_ c: KeyedDecodingContainer<CodingKeys>) -> BookSourceType {
+        if let i = try? c.decodeIfPresent(Int.self, forKey: .bookSourceType) {
+            return BookSourceType(rawValue: i) ?? .text
+        }
+        if let s = try? c.decodeIfPresent(String.self, forKey: .bookSourceType) {
+            let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            return BookSourceType(rawValue: Int(trimmed) ?? 0) ?? .text
+        }
+        return .text
+    }
+
+    // MARK: - 导入解析
+
+    /// 支持单对象、数组两种 legado 书源 JSON 形式。
+    /// 解析失败时抛出带真实原因的错误（不再笼统报「不是合法的书源 JSON」）。
     static func decode(from text: String) throws -> [BookSource] {
-        let data = Data(text.utf8)
+        let cleaned = Self.stripBOM(text)
+        guard !cleaned.isEmpty else {
+            throw RuleError.invalidSource("输入内容为空")
+        }
+        let data = Data(cleaned.utf8)
         let decoder = JSONDecoder()
-        if let single = try? decoder.decode(BookSource.self, from: data) {
-            return [single]
+
+        let looksLikeArray = cleaned.hasPrefix("[")
+        var objectError: Error?
+        var arrayError: Error?
+
+        do {
+            return [try decoder.decode(BookSource.self, from: data)]
+        } catch {
+            objectError = error
         }
-        if let array = try? decoder.decode([BookSource].self, from: data) {
-            return array
+        do {
+            return try decoder.decode([BookSource].self, from: data)
+        } catch {
+            arrayError = error
         }
-        throw RuleError.invalidJSON
+        let primary = looksLikeArray ? (arrayError ?? objectError) : (objectError ?? arrayError)
+        throw RuleError.invalidSource("书源 JSON 解析失败：\(Self.describe(primary))")
+    }
+
+    /// 提取 `{"sourceUrls": [...]}` 包装中的书源链接列表（legado 用 JsonPath 支持的形式）。
+    /// 返回 nil 表示不是该包装格式，按普通书源 JSON 处理。
+    static func extractSourceUrls(from text: String) -> [String]? {
+        let cleaned = Self.stripBOM(text)
+        guard cleaned.hasPrefix("{") else { return nil }
+        guard let data = cleaned.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data),
+              let dict = obj as? [String: Any],
+              let urls = dict["sourceUrls"] as? [String],
+              !urls.isEmpty else { return nil }
+        return urls
+    }
+
+    /// 去除 UTF-8 BOM 并修剪首尾空白（粘贴 / 抓取的内容都可能带 BOM）
+    static func stripBOM(_ text: String) -> String {
+        var s = text
+        if s.hasPrefix("\u{FEFF}") { s.removeFirst() }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 把 DecodingError 翻译成用户可操作的中文提示
+    private static func describe(_ error: Error?) -> String {
+        guard let error else { return "格式无法识别" }
+        guard let dec = error as? DecodingError else {
+            return error.localizedDescription
+        }
+        switch dec {
+        case .keyNotFound(let key, _):
+            return "缺少字段 \"\(key.stringValue)\""
+        case .typeMismatch(let type, let context):
+            let path = context.codingPath.map { $0.stringValue }.joined(separator: ".")
+            return "字段 \"\(path)\" 类型应为 \(type)"
+        case .valueNotFound(let type, let context):
+            let path = context.codingPath.map { $0.stringValue }.joined(separator: ".")
+            return "字段 \"\(path)\" 的 \(type) 值为空"
+        case .dataCorrupted(let context):
+            return "JSON 结构损坏（\(context.debugDescription)）"
+        @unknown default:
+            return error.localizedDescription
+        }
     }
 }

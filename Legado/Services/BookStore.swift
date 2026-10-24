@@ -74,6 +74,18 @@ final class BookStore: ObservableObject {
         )
     }
 
+    /// 由调用方提供文件数据直接入库（如 .fileImporter 回调内已同步读取的数据）。
+    /// 与 importLocalFile 的区别：安全作用域 URL 只在选择器回调期间有效，
+    /// 旧实现把 URL 带进异步任务再读文件，作用域已失效导致读取失败。
+    func importBook(data: Data, suggestedName: String, ext: String) async throws -> Book {
+        try importBookData(
+            data,
+            suggestedName: suggestedName,
+            ext: ext,
+            remoteURL: nil
+        )
+    }
+
     /// 从远程书籍链接下载并导入（解析、下载、入库）
     func importRemoteBook(from link: String) async throws -> Book {
         let trimmed = link.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -180,6 +192,15 @@ final class BookStore: ObservableObject {
     /// 添加规则阅读书籍（保留 sourceId + bookUrl，不落本地文件）
     func addBook(_ book: Book) {
         books.append(book)
+        persist()
+    }
+
+    /// 持久化阅读进度（章节下标 + 时间），供阅读器跨会话恢复
+    func updateProgress(bookID: String, chapterIndex: Int) {
+        guard let i = books.firstIndex(where: { $0.id == bookID }) else { return }
+        guard books[i].lastChapterIndex != chapterIndex else { return }
+        books[i].lastChapterIndex = chapterIndex
+        books[i].lastReadAt = Date()
         persist()
     }
 }

@@ -45,12 +45,32 @@ final class BookSourceStore: ObservableObject {
         }
     }
 
-    /// 导入 legado 书源 JSON（单对象或数组），按 bookSourceUrl 去重更新
+    /// 导入 legado 书源 JSON（单对象、数组或 {"sourceUrls": [...]} 包装），按 bookSourceUrl 去重更新
     @discardableResult
-    func importSources(from text: String) throws -> Int {
+    func importSources(from text: String) async throws -> Int {
+        // 1) {"sourceUrls": [...]} 包装：逐条抓取后导入（对应 legado JsonPath 分支）
+        if let urls = BookSource.extractSourceUrls(from: text) {
+            var total = 0
+            var lastError: Error?
+            for raw in urls {
+                guard let url = URL(string: raw) else { continue }
+                do {
+                    let body = try await Self.fetchText(from: url)
+                    total += try await importSources(from: body)
+                } catch {
+                    lastError = error
+                }
+            }
+            if total == 0 {
+                throw lastError ?? RuleError.invalidSource("\(urls.count) 个书源链接全部导入失败")
+            }
+            return total
+        }
+
+        // 2) 普通书源 JSON（单对象或数组）
         let imported = try BookSource.decode(from: text).filter { !$0.bookSourceUrl.isEmpty }
         guard !imported.isEmpty else {
-            throw RuleError.invalidJSON
+            throw RuleError.invalidSource("解析到内容但均缺少 bookSourceUrl 字段，不是有效书源")
         }
         for source in imported {
             if let index = sources.firstIndex(where: { $0.bookSourceUrl == source.bookSourceUrl }) {
@@ -67,12 +87,12 @@ final class BookSourceStore: ObservableObject {
     @discardableResult
     func importFromTextOrLink(_ input: String) async throws -> Int {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { throw RuleError.invalidJSON }
+        guard !trimmed.isEmpty else { throw RuleError.invalidSource("扫描内容为空") }
         if let url = Self.linkIfAny(trimmed) {
             let body = try await Self.fetchText(from: url)
-            return try importSources(from: body)
+            return try await importSources(from: body)
         }
-        return try importSources(from: trimmed)
+        return try await importSources(from: trimmed)
     }
 
     /// 仅当输入为单行 http(s) 链接时返回 URL，避免把多行 JSON 误判为链接

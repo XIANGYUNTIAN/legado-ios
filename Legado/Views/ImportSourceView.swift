@@ -77,7 +77,7 @@ struct ImportSourceView: View {
                 } else {
                     body = trimmed
                 }
-                let count = try store.importSources(from: body)
+                let count = try await store.importSources(from: body)
                 importedCount = count
                 messageColor = .green
                 message = "成功导入 \(count) 个书源"

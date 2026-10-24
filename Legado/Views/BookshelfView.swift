@@ -61,8 +61,31 @@ struct BookshelfView: View {
                 }
             }
         }
-        .sheet(isPresented: $showDocPicker) {
-            DocumentImporter(onPick: handlePicked, onCancel: { showDocPicker = false })
+        // 本地导入：fileImporter 的 success 回调里安全作用域 URL 才有效，
+        // 必须同步读取数据，再交给异步入库（旧版把 URL 带进 Task 再读，作用域已失效）
+        .fileImporter(
+            isPresented: $showDocPicker,
+            allowedContentTypes: [.text, .plainText, .utf8PlainText, .epub],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first else { return }
+                let secured = url.startAccessingSecurityScopedResource()
+                defer { if secured { url.stopAccessingSecurityScopedResource() } }
+                do {
+                    let data = try Data(contentsOf: url)
+                    handlePickedData(
+                        data,
+                        name: url.deletingPathExtension().lastPathComponent,
+                        ext: url.pathExtension.lowercased()
+                    )
+                } catch {
+                    showMessage("读取文件失败：\(error.localizedDescription)", true)
+                }
+            case .failure(let error):
+                showMessage(error.localizedDescription, true)
+            }
         }
         .sheet(isPresented: $showURLSheet) {
             AddBookByURLView { msg, isErr in
@@ -88,18 +111,24 @@ struct BookshelfView: View {
         }
     }
 
-    private func handlePicked(_ url: URL) {
+    private func showMessage(_ msg: String, _ isError: Bool) {
+        message = msg
+        messageIsError = isError
+        showMsg = true
+        showDocPicker = false
+    }
+
+    /// 数据已在回调内同步读取，这里只做异步骤落盘与入清单
+    private func handlePickedData(_ data: Data, name: String, ext: String) {
         Task {
             do {
-                let book = try await bookStore.importLocalFile(at: url)
-                message = "已导入：《\(book.title)》"
-                messageIsError = false
+                let book = try await bookStore.importBook(
+                    data: data, suggestedName: name, ext: ext
+                )
+                showMessage("已导入：《\(book.title)》", false)
             } catch {
-                message = error.localizedDescription
-                messageIsError = true
+                showMessage(error.localizedDescription, true)
             }
-            showMsg = true
-            showDocPicker = false
         }
     }
 }

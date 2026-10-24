@@ -10,6 +10,13 @@ struct ReaderChapter: Identifiable {
     var url: String?       // 网络章节 URL
 }
 
+/// 数组安全下标：切章 / 异步回调里索引可能越界，避免崩溃
+extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
 // MARK: - 阅读器主视图
 
 /// 三种阅读模式统一入口：
@@ -30,6 +37,7 @@ struct BookReaderView: View {
     @State private var errorMessage: String?
     @State private var showChapterList = false
     @State private var showSettings = false
+    @State private var didLoad = false
 
     var body: some View {
         NavigationStack {
@@ -55,7 +63,13 @@ struct BookReaderView: View {
             .navigationTitle(currentChapter?.title ?? book.displayTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar(.hidden, for: .tabBar)
-            .onAppear { load() }
+            .onAppear {
+                // 避免 sheet  dismiss 等原因导致重复加载、进度被重置
+                if !didLoad {
+                    didLoad = true
+                    load()
+                }
+            }
         }
     }
 
@@ -72,7 +86,7 @@ struct BookReaderView: View {
                             .multilineTextAlignment(.center)
                             .padding(.bottom, settings.lineSpacing * 2)
                     }
-                    Text(displayText)
+                    Text(displayText.isEmpty ? "（本章无内容）" : displayText)
                         .font(.system(size: settings.fontSize, design: settings.fontFamily.design))
                         .lineSpacing(settings.lineSpacing)
                         .multilineTextAlignment(.leading)
@@ -92,27 +106,48 @@ struct BookReaderView: View {
     }
 
     private var currentChapter: ReaderChapter? {
-        chapters.indices.contains(currentIndex) ? chapters[currentIndex] : nil
+        chapters[safe: currentIndex]
     }
 
-    // MARK: - 工具栏
+    // MARK: - 工具栏（含上一章 / 下一章连续翻页）
 
     private var readerToolbar: some View {
-        HStack {
+        HStack(spacing: 4) {
+            Button {
+                switchTo(index: currentIndex - 1)
+            } label: {
+                Image(systemName: "chevron.up")
+                    .frame(width: 44, height: 44)
+            }
+            .disabled(currentIndex <= 0)
+            .foregroundStyle(settings.theme.foreground)
+
             Button {
                 showChapterList = true
             } label: {
                 Image(systemName: "list.bullet")
                 Text(currentChapter?.title ?? "目录")
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
             .foregroundStyle(settings.theme.foreground)
 
-            Spacer()
+            Button {
+                switchTo(index: currentIndex + 1)
+            } label: {
+                Image(systemName: "chevron.down")
+                    .frame(width: 44, height: 44)
+            }
+            .disabled(chapters.isEmpty || currentIndex >= chapters.count - 1)
+            .foregroundStyle(settings.theme.foreground)
+
+            Spacer(minLength: 8)
 
             Button {
                 showSettings = true
             } label: {
                 Image(systemName: "a.circle")
+                    .frame(width: 44, height: 44)
             }
             .foregroundStyle(settings.theme.foreground)
         }
@@ -217,16 +252,26 @@ struct BookReaderView: View {
     // MARK: - 章节切换
 
     private func switchTo(index: Int) {
+        guard chapters.indices.contains(index) else { return }
+        let chapter = chapters[index]
         currentIndex = index
-        if let text = chapters[index].text {
+        if let text = chapter.text {
             displayText = text
-            return
+        } else {
+            // 网络章节：先清空旧正文，避免残留上一章内容
+            displayText = ""
+            Task {
+                let text = await fetchContentText(for: index)
+                await MainActor.run {
+                    // 期间用户可能已切到其他章，丢弃过期结果
+                    if currentIndex == index {
+                        displayText = text
+                    }
+                }
+            }
         }
-        // 网络章节：按需抓取正文
-        Task {
-            let text = await fetchContentText(for: index)
-            await MainActor.run { displayText = text }
-        }
+        // 持久化阅读进度，供下次进入恢复
+        bookStore.updateProgress(bookID: book.id, chapterIndex: index)
     }
 
     // MARK: - 加载入口
@@ -244,16 +289,23 @@ struct BookReaderView: View {
                 } else {
                     throw RuleError.emptyResult
                 }
+                // 恢复上次阅读进度（越界时回退到首章）
+                let savedIndex = min(max(book.lastChapterIndex, 0), max(result.count - 1, 0))
+                let restoredText = result[safe: savedIndex]?.text
                 await MainActor.run {
                     chapters = result
-                    currentIndex = 0
-                    displayText = result.first?.text ?? ""
+                    currentIndex = savedIndex
+                    displayText = restoredText ?? ""
                     isLoading = false
                 }
                 // 网络章节需单独抓取正文
-                if book.supportsRuleReading, let first = result.first, first.text == nil {
-                    let text = await fetchContentText(for: 0)
-                    await MainActor.run { displayText = text }
+                if book.supportsRuleReading, result[safe: savedIndex]?.text == nil {
+                    let text = await fetchContentText(for: savedIndex)
+                    await MainActor.run {
+                        if currentIndex == savedIndex {
+                            displayText = text
+                        }
+                    }
                 }
             } catch {
                 await MainActor.run {
@@ -278,23 +330,32 @@ struct BookReaderView: View {
         )
         let text = String(data: data, encoding: .utf8)
             ?? String(data: data, encoding: String.Encoding(rawValue: gb))
-        let chapters = splitIntoChapters(text)
-        return chapters.isEmpty ? [ReaderChapter(title: book.displayTitle, text: "", url: nil)] : chapters
+        return splitIntoChapters(text)
     }
 
-    /// 按中文章节标题切分（第…章 / 第…回 / 序言 等）
-    private func splitIntoChapters(_ text: String?) -> [ReaderChapter] {
-        guard let text, !text.isEmpty else {
+    /// 按中文章节标题切分。
+    /// 标题需位于行首（允许前导空格/制表符），覆盖：第X章/回/节/卷/集/部/篇、
+    /// 序章/序言/楔子/番外、Chapter N 等常见格式；匹配不到时按固定字数兜底分段，
+    /// 保证超长单章也能连续翻页。
+    private func splitIntoChapters(_ rawText: String?) -> [ReaderChapter] {
+        guard let rawText, !rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return [ReaderChapter(title: book.displayTitle, text: "", url: nil)]
         }
-        let pattern = #"[\n\r]*第[0-9一二三四五六七八九十百千万两]+[章回节卷][^\n\r]*"#
+        // 归一化：去 BOM、CRLF / CR → LF
+        var text = rawText
+        if text.hasPrefix("\u{FEFF}") { text.removeFirst() }
+        text = text.replacingOccurrences(of: "\r\n", with: "\n")
+                 .replacingOccurrences(of: "\r", with: "\n")
+
+        let pattern = #"(?m)^[ \t]*(?:第[0-9０-９零一二三四五六七八九十百千万两]+\s*[章回节卷集部篇][^\n]*|序[章幕言折][^\n]*|楔子[^\n]*|番外[篇卷]?[0-9零一二三四五六七八九十百千万]*[^\n]*|Chapter\s*[0-9]+[^\n]*)"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return [ReaderChapter(title: book.displayTitle, text: text, url: nil)]
+            return fallbackSegments(text)
         }
         let ns = text as NSString
         let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
         guard matches.count > 1 else {
-            return [ReaderChapter(title: book.displayTitle, text: text, url: nil)]
+            // 无章节结构：超长文本按固定字数兜底分段，保证可翻页
+            return fallbackSegments(text)
         }
         var result: [ReaderChapter] = []
         // 开头正文（第一章之前的内容）
@@ -308,11 +369,38 @@ struct BookReaderView: View {
         for (i, match) in matches.enumerated() {
             let start = match.range.location
             let end = (i + 1 < matches.count) ? matches[i + 1].range.location : ns.length
+            guard end > start else { continue }
             let body = ns.substring(with: NSRange(location: start, length: end - start))
-            let title = ns.substring(with: match.range).trimmingCharacters(in: .whitespacesAndNewlines)
+            let title = ns.substring(with: match.range)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             result.append(ReaderChapter(title: title.isEmpty ? "第\(i + 1)章" : title, text: body, url: nil))
         }
         return result
+    }
+
+    /// 无章节标记时的兜底：按 ~8000 字分段（尽量在换行处断开），标题为「第 N 段」
+    private func fallbackSegments(_ text: String) -> [ReaderChapter] {
+        let threshold = 8000
+        guard text.count > threshold else {
+            return [ReaderChapter(title: book.displayTitle, text: text, url: nil)]
+        }
+        var result: [ReaderChapter] = []
+        var start = text.startIndex
+        var seg = 1
+        while start < text.endIndex {
+            let hardEnd = text.index(start, offsetBy: threshold, limitedBy: text.endIndex) ?? text.endIndex
+            var cut = hardEnd
+            if cut < text.endIndex, let nl = text[start..<hardEnd].lastIndex(of: "\n") {
+                cut = text.index(after: nl)
+            }
+            let body = String(text[start..<cut])
+            if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                result.append(ReaderChapter(title: "第 \(seg) 段", text: body, url: nil))
+                seg += 1
+            }
+            start = cut
+        }
+        return result.isEmpty ? [ReaderChapter(title: book.displayTitle, text: text, url: nil)] : result
     }
 
     // MARK: - 规则阅读器
@@ -334,20 +422,26 @@ struct BookReaderView: View {
 
     /// 抓取指定章节正文（网络章节），返回文本字符串
     private func fetchContentText(for index: Int) async -> String {
+        guard chapters.indices.contains(index) else { return "" }
         let chapter = chapters[index]
         if let text = chapter.text, !text.isEmpty { return text }
         guard let url = chapter.url, let u = URL(string: url) else { return chapter.text ?? "" }
         do {
             guard let source = sourceStore.sources.first(where: { $0.bookSourceUrl == book.sourceId }) else {
-                return "书源不存在"
+                return "书源不存在或已删除"
             }
             let html = try await NetworkService.shared.fetchText(from: u)
             let engine = RuleEngine()
             let contentRule = source.ruleContent?.content ?? ""
-            let text = try engine.getString(contentRule, content: html)
+            let text = (try? engine.getString(contentRule, content: html)) ?? ""
+            let finalText = text.isEmpty ? "（本章无内容）" : text
             // 缓存到章节，便于离线回看
-            await MainActor.run { chapters[index].text = text }
-            return text
+            await MainActor.run {
+                if chapters.indices.contains(index) {
+                    chapters[index].text = finalText
+                }
+            }
+            return finalText
         } catch {
             return "加载失败：\(error.localizedDescription)"
         }

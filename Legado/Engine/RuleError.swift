@@ -1,7 +1,8 @@
 import Foundation
 
 enum RuleError: LocalizedError {
-    case invalidJSON
+    /// 带详细原因的导入失败（优先于笼统提示，便于用户定位问题）
+    case invalidSource(String)
     case emptyResult
     case unsupportedMode(String)
     case jsError(String)
@@ -9,8 +10,8 @@ enum RuleError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .invalidJSON:
-            return "不是合法的书源 JSON"
+        case .invalidSource(let detail):
+            return detail.isEmpty ? "不是合法的书源 JSON" : detail
         case .emptyResult:
             return "规则求值为空"
         case .unsupportedMode(let mode):
