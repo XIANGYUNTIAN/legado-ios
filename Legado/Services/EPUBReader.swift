@@ -1,5 +1,5 @@
 import Foundation
-import Compression
+import zlib
 import SwiftSoup
 
 // MARK: - 错误
@@ -175,25 +175,58 @@ final class EPUBReader {
         throw EPUBError.unsupportedCompression
     }
 
-    /// 使用 Compression 框架的 compression_decode 做 zlib 解压
+    /// 使用 zlib C API 解压（输入需带 zlib 头），输出缓冲区按需倍增
     private func decompressZlib(_ data: Data) throws -> Data {
-        let outCapacity = data.count * 10
-        var out = Data(count: outCapacity)
-        let decompressedSize = try out.withUnsafeMutableBytes { outBytes -> Int in
-            let outBase = outBytes.bindMemory(to: UInt8.self).baseAddress
-            guard let out = outBase else { throw EPUBError.unsupportedCompression }
-            return try data.withUnsafeBytes { inBytes -> Int in
-                let inBase = inBytes.bindMemory(to: UInt8.self).baseAddress
-                guard let inPtr = inBase else { throw EPUBError.unsupportedCompression }
-                return Int(compression_decode(
-                    out, outCapacity,
-                    inPtr, data.count,
-                    nil, COMPRESSION_ZLIB
-                ))
+        var zstream = z_stream()
+        defer { inflateEnd(&zstream) }
+
+        var out = Data()
+        var capacity = max(data.count * 10, 4096)
+        var produced = 0
+        var complete = false
+
+        try data.withUnsafeBytes { inBytes in
+            guard let inBase = inBytes.bindMemory(to: UInt8.self).baseAddress else {
+                throw EPUBError.unsupportedCompression
+            }
+            zstream.next_in = UnsafeMutablePointer<UInt8>(mutating: inBase)
+            zstream.avail_in = uInt(data.count)
+
+            // 15 + 32：自动识别 zlib/gzip 头
+            guard inflateInit2(&zstream, 15 + 32) == Z_OK else {
+                throw EPUBError.unsupportedCompression
+            }
+
+            while !complete {
+                var chunk = Data(count: capacity)
+                let before = produced
+                try chunk.withUnsafeMutableBytes { outBytes in
+                    guard let outBase = outBytes.bindMemory(to: UInt8.self).baseAddress else {
+                        throw EPUBError.unsupportedCompression
+                    }
+                    zstream.next_out = UnsafeMutablePointer<UInt8>(mutating: outBase)
+                    zstream.avail_out = uInt(capacity)
+                    let result = inflate(&zstream, Z_NO_FLUSH)
+                    produced = Int(zstream.total_out)
+                    if result == Z_STREAM_END {
+                        complete = true
+                    } else if result != Z_OK {
+                        throw EPUBError.unsupportedCompression
+                    }
+                }
+                out.append(chunk.prefix(produced - before))
+                if !complete {
+                    // 输入耗尽且无新产出 → 数据不完整
+                    if zstream.avail_in == 0 && produced == before {
+                        throw EPUBError.unsupportedCompression
+                    }
+                    capacity *= 2
+                }
             }
         }
-        guard decompressedSize > 0 else { throw EPUBError.unsupportedCompression }
-        return out.prefix(decompressedSize)
+
+        guard produced > 0 else { throw EPUBError.unsupportedCompression }
+        return out
     }
 
     // MARK: - 小端读取
