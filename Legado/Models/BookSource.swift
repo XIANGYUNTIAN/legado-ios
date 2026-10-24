@@ -116,6 +116,8 @@ struct BookSource: Codable, Identifiable, Equatable {
     var jsLib: String?
     var concurrentRate: String?
     var exploreUrl: String?
+    /// 搜索地址（legado 书源 JSON 的 searchUrl，含 {{key}} 占位符）
+    var searchUrl: String?
     var lastUpdateTime: Int64 = 0
     var ruleSearch: SourceRuleSet?
     var ruleBookInfo: SourceRuleSet?
@@ -135,10 +137,32 @@ struct BookSource: Codable, Identifiable, Equatable {
         }
     }
 
+    /// exploreUrl 是否为可直接请求的链接。
+    /// legado 的 exploreUrl 大量是 `@js:` / 多行 / 带 {{}} 的规则串，
+    /// 直接交给 URLSession 会抛 "unsupported URL"（打开已存书源即报错）。
+    var hasUsableExploreUrl: Bool {
+        guard let raw = exploreUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return false }
+        if raw.contains("\n") || raw.contains("{{") { return false }
+        let lower = raw.lowercased()
+        if lower.hasPrefix("@js:") || lower.hasPrefix("<js>") || lower.hasPrefix("@@") { return false }
+        return URLSanitizer.sanitize(raw) != nil
+    }
+
+    /// 是否具备搜索能力（搜索地址 + 搜索规则容器）
+    var supportsSearch: Bool {
+        guard let raw = searchUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return false }
+        guard raw.contains("{{key}}") else { return false }
+        guard URLSanitizer.sanitize(raw) != nil else { return false }
+        guard let list = ruleSearch?.bookList, !list.isEmpty else { return false }
+        return true
+    }
+
     enum CodingKeys: String, CodingKey {
         case bookSourceUrl, bookSourceName, bookSourceGroup, bookSourceType
         case bookSourceComment, enabled, enabledExplore
-        case header, loginUrl, jsLib, concurrentRate, exploreUrl, lastUpdateTime
+        case header, loginUrl, jsLib, concurrentRate, exploreUrl, searchUrl, lastUpdateTime
         case ruleSearch, ruleBookInfo, ruleToc, ruleContent, ruleExplore
     }
 
@@ -159,6 +183,7 @@ struct BookSource: Codable, Identifiable, Equatable {
         jsLib = Self.lenientString(c, .jsLib)
         concurrentRate = Self.lenientString(c, .concurrentRate)
         exploreUrl = Self.lenientString(c, .exploreUrl)
+        searchUrl = Self.lenientString(c, .searchUrl)
         lastUpdateTime = Self.lenientInt64(c, .lastUpdateTime)
         ruleSearch = try? c.decodeIfPresent(SourceRuleSet.self, forKey: .ruleSearch)
         ruleBookInfo = try? c.decodeIfPresent(SourceRuleSet.self, forKey: .ruleBookInfo)

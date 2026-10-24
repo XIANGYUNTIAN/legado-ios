@@ -7,13 +7,19 @@ enum SourceFetchError: LocalizedError {
     case badStatus(Int)
     case emptyResponse
     case encodingFailed
+    case timeout
+    case cancelled
+    case networkFailed(String)
 
     var errorDescription: String? {
         switch self {
-        case .invalidURL: return "链接格式不正确"
+        case .invalidURL: return "链接格式不正确（需 http/https 链接，且不含非法字符）"
         case .badStatus(let code): return "服务器返回 HTTP \(code)，链接可能已失效"
         case .emptyResponse: return "服务器返回内容为空"
         case .encodingFailed: return "无法解码返回内容（非文本）"
+        case .timeout: return "请求超时，请检查网络或稍后重试"
+        case .cancelled: return "请求已取消"
+        case .networkFailed(let msg): return "网络错误：\(msg)"
         }
     }
 }
@@ -95,12 +101,15 @@ final class BookSourceStore: ObservableObject {
         return try await importSources(from: trimmed)
     }
 
-    /// 仅当输入为单行 http(s) 链接时返回 URL，避免把多行 JSON 误判为链接
+    /// 仅当输入为单行 http(s) 链接时返回 URL，避免把多行 JSON 误判为链接。
+    /// 经 URLSanitizer 修复非法字符（空格/中文），否则 URLSession 会抛
+    /// "unsupported URL" 且被误报为解码失败。
     static func linkIfAny(_ text: String) -> URL? {
-        guard !text.contains("\n"), !text.contains("\r") else { return nil }
-        let lower = text.lowercased()
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.contains("\n"), !trimmed.contains("\r") else { return nil }
+        let lower = trimmed.lowercased()
         guard lower.hasPrefix("http://") || lower.hasPrefix("https://") else { return nil }
-        return URL(string: text)
+        return URLSanitizer.sanitize(trimmed)
     }
 
     /// 抓取远端文本（书源 JSON），委托给统一网络层（移动端 UA + UTF-8/GB18030 解码）
@@ -113,7 +122,7 @@ final class BookSourceStore: ObservableObject {
         } catch let error as NetworkError {
             throw Self.mapNetworkError(error)
         } catch {
-            throw SourceFetchError.encodingFailed
+            throw SourceFetchError.networkFailed(error.localizedDescription)
         }
     }
 
@@ -122,13 +131,19 @@ final class BookSourceStore: ObservableObject {
         NetworkService.stripBOM(text)
     }
 
-    /// 将网络层错误映射为书源抓取错误，保持调用方既有提示文案
+    /// 将网络层错误映射为书源抓取错误。
+    /// 注意：旧版 default 分支把 invalidURL / timeout / network 全部映射成
+    /// encodingFailed，导致真实原因（如 URL 非法、超时）被"无法解码返回内容
+    /// （非文本）"掩盖，必须逐 case 映射。
     private static func mapNetworkError(_ error: NetworkError) -> Error {
         switch error {
+        case .invalidURL: return SourceFetchError.invalidURL
         case .badStatus(let code): return SourceFetchError.badStatus(code)
         case .emptyResponse: return SourceFetchError.emptyResponse
         case .encodingFailed: return SourceFetchError.encodingFailed
-        default: return SourceFetchError.encodingFailed
+        case .timeout: return SourceFetchError.timeout
+        case .cancelled: return SourceFetchError.cancelled
+        case .network(let message): return SourceFetchError.networkFailed(message)
         }
     }
 

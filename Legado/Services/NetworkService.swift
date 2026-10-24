@@ -1,5 +1,51 @@
 import Foundation
 import CoreFoundation
+import zlib
+
+// MARK: - URL 清洗
+
+/// URL 构造与校验：`URL(string:)` 宽容（接受空格/中文），`URLSession` 严格
+/// （直接抛 NSURLErrorUnsupportedURL "unsupported URL"）。所有外部 URL
+/// （书源链接、exploreUrl、searchUrl）必须先过这里。
+enum URLSanitizer {
+    /// 校验并修复 URL：仅接受 http/https；非法字符自动百分号编码。
+    /// 返回 nil 表示不是可请求的链接（规则串、JS、空串等）。
+    static func sanitize(_ raw: String) -> URL? {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        // legado 约定：URL 片段 #requestWithoutUA 等不属于请求目标
+        if let hash = s.firstIndex(of: "#"), hash > s.startIndex {
+            s = String(s[s.startIndex..<hash])
+        }
+        guard !s.isEmpty else { return nil }
+        guard let url = URL(string: s),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else { return nil }
+        guard let host = url.host, !host.isEmpty else { return nil }
+        // 完全合法则直接用
+        if s.rangeOfCharacter(from: CharacterSet.urlAllowed.inverted) == nil {
+            return url
+        }
+        // 含非法字符（空格、中文等）→ 用 URLComponents 重建并百分号编码
+        if let comps = URLComponents(string: s), let rebuilt = comps.url {
+            return rebuilt
+        }
+        // 兜底：手工拆分后由 URLComponents 重组（自动转义非法字符）
+        var comps = URLComponents()
+        comps.scheme = scheme
+        comps.host = host
+        comps.port = url.port
+        comps.path = url.path
+        comps.query = url.query
+        comps.fragment = url.fragment
+        return comps.url
+    }
+
+    /// 判断字符串是否"看起来像链接"（用于给出针对性错误提示）
+    static func looksLikeLink(_ raw: String) -> Bool {
+        let lower = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return lower.hasPrefix("http://") || lower.hasPrefix("https://")
+    }
+}
 
 // MARK: - 网络错误
 
@@ -22,7 +68,7 @@ enum NetworkError: LocalizedError {
         case .emptyResponse:
             return "服务器返回内容为空"
         case .encodingFailed:
-            return "无法解码返回内容（非文本编码）"
+            return "无法解码返回内容（非文本）"
         case .timeout:
             return "请求超时，请检查网络或稍后重试"
         case .cancelled:
@@ -41,7 +87,10 @@ enum NetworkError: LocalizedError {
 /// - 共享单例，避免为每个请求新建 URLSession 的开销；
 /// - 默认 iPhone UA，规避开源站点对桌面端 UA 的拦截；
 /// - `waitsForConnectivity = true`，网络恢复时自动重试，弱网更友好；
-/// - UTF-8 优先、GB18030 兜底，覆盖中文站点编码；
+/// - 显式 `Accept-Encoding: identity`——URLSession 会替请求附加
+///   `gzip, deflate, br`，而 br（Brotli）它并不解压，二进制原文会让文本
+///   解码失败并误报"无法解码返回内容（非文本）"；
+/// - UTF-8 优先、GB18030 / UTF-16 兜底，覆盖中文站点编码；
 /// - 调用方通过 `headers` 传入书源自定义请求头（对应 legado 的 header 字段）。
 final class NetworkService: ObservableObject {
     static let shared = NetworkService()
@@ -63,13 +112,15 @@ final class NetworkService: ObservableObject {
             "User-Agent": Self.iPhoneUA,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            // 关键：不接受压缩编码，避免 br/gzip 原文直接进入文本解码
+            "Accept-Encoding": "identity",
         ]
         session = URLSession(configuration: config)
     }
 
     // MARK: - 公开接口
 
-    /// 抓取远端文本（UTF-8 / GB18030 解码，自动去除 BOM 与首尾空白）
+    /// 抓取远端文本（UTF-8 / GB18030 / UTF-16 解码，自动去除 BOM 与首尾空白）
     func fetchText(from url: URL,
                    headers: [String: String]? = nil,
                    timeout: TimeInterval? = nil) async throws -> String {
@@ -88,8 +139,7 @@ final class NetworkService: ObservableObject {
     func fetchDataWithResponse(from url: URL,
                                headers: [String: String]? = nil,
                                timeout: TimeInterval? = nil) async throws -> (Data, HTTPURLResponse) {
-        let data = try await performRequest(url: url, headers: headers, timeout: timeout)
-        return data
+        try await performRequest(url: url, headers: headers, timeout: timeout)
     }
 
     // MARK: - 内部
@@ -97,9 +147,17 @@ final class NetworkService: ObservableObject {
     private func performRequest(url: URL,
                                 headers: [String: String]?,
                                 timeout: TimeInterval?) async throws -> (Data, HTTPURLResponse) {
+        // scheme 前置校验：避免 URLSession 抛出难懂的 "unsupported URL"
+        guard let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.host != nil else {
+            throw NetworkError.invalidURL
+        }
+
         var request = URLRequest(url: url)
         request.timeoutInterval = timeout ?? Self.defaultTimeout
         request.setValue(Self.iPhoneUA, forHTTPHeaderField: "User-Agent")
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         headers?.forEach { key, value in
             request.setValue(value, forHTTPHeaderField: key)
         }
@@ -115,7 +173,7 @@ final class NetworkService: ObservableObject {
             if data.isEmpty {
                 throw NetworkError.emptyResponse
             }
-            return (data, http)
+            return (Self.maybeDecompress(data, response: http), http)
         } catch let error as NetworkError {
             throw error
         } catch let urlError as URLError {
@@ -124,6 +182,8 @@ final class NetworkService: ObservableObject {
                 throw NetworkError.timeout
             case .cancelled:
                 throw NetworkError.cancelled
+            case .unsupportedURL:
+                throw NetworkError.invalidURL
             default:
                 throw NetworkError.network(urlError.localizedDescription)
             }
@@ -132,9 +192,20 @@ final class NetworkService: ObservableObject {
         }
     }
 
+    /// 兜底解压：若服务端仍返回 gzip/deflate（URLSession 未代解），
+    /// 尝试 inflate；失败则原样返回（try? 保证不影响正常路径）。
+    private static func maybeDecompress(_ data: Data, response: HTTPURLResponse) -> Data {
+        guard let enc = response.value(forHTTPHeaderField: "Content-Encoding")?.lowercased() else {
+            return data
+        }
+        guard enc.contains("gzip") || enc.contains("deflate") else { return data }
+        guard let inflated = try? inflateRaw(data) else { return data }
+        return inflated.isEmpty ? data : inflated
+    }
+
     // MARK: - 编码 / 工具
 
-    /// 文本解码：UTF-8 优先，GB18030 兜底（覆盖中文站点），并去除 BOM 与首尾空白
+    /// 文本解码：UTF-8 优先，GB18030 兜底，再退 UTF-16，并去除 BOM 与首尾空白
     static func decodeText(_ data: Data) throws -> String {
         if let text = String(data: data, encoding: .utf8) {
             return Self.stripBOM(text)
@@ -145,15 +216,73 @@ final class NetworkService: ObservableObject {
         if let text = String(data: data, encoding: String.Encoding(rawValue: gbEncoding)) {
             return Self.stripBOM(text)
         }
+        if let text = String(data: data, encoding: .utf16) {
+            return Self.stripBOM(text)
+        }
+        if let text = String(data: data, encoding: .utf16BigEndian) {
+            return Self.stripBOM(text)
+        }
         throw NetworkError.encodingFailed
     }
 
     /// 去除 UTF-8 BOM 并修剪首尾空白
     static func stripBOM(_ text: String) -> String {
         var s = text
-        if s.hasPrefix("\u{FEFF}") {
-            s.removeFirst()
-        }
+        if s.hasPrefix("\u{FEFF}") { s.removeFirst() }
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// zlib inflate（输入需带 zlib/gzip 头），与 EPUBReader 的实现保持一致
+    private static func inflateRaw(_ data: Data) throws -> Data {
+        var zstream = z_stream()
+        defer { inflateEnd(&zstream) }
+
+        var out = Data()
+        var capacity = max(data.count * 10, 4096)
+        var produced = 0
+        var complete = false
+
+        try data.withUnsafeBytes { inBytes in
+            guard let inBase = inBytes.bindMemory(to: UInt8.self).baseAddress else {
+                throw NetworkError.encodingFailed
+            }
+            zstream.next_in = UnsafeMutablePointer<UInt8>(mutating: inBase)
+            zstream.avail_in = uInt(data.count)
+
+            let version = strdup("1.3")
+            defer { free(version) }
+            guard inflateInit2_(&zstream, 15 + 32, version,
+                                Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
+                throw NetworkError.encodingFailed
+            }
+
+            while !complete {
+                var chunk = Data(count: capacity)
+                let before = produced
+                try chunk.withUnsafeMutableBytes { outBytes in
+                    guard let outBase = outBytes.bindMemory(to: UInt8.self).baseAddress else {
+                        throw NetworkError.encodingFailed
+                    }
+                    zstream.next_out = UnsafeMutablePointer<UInt8>(mutating: outBase)
+                    zstream.avail_out = uInt(capacity)
+                    let result = inflate(&zstream, Z_NO_FLUSH)
+                    produced = Int(zstream.total_out)
+                    if result == Z_STREAM_END {
+                        complete = true
+                    } else if result != Z_OK {
+                        throw NetworkError.encodingFailed
+                    }
+                }
+                out.append(chunk.prefix(produced - before))
+                if !complete {
+                    if zstream.avail_in == 0 && produced == before {
+                        throw NetworkError.encodingFailed
+                    }
+                    capacity *= 2
+                }
+            }
+        }
+        guard produced > 0 else { throw NetworkError.encodingFailed }
+        return out
     }
 }

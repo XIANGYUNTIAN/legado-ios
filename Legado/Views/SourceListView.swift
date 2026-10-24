@@ -8,8 +8,14 @@ struct SourceListView: View {
     var body: some View {
         List {
             ForEach(store.sources) { source in
+                // 可自动发现的进发现页；exploreUrl 是 JS 规则/不可请求的进详情页，
+                // 避免打开已存书源即触发无效网络请求并报 "unsupported URL"
                 NavigationLink {
-                    SourceExploreView(source: source)
+                    if source.hasUsableExploreUrl {
+                        SourceExploreView(source: source)
+                    } else {
+                        SourceDetailView(source: source)
+                    }
                 } label: {
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {

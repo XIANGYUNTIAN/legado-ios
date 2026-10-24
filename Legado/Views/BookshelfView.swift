@@ -6,6 +6,7 @@ struct BookshelfView: View {
 
     @State private var showDocPicker = false
     @State private var showURLSheet = false
+    @State private var showSearch = false
     @State private var message: String?
     @State private var messageIsError = false
     @State private var showMsg = false
@@ -44,6 +45,13 @@ struct BookshelfView: View {
             ToolbarItem(placement: .navigationBarLeading) {
                 EditButton()
             }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showSearch = true
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Button {
@@ -61,11 +69,13 @@ struct BookshelfView: View {
                 }
             }
         }
-        // 本地导入：fileImporter 的 success 回调里安全作用域 URL 才有效，
-        // 必须同步读取数据，再交给异步入库（旧版把 URL 带进 Task 再读，作用域已失效）
+        // 本地导入：内容类型用 .data 兜底——书籍文件常无扩展名或来自云盘
+        // （UTI 不是 plain-text），按类型过滤会把它们藏掉导致"选不到文件"；
+        // 格式校验与内容嗅探在 importBookData 内完成，选错会给明确提示。
+        // fileImporter 的 success 回调里安全作用域 URL 才有效，必须同步读取。
         .fileImporter(
             isPresented: $showDocPicker,
-            allowedContentTypes: [.text, .plainText, .utf8PlainText, .epub],
+            allowedContentTypes: [.data],
             allowsMultipleSelection: false
         ) { result in
             switch result {
@@ -94,12 +104,15 @@ struct BookshelfView: View {
                 showMsg = true
             }
         }
+        .sheet(isPresented: $showSearch) {
+            BookSearchView()
+        }
         .overlay {
             if bookStore.books.isEmpty {
                 ContentUnavailableView(
                     "书架还是空的",
                     systemImage: "books.vertical",
-                    description: Text("右上角 + ：本地导入 / URL 添加书籍")
+                    description: Text("右上角 + ：本地导入 / URL 添加书籍；🔍 可按书源搜索")
                 )
             }
         }

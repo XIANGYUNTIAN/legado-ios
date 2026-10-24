@@ -23,6 +23,9 @@ extension Array {
 /// - 本地 TXT：直接读文件、按章节标题切分
 /// - 本地 EPUB：经 EPUBReader 抽取章节正文
 /// - 规则阅读：用书源 ruleToc / ruleContent 抓取目录与正文（CSS / XPath）
+///
+/// 连续阅读：正文按「已加载章节段」渲染，滚动到底部自动衔接下一章、
+/// 滚动到顶部自动衔接上一章（插入后保持视口），无需手动点章节按钮。
 struct BookReaderView: View {
     let book: Book
 
@@ -31,13 +34,24 @@ struct BookReaderView: View {
     @EnvironmentObject private var settings: ReaderSettings
 
     @State private var chapters: [ReaderChapter] = []
+    /// 已连续加载的章节段（首尾由 firstLoadedIndex / lastLoadedIndex 定位）
+    @State private var segments: [ReaderChapter] = []
+    @State private var firstLoadedIndex = 0
+    @State private var lastLoadedIndex = 0
     @State private var currentIndex = 0
-    @State private var displayText = ""
     @State private var isLoading = true
+    @State private var isLoadingMore = false
     @State private var errorMessage: String?
     @State private var showChapterList = false
     @State private var showSettings = false
     @State private var didLoad = false
+    /// 显式切章时 +1，触发滚动到顶部（章节追加/前插不触发，避免打断阅读）
+    @State private var scrollToTopTrigger = 0
+    /// 哨兵武装：切章后短暂关闭，防止刚切到新章就自动衔接邻章
+    @State private var sentinelsArmed = false
+
+    /// 连续加载的章节段上限，防止超长阅读会话内存无限增长
+    private let maxSegments = 25
 
     var body: some View {
         NavigationStack {
@@ -64,7 +78,7 @@ struct BookReaderView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar(.hidden, for: .tabBar)
             .onAppear {
-                // 避免 sheet  dismiss 等原因导致重复加载、进度被重置
+                // 避免 sheet dismiss 等原因导致重复加载、进度被重置
                 if !didLoad {
                     didLoad = true
                     load()
@@ -73,34 +87,63 @@ struct BookReaderView: View {
         }
     }
 
-    // MARK: - 正文渲染
+    // MARK: - 正文渲染（分段连续 + 上下哨兵）
 
     private var readerContent: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    if settings.showChapterHeader, let chapter = currentChapter {
-                        Text(chapter.title)
-                            .font(.system(size: settings.fontSize, design: settings.fontFamily.design))
-                            .foregroundStyle(settings.theme.foreground)
-                            .multilineTextAlignment(.center)
-                            .padding(.bottom, settings.lineSpacing * 2)
+                    // 顶部哨兵：滚动到顶部自动衔接上一章
+                    Color.clear
+                        .frame(height: 1)
+                        .id("topAnchor")
+                        .onAppear {
+                            if sentinelsArmed { loadPrevSegment(proxy: proxy) }
+                        }
+
+                    ForEach(Array(segments.enumerated()), id: \.element.id) { offset, segment in
+                        let chapterIndex = firstLoadedIndex + offset
+                        VStack(alignment: .leading, spacing: 0) {
+                            if settings.showChapterHeader {
+                                Text(segment.title)
+                                    .font(.system(size: settings.fontSize, design: settings.fontFamily.design))
+                                    .foregroundStyle(settings.theme.foreground)
+                                    .multilineTextAlignment(.center)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.bottom, settings.lineSpacing * 2)
+                            }
+                            Text(segment.text?.isEmpty == false ? segment.text! : "（本章无内容）")
+                                .font(.system(size: settings.fontSize, design: settings.fontFamily.design))
+                                .lineSpacing(settings.lineSpacing)
+                                .multilineTextAlignment(.leading)
+                                .foregroundStyle(settings.theme.foreground)
+                                .textSelection(.enabled)
+                            // 本章末尾锚点：上一章前插后用于保持视口
+                            Color.clear
+                                .frame(height: 1)
+                                .id("segEnd-\(chapterIndex)")
+                        }
+                        .id("segTop-\(chapterIndex)")
                     }
-                    Text(displayText.isEmpty ? "（本章无内容）" : displayText)
-                        .font(.system(size: settings.fontSize, design: settings.fontFamily.design))
-                        .lineSpacing(settings.lineSpacing)
-                        .multilineTextAlignment(.leading)
-                        .foregroundStyle(settings.theme.foreground)
-                        .textSelection(.enabled)
-                        .id("content")
+
+                    // 底部哨兵：滚动到底部自动衔接下一章
+                    Color.clear
+                        .frame(height: 1)
+                        .id("bottom")
+                        .onAppear {
+                            if sentinelsArmed { loadNextSegment() }
+                        }
+
+                    if isLoadingMore {
+                        ProgressView()
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                    }
                 }
                 .padding(.horizontal, 20)
             }
-            .onChange(of: currentIndex) { _, _ in
-                withAnimation { proxy.scrollTo("content", anchor: .top) }
-            }
-            .onChange(of: displayText) { _, _ in
-                withAnimation { proxy.scrollTo("content", anchor: .top) }
+            .onChange(of: scrollToTopTrigger) { _, _ in
+                withAnimation { proxy.scrollTo("topAnchor", anchor: .top) }
             }
         }
     }
@@ -109,7 +152,7 @@ struct BookReaderView: View {
         chapters[safe: currentIndex]
     }
 
-    // MARK: - 工具栏（含上一章 / 下一章连续翻页）
+    // MARK: - 工具栏（上一章 / 下一章）
 
     private var readerToolbar: some View {
         HStack(spacing: 4) {
@@ -249,29 +292,108 @@ struct BookReaderView: View {
         }
     }
 
-    // MARK: - 章节切换
+    // MARK: - 章节切换与连续加载
 
+    /// 显式切章（目录 / 上下一章按钮）：重置为单段并回到顶部
     private func switchTo(index: Int) {
         guard chapters.indices.contains(index) else { return }
         let chapter = chapters[index]
         currentIndex = index
+        firstLoadedIndex = index
+        lastLoadedIndex = index
         if let text = chapter.text {
-            displayText = text
+            segments = [ReaderChapter(title: chapter.title, text: text, url: chapter.url)]
+            isLoadingMore = false
         } else {
-            // 网络章节：先清空旧正文，避免残留上一章内容
-            displayText = ""
+            // 网络章节：先清空旧正文，按需抓取
+            segments = []
+            isLoadingMore = true
             Task {
                 let text = await fetchContentText(for: index)
                 await MainActor.run {
                     // 期间用户可能已切到其他章，丢弃过期结果
-                    if currentIndex == index {
-                        displayText = text
+                    if currentIndex == index, lastLoadedIndex == index {
+                        segments = [ReaderChapter(title: chapter.title, text: text, url: chapter.url)]
                     }
+                    isLoadingMore = false
                 }
             }
         }
-        // 持久化阅读进度，供下次进入恢复
+        scrollToTopTrigger += 1
+        rearmSentinels()
         bookStore.updateProgress(bookID: book.id, chapterIndex: index)
+    }
+
+    /// 滚动到底部：衔接下一章
+    private func loadNextSegment() {
+        guard sentinelsArmed, !isLoadingMore else { return }
+        let next = lastLoadedIndex + 1
+        guard chapters.indices.contains(next), segments.count < maxSegments else { return }
+        isLoadingMore = true
+        let chapter = chapters[next]
+        if let text = chapter.text {
+            appendSegment(chapter: chapter, text: text)
+            isLoadingMore = false
+        } else {
+            Task {
+                let text = await fetchContentText(for: next)
+                await MainActor.run {
+                    // 期间用户可能已切章（segments 被重置），按首尾索引校验
+                    if lastLoadedIndex == next - 1 {
+                        appendSegment(chapter: chapter, text: text)
+                    }
+                    isLoadingMore = false
+                }
+            }
+        }
+    }
+
+    /// 滚动到顶部：衔接上一章，插入后保持视口
+    private func loadPrevSegment(proxy: ScrollViewProxy) {
+        guard sentinelsArmed, !isLoadingMore else { return }
+        let prev = firstLoadedIndex - 1
+        guard chapters.indices.contains(prev), segments.count < maxSegments else { return }
+        isLoadingMore = true
+        let chapter = chapters[prev]
+        if let text = chapter.text {
+            finishPrepend(chapter: chapter, text: text, proxy: proxy)
+            isLoadingMore = false
+        } else {
+            Task {
+                let text = await fetchContentText(for: prev)
+                await MainActor.run {
+                    if firstLoadedIndex == prev + 1 {
+                        finishPrepend(chapter: chapter, text: text, proxy: proxy)
+                    }
+                    isLoadingMore = false
+                }
+            }
+        }
+    }
+
+    private func appendSegment(chapter: ReaderChapter, text: String) {
+        segments.append(ReaderChapter(title: chapter.title, text: text, url: chapter.url))
+        lastLoadedIndex += 1
+        currentIndex = lastLoadedIndex
+        bookStore.updateProgress(bookID: book.id, chapterIndex: lastLoadedIndex)
+    }
+
+    private func finishPrepend(chapter: ReaderChapter, text: String, proxy: ScrollViewProxy) {
+        segments.insert(ReaderChapter(title: chapter.title, text: text, url: chapter.url), at: 0)
+        firstLoadedIndex -= 1
+        currentIndex = firstLoadedIndex
+        bookStore.updateProgress(bookID: book.id, chapterIndex: firstLoadedIndex)
+        // 视口保持：滚到新章节末尾，使原有阅读位置基本不变
+        proxy.scrollTo("segEnd-\(firstLoadedIndex)", anchor: .bottom)
+    }
+
+    /// 切章后短暂解除哨兵武装，避免刚切到新章就自动衔接邻章
+    private func rearmSentinels() {
+        sentinelsArmed = false
+        Task {
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            await MainActor.run { sentinelsArmed = true }
+        }
     }
 
     // MARK: - 加载入口
@@ -291,20 +413,31 @@ struct BookReaderView: View {
                 }
                 // 恢复上次阅读进度（越界时回退到首章）
                 let savedIndex = min(max(book.lastChapterIndex, 0), max(result.count - 1, 0))
-                let restoredText = result[safe: savedIndex]?.text
+                let restored = result[safe: savedIndex]
                 await MainActor.run {
                     chapters = result
                     currentIndex = savedIndex
-                    displayText = restoredText ?? ""
+                    firstLoadedIndex = savedIndex
+                    lastLoadedIndex = savedIndex
+                    if let restored, let text = restored.text {
+                        segments = [ReaderChapter(title: restored.title, text: text, url: restored.url)]
+                        isLoadingMore = false
+                    } else {
+                        segments = []
+                        isLoadingMore = true
+                    }
                     isLoading = false
+                    scrollToTopTrigger += 1
+                    rearmSentinels()
                 }
                 // 网络章节需单独抓取正文
-                if book.supportsRuleReading, result[safe: savedIndex]?.text == nil {
+                if book.supportsRuleReading, restored?.text == nil {
                     let text = await fetchContentText(for: savedIndex)
                     await MainActor.run {
-                        if currentIndex == savedIndex {
-                            displayText = text
+                        if currentIndex == savedIndex, lastLoadedIndex == savedIndex {
+                            segments = [ReaderChapter(title: restored?.title ?? "", text: text, url: restored?.url)]
                         }
+                        isLoadingMore = false
                     }
                 }
             } catch {
@@ -322,11 +455,13 @@ struct BookReaderView: View {
     private func fetchLocalChapters(at url: URL) async throws -> [ReaderChapter] {
         if book.format == .epub {
             let eps = try EPUBReader.shared.chapters(from: url)
-            return eps.map { ReaderChapter(title: $0.title, text: $0.text, url: nil) }
+            return eps.enumerated().map { _, chapter in
+                ReaderChapter(title: chapter.title, text: chapter.text, url: nil)
+            }
         }
         let data = try Data(contentsOf: url)
         let gb = CFStringConvertEncodingToNSStringEncoding(
-            CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)
+            CFStringEncoding(CFStringEncodings.GB_18000_2000.rawValue)
         )
         let text = String(data: data, encoding: .utf8)
             ?? String(data: data, encoding: String.Encoding(rawValue: gb))
@@ -411,7 +546,7 @@ struct BookReaderView: View {
               let rules = source.ruleToc, !rules.isEmpty else {
             throw RuleError.unsupportedMode("书源缺少目录规则")
         }
-        guard let bookUrlStr = book.bookUrl, let bookURL = URL(string: bookUrlStr) else {
+        guard let bookUrlStr = book.bookUrl, let bookURL = URLSanitizer.sanitize(bookUrlStr) else {
             throw RuleError.unsupportedMode("书籍 URL 无效")
         }
         let html = try await NetworkService.shared.fetchText(from: bookURL)
@@ -425,7 +560,9 @@ struct BookReaderView: View {
         guard chapters.indices.contains(index) else { return "" }
         let chapter = chapters[index]
         if let text = chapter.text, !text.isEmpty { return text }
-        guard let url = chapter.url, let u = URL(string: url) else { return chapter.text ?? "" }
+        guard let url = chapter.url, let u = URLSanitizer.sanitize(url) else {
+            return chapter.text ?? ""
+        }
         do {
             guard let source = sourceStore.sources.first(where: { $0.bookSourceUrl == book.sourceId }) else {
                 return "书源不存在或已删除"
@@ -505,9 +642,7 @@ struct BookReaderView: View {
 
     private func resolveURL(_ relative: String, base: URL) -> URL? {
         guard !relative.isEmpty else { return nil }
-        if let url = URL(string: relative), url.scheme != nil {
-            return url
-        }
+        if let url = URLSanitizer.sanitize(relative) { return url }
         return URL(string: relative, relativeTo: base)?.absoluteURL
     }
 }

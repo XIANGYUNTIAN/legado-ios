@@ -45,7 +45,7 @@ struct SourceExploreView: View {
                 ContentUnavailableView(
                     "该书源没有发现内容",
                     systemImage: "magnifyingglass",
-                    description: Text("检查书源是否配置了 exploreUrl 与 ruleExplore 规则")
+                    description: Text("检查书源是否配置了 exploreUrl 与 ruleExplore 规则；也可到书架用搜索找书")
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -135,8 +135,12 @@ struct SourceExploreView: View {
 
     private func load() {
         guard !isLoading else { return }
-        guard let exploreURL = URL(string: source.exploreUrl ?? "") else {
-            errorMessage = "该书源未配置 exploreUrl"
+        // exploreUrl 可能是 @js: / 多行 / 带 {{}} 的规则串，直接请求会抛
+        // "unsupported URL"，必须先校验为可请求的 http(s) 链接
+        guard source.hasUsableExploreUrl,
+              let raw = source.exploreUrl,
+              let exploreURL = URLSanitizer.sanitize(raw) else {
+            errorMessage = "该书源的发现地址不是可直接请求的链接（可能是 JS 规则或带参数），暂不支持自动发现；可改用书架搜索"
             return
         }
         isLoading = true

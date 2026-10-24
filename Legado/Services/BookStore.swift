@@ -135,11 +135,21 @@ final class BookStore: ObservableObject {
 
     /// 统一校验 + 落盘 + 写清单
     private func importBookData(_ data: Data, suggestedName: String, ext: String, remoteURL: String?) throws -> Book {
-        let lower = ext.lowercased()
-        guard lower == "txt" || lower == "epub" else {
-            throw BookImportError.invalidFormat(ext)
-        }
         guard !data.isEmpty else { throw BookImportError.emptyContent }
+
+        // 扩展名无法识别（无扩展名 / 云盘文件 UTI 异常）时按内容嗅探：
+        // PK 魔数 → EPUB；可解码为文本且无 NUL → TXT。
+        // 旧版直接以扩展名判定，导入无扩展名书籍必然失败。
+        var lower = ext.lowercased()
+        if lower != "txt" && lower != "epub" {
+            if Self.isZipData(data) {
+                lower = "epub"
+            } else if Self.looksLikeText(data) {
+                lower = "txt"
+            } else {
+                throw BookImportError.invalidFormat(ext.isEmpty ? "未知" : ext)
+            }
+        }
 
         if lower == "txt" {
             let decoded = String(data: data, encoding: .utf8)
@@ -152,9 +162,7 @@ final class BookStore: ObservableObject {
             if decoded == nil { throw BookImportError.encodingFailed }
         } else {
             // EPUB 本质是 zip，校验本地 zip 魔数（PK\x03\x04）
-            let isZip = data.count >= 4
-                && data[0] == 0x50 && data[1] == 0x4B && data[2] == 0x03 && data[3] == 0x04
-            guard isZip else { throw BookImportError.invalidFormat(ext) }
+            guard Self.isZipData(data) else { throw BookImportError.invalidFormat(ext) }
         }
 
         let baseName = suggestedName.isEmpty ? "book" : suggestedName
@@ -187,6 +195,22 @@ final class BookStore: ObservableObject {
         }
         books.remove(atOffsets: offsets)
         persist()
+    }
+
+    /// ZIP / EPUB 魔数判定（PK\x03\x04）
+    private static func isZipData(_ data: Data) -> Bool {
+        data.count >= 4 && data[0] == 0x50 && data[1] == 0x4B && data[2] == 0x03 && data[3] == 0x04
+    }
+
+    /// 文本嗅探：抽样前 4KB，含 NUL 字节视为二进制；UTF-8 / GB18030 可解码视为文本
+    private static func looksLikeText(_ data: Data) -> Bool {
+        let sample = data.prefix(4096)
+        if sample.contains(0) { return false }
+        if String(data: sample, encoding: .utf8) != nil { return true }
+        let gb = CFStringConvertEncodingToNSStringEncoding(
+            CFStringEncoding(CFStringEncodings.GB_18000_2000.rawValue)
+        )
+        return String(data: sample, encoding: String.Encoding(rawValue: gb)) != nil
     }
 
     /// 添加规则阅读书籍（保留 sourceId + bookUrl，不落本地文件）
