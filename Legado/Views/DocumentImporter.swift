@@ -13,7 +13,7 @@ import UniformTypeIdentifiers
 ///
 /// 本实现逐一消除上述脆弱点：
 /// - 用 UIKit 顶层 VC 呈现，完全绕开 SwiftUI 呈现栈；
-/// - `forImportingContentTypes + asCopy: true` 由系统把选中文件**拷贝到本地
+/// - `forOpeningContentTypes + asCopy: true` 由系统把选中文件**拷贝到本地
 ///   临时目录**，回调拿到的 URL 无需安全作用域、不依赖 iCloud 落地状态；
 /// - 内容类型用 `.data` 兜底，无扩展名 / 云盘文件不会被过滤掉。
 enum DocumentImporter {
@@ -30,7 +30,7 @@ enum DocumentImporter {
                         onPick: @escaping (URL) -> Void,
                         onCancel: @escaping () -> Void) {
         let picker = UIDocumentPickerViewController(
-            forImportingContentTypes: allowedTypes,
+            forOpeningContentTypes: allowedTypes,
             asCopy: true
         )
         picker.allowsMultipleSelection = false
