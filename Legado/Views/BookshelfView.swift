@@ -156,7 +156,7 @@ struct BookshelfView: View {
         let selected = selection.contains(book.id)
         return HStack(spacing: 12) {
             Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                .foregroundStyle(selected ? .tint : .secondary)
+                .foregroundStyle(selected ? Color.accentColor : Color.secondary)
                 .font(.title3)
             bookRow(book)
         }

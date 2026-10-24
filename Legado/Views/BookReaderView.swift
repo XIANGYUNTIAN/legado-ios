@@ -3,6 +3,18 @@ import SwiftSoup
 
 // MARK: - 章节模型
 
+/// 内容整体在滚动坐标系中的矩形（minY=滚动偏移负值，height=内容高），供预加载判定
+struct ScrollContentKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
+}
+
+/// 视口高度（ScrollView 自身 frame），供底部预加载阈值计算
+struct ScrollViewportKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
 struct ReaderChapter: Identifiable {
     let id = UUID()
     let title: String
@@ -54,6 +66,8 @@ struct BookReaderView: View {
     @State private var furthestTopOffset: CGFloat = 0
     /// 前插后抑制顶部预加载，直到用户再次向下滚动超过阈值（防前插过渡帧误触发）
     @State private var suppressTopSentinel = false
+    /// 视口高度（由 ScrollView 背景几何测量，供底部预加载阈值使用）
+    @State private var viewportHeight: CGFloat = 0
 
     /// 连续加载的章节段上限，防止超长阅读会话内存无限增长
     private let maxSegments = 25
@@ -134,20 +148,32 @@ struct BookReaderView: View {
                     }
                 }
                 .padding(.horizontal, 20)
+                // 测量内容整体在滚动坐标系中的矩形：minY 反映滚动偏移、height 即内容高。
+                // 用 PreferenceKey 反馈（iOS 13+ 通用方案），规避 onScrollGeometryChange 的 iOS 18 限制，
+                // 在内容动态增长（前后插章）时依然逐帧稳定，彻底解决“无缝换章”反复失效的问题。
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.preference(
+                            key: ScrollContentKey.self,
+                            value: geo.frame(in: .named("readerScroll"))
+                        )
+                    }
+                )
             }
-            // iOS 17+ 官方滚动几何回调：直接给出可见区域与内容尺寸，
-            // 比 GeometryReader + Preference 组合在内容动态增长时更可靠，
-            // 彻底解决"无缝换章"反复失效的问题。
-            .onScrollGeometryChange(for: CGRect.self) { geo in
-                // 编码：x=滚动偏移, y=视口高度, width=内容宽, height=内容高
-                CGRect(x: geo.visibleRect.minY,
-                        y: geo.visibleRect.height,
-                        width: geo.contentSize.width,
-                        height: geo.contentSize.height)
-            } action: { _, new in
-                let offset = new.origin.x
-                let vpH = new.origin.y
-                let contentH = new.size.height
+            .coordinateSpace(name: "readerScroll")
+            // 测量视口高度（ScrollView 自身 frame），供底部预加载阈值计算
+            .background(
+                GeometryReader { geo in
+                    Color.clear.preference(key: ScrollViewportKey.self, value: geo.size.height)
+                }
+            )
+            .onPreferenceChange(ScrollViewportKey.self) { h in
+                viewportHeight = h
+            }
+            .onPreferenceChange(ScrollContentKey.self) { rect in
+                let offset = -rect.minY
+                let contentH = rect.height
+                let vpH = viewportHeight
                 furthestTopOffset = max(furthestTopOffset, offset)
                 // 向下滚动超过阈值后解除前插抑制，允许后续回顶预加载
                 if offset > 200 { suppressTopSentinel = false }
