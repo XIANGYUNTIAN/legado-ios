@@ -326,7 +326,14 @@ struct BookSearchView: View {
             throw NetworkError.invalidURL
         }
         let request = parseSearchRequest(raw: rawSearchURL)
-        guard request.url.contains("{{key}}") || request.url.contains("searchKey") else {
+        // 占位符可能在 URL，也可能只在 POST body（如 method=POST, body=key={{key}}）。
+        // 旧实现只查 URL，导致 body-only 的 POST 书源被误判「链接格式不正确」而全部失败。
+        let bodyTemplateText = request.body ?? ""
+        let hasKeyPlaceholder = request.url.contains("{{key}}")
+            || request.url.contains("searchKey")
+            || bodyTemplateText.contains("{{key}}")
+            || bodyTemplateText.contains("searchKey")
+        guard hasKeyPlaceholder else {
             throw NetworkError.invalidURL
         }
         let encoded = keyword.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? keyword
@@ -343,6 +350,11 @@ struct BookSearchView: View {
             throw NetworkError.invalidURL
         }
 
+        // 合并书源 header 字段（Referer / Cookie / UA 等）与 searchUrl 选项里的 headers，
+        // 修复需要鉴权头的书源返回 HTTP 401/403 的问题。
+        var mergedHeaders = sourceHeaders(source)
+        for (key, value) in request.headers { mergedHeaders[key] = value }
+
         let html: String
         if request.method.uppercased() == "POST", let bodyTemplate = request.body {
             var finalBody = bodyTemplate
@@ -352,10 +364,10 @@ struct BookSearchView: View {
             finalBody = finalBody.replacingOccurrences(of: "searchPage", with: "1")
             let bodyData = finalBody.data(using: .utf8)
             html = try await NetworkService.shared.fetchTextWithBody(
-                from: finalURL, method: "POST", body: bodyData, headers: request.headers
+                from: finalURL, method: "POST", body: bodyData, headers: mergedHeaders
             )
         } else {
-            html = try await NetworkService.shared.fetchText(from: finalURL, headers: request.headers)
+            html = try await NetworkService.shared.fetchText(from: finalURL, headers: mergedHeaders)
         }
 
         let extracted = try extractSearchResults(html: html, rules: rules, base: finalURL)
@@ -428,6 +440,26 @@ struct BookSearchView: View {
 
     private func sourceLabel(_ source: BookSource) -> String {
         source.bookSourceName.isEmpty ? source.bookSourceUrl : source.bookSourceName
+    }
+
+    /// 解析书源 header 字段（JSON 字符串）为请求头字典。
+    /// legado 书源常在此放 Referer / Cookie / User-Agent，缺它会被站点以 401/403 拒绝。
+    private func sourceHeaders(_ source: BookSource) -> [String: String] {
+        guard let raw = source.header?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty,
+              let data = raw.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [:]
+        }
+        var result: [String: String] = [:]
+        for (key, value) in obj {
+            if let text = value as? String {
+                result[key] = text
+            } else {
+                result[key] = String(describing: value)
+            }
+        }
+        return result
     }
 
     // MARK: - 规则解析（逐源复用）

@@ -141,6 +141,16 @@ struct BookReaderView: View {
                         .id("segTop-\(chapterIndex)")
                     }
 
+                    // 底部哨兵：滚到此处自动衔接下一章。
+                    // id 绑定 lastLoadedIndex——追加后 id 变化，SwiftUI 视为新视图并重新触发 onAppear，
+                    // 与上方 PreferenceKey 预加载互为兜底，确保短章也能连续衔接。
+                    Color.clear
+                        .frame(height: 1)
+                        .id("bottomSentinel-\(lastLoadedIndex)")
+                        .onAppear {
+                            if sentinelsArmed, !isLoadingMore { loadNextSegment() }
+                        }
+
                     if isLoadingMore {
                         ProgressView()
                             .frame(maxWidth: .infinity)

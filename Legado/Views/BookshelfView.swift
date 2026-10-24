@@ -36,7 +36,12 @@ struct BookshelfView: View {
                 if isSelecting {
                     Button("取消") { exitSelecting() }
                 } else {
-                    EditButton()
+                    // 进入批量选择模式：此前只有 EditButton（系统单删），
+                    // 导致 isSelecting 永远为 false、批量勾选/全选/一键删 UI 完全无法进入。
+                    Button("选择") {
+                        selection = []
+                        isSelecting = true
+                    }
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {

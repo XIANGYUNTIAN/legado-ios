@@ -19,6 +19,25 @@ targets:
       - package: SwiftSoup
     info:
       path: Legado/Info.plist
+      properties:
+        CFBundleDisplayName: Legado
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "3"
+        LSRequiresIPhoneOS: true
+        NSCameraUsageDescription: 用于扫描书源二维码
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.legado.ios
