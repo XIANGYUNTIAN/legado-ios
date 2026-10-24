@@ -15,6 +15,16 @@ struct ScrollViewportKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
+/// iOS 18 滚动几何快照（显式 Equatable，避免元组在 onScrollGeometryChange
+/// 的 Equatable 约束下编译失败）。
+private struct ScrollGeometryValue: Equatable {
+    let minY: Double
+    let maxY: Double
+    let contentHeight: Double
+
+    static let zero = ScrollGeometryValue(minY: 0, maxY: 0, contentHeight: 0)
+}
+
 /// iOS 18 滚动几何触发器。
 ///
 /// PreferenceKey + GeometryReader 的滚动偏移跟踪在某些 SwiftUI 版本/场景下会失效
@@ -23,7 +33,7 @@ struct ScrollViewportKey: PreferenceKey {
 /// iOS 17 仍由 PreferenceKey 路径兜底（evaluatePreload 会回退到 contentRect）。
 private struct ScrollGeometryTriggerModifier: ViewModifier {
     let proxy: ScrollViewProxy
-    @Binding var lastScrollGeo: (Double, Double, Double)
+    @Binding var lastScrollGeo: ScrollGeometryValue
     let evaluate: @MainActor (ScrollViewProxy) -> Void
 
     @ViewBuilder
@@ -33,10 +43,14 @@ private struct ScrollGeometryTriggerModifier: ViewModifier {
                 // 跟踪 (visibleRect.minY, visibleRect.maxY, contentSize.height)：
                 // - 滚动时 visibleRect 变化 → 触发滑到底/回顶；
                 // - 内容增长（追加短章）时 contentSize.height 变化 → 触发连续填充。
-                // 三元组比 Bool 更稳：返回 Bool 时 action 只在翻转时触发一次，
+                // 用结构体而非 Bool：返回 Bool 时 action 只在翻转时触发一次，
                 // 短章填不满一屏时会卡在 true 不再触发。
-                .onScrollGeometryChange(for: (Double, Double, Double).self) { geo in
-                    (geo.visibleRect.minY, geo.visibleRect.maxY, geo.contentSize.height)
+                .onScrollGeometryChange(for: ScrollGeometryValue.self) { geo in
+                    ScrollGeometryValue(
+                        minY: geo.visibleRect.minY,
+                        maxY: geo.visibleRect.maxY,
+                        contentHeight: geo.contentSize.height
+                    )
                 } action: { _, newValue in
                     lastScrollGeo = newValue
                     evaluate(proxy)
@@ -107,7 +121,7 @@ struct BookReaderView: View {
     /// iOS 18 onScrollGeometryChange 测得的 (visibleRect.minY, visibleRect.maxY, contentSize.height)。
     /// 三元组在「滚动」与「内容增长」时都会变化，因此既能触发滑到底、也能触发短章连续填充。
     /// 为 (0,0,0) 时表示当前未启用（iOS 17 回退到 contentRect/viewportHeight）。
-    @State private var lastScrollGeo: (Double, Double, Double) = (0, 0, 0)
+    @State private var lastScrollGeo: ScrollGeometryValue = .zero
 
     /// 连续加载的章节段上限，防止超长阅读会话内存无限增长
     private let maxSegments = 25
@@ -442,14 +456,13 @@ struct BookReaderView: View {
         // 滚动偏移量（距内容顶端的距离），两种几何路径各自换算后统一维护到
         // furthestTopOffset，使「曾向下滚动过」的判定不依赖任一特定触发源。
         let offset: CGFloat
-        if lastScrollGeo != (0, 0, 0) {
-            let (minY, maxY, contentH) = lastScrollGeo
-            guard contentH > 0 else { return }
+        if lastScrollGeo != .zero {
+            guard lastScrollGeo.contentHeight > 0 else { return }
             // visibleRect 已含 safe area 内缩：maxY 即可视区域底边在内容坐标系中的位置，
             // minY 即顶边；scroll offset = -minY（minY 为负时表示已向下滚动）。
-            offset = max(0, -minY)
-            nearBottom = maxY >= contentH - 200
-            nearTop = minY <= 200
+            offset = max(0, -lastScrollGeo.minY)
+            nearBottom = lastScrollGeo.maxY >= lastScrollGeo.contentHeight - 200
+            nearTop = lastScrollGeo.minY <= 200
         } else {
             guard contentRect.height > 0, viewportHeight > 0 else { return }
             offset = max(0, -contentRect.minY)
