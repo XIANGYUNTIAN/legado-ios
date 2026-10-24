@@ -197,6 +197,19 @@ final class BookStore: ObservableObject {
         persist()
     }
 
+    /// 批量删除：按 book.id 集合删除，并一并清理本地实体文件（书架视图勾选删除用）
+    func delete(ids: [String]) {
+        guard !ids.isEmpty else { return }
+        let set = Set(ids)
+        for book in books where set.contains(book.id) {
+            if let rel = book.fileRelativePath {
+                try? FileManager.default.removeItem(at: documentsDir.appendingPathComponent(rel))
+            }
+        }
+        books.removeAll { set.contains($0.id) }
+        persist()
+    }
+
     /// ZIP / EPUB 魔数判定（PK\x03\x04）
     private static func isZipData(_ data: Data) -> Bool {
         data.count >= 4 && data[0] == 0x50 && data[1] == 0x4B && data[2] == 0x03 && data[3] == 0x04

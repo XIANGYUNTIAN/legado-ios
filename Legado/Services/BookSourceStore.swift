@@ -157,4 +157,12 @@ final class BookSourceStore: ObservableObject {
         sources.remove(atOffsets: offsets)
         persist()
     }
+
+    /// 批量删除（按书源 URL 集合），供列表勾选后一键删除
+    func delete(ids: [String]) {
+        guard !ids.isEmpty else { return }
+        let set = Set(ids)
+        sources.removeAll { set.contains($0.bookSourceUrl) }
+        persist()
+    }
 }

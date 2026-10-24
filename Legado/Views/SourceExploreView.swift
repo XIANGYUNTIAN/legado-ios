@@ -11,6 +11,22 @@ struct ExploredBook: Identifiable {
     let bookUrl: String
     let coverUrl: String
     let lastChapter: String
+    /// 结果来源书源（多源遍历时为每条结果标注出处，方便加入书架时回写 sourceId）
+    let sourceId: String
+    let sourceName: String
+
+    init(name: String, author: String, intro: String, bookUrl: String,
+         coverUrl: String, lastChapter: String, sourceId: String = "", sourceName: String = "") {
+        self.id = UUID()
+        self.name = name
+        self.author = author
+        self.intro = intro
+        self.bookUrl = bookUrl
+        self.coverUrl = coverUrl
+        self.lastChapter = lastChapter
+        self.sourceId = sourceId
+        self.sourceName = sourceName
+    }
 }
 
 // MARK: - 书源发现视图

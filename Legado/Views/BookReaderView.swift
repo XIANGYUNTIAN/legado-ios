@@ -17,26 +17,6 @@ extension Array {
     }
 }
 
-// MARK: - 哨兵可见性检测（Preference）
-
-/// 视口全局 frame
-private struct ViewportFrameKey: PreferenceKey {
-    static var defaultValue: CGRect = .zero
-    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
-}
-
-/// 顶部哨兵全局 minY
-private struct TopSentinelKey: PreferenceKey {
-    static var defaultValue: CGFloat = .greatestFiniteMagnitude
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
-
-/// 底部哨兵全局 minY
-private struct BottomSentinelKey: PreferenceKey {
-    static var defaultValue: CGFloat = .greatestFiniteMagnitude
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
-
 // MARK: - 阅读器主视图
 
 /// 三种阅读模式统一入口：
@@ -69,14 +49,10 @@ struct BookReaderView: View {
     @State private var scrollToTopTrigger = 0
     /// 哨兵武装：切章后短暂关闭，防止刚切到新章就自动衔接邻章
     @State private var sentinelsArmed = false
-    /// 哨兵可见性检测：视口全局 frame 与两个哨兵的全局 minY
-    /// （onAppear 在内容增长后不重新触发，短章只衔接一次即停，故用逐帧 preference）
-    @State private var viewportFrame: CGRect = .zero
-    @State private var topSentinelMinY: CGFloat = .greatestFiniteMagnitude
-    @State private var bottomSentinelMinY: CGFloat = .greatestFiniteMagnitude
-    /// 顶部哨兵触发条件：曾向下滚动超过 120pt，且回到顶部 80pt 带内
+    /// 顶部预加载门控：曾向下滚动超过该阈值（pt）才允许回顶时预加载上一章，
+    /// 排除初始态与刚切章时的误触发
     @State private var furthestTopOffset: CGFloat = 0
-    /// 前插后抑制顶部哨兵，直到内容顶端回到视口上方（防过渡帧误触发）
+    /// 前插后抑制顶部预加载，直到用户再次向下滚动超过阈值（防前插过渡帧误触发）
     @State private var suppressTopSentinel = false
 
     /// 连续加载的章节段上限，防止超长阅读会话内存无限增长
@@ -116,22 +92,15 @@ struct BookReaderView: View {
         }
     }
 
-    // MARK: - 正文渲染（分段连续 + 上下哨兵）
+    // MARK: - 正文渲染（分段连续 + 滚动几何预加载）
 
     private var readerContent: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    // 顶部哨兵：滚动到顶部自动衔接上一章。
-                    // 用 GeometryReader preference 逐帧检测可见性——onAppear 在
-                    // 内容增长后不会重新触发，短章只会衔接一次即停。
                     Color.clear
                         .frame(height: 1)
                         .id("topAnchor")
-                        .background(GeometryReader { g in
-                            Color.clear.preference(key: TopSentinelKey.self,
-                                                   value: g.frame(in: .global).minY)
-                        })
 
                     ForEach(Array(segments.enumerated()), id: \.element.id) { offset, segment in
                         let chapterIndex = firstLoadedIndex + offset
@@ -158,14 +127,6 @@ struct BookReaderView: View {
                         .id("segTop-\(chapterIndex)")
                     }
 
-                    // 底部哨兵：滚动到底部自动衔接下一章（含 80pt 预加载缓冲）
-                    Color.clear
-                        .frame(height: 1)
-                        .background(GeometryReader { g in
-                            Color.clear.preference(key: BottomSentinelKey.self,
-                                                   value: g.frame(in: .global).minY)
-                        })
-
                     if isLoadingMore {
                         ProgressView()
                             .frame(maxWidth: .infinity)
@@ -174,49 +135,38 @@ struct BookReaderView: View {
                 }
                 .padding(.horizontal, 20)
             }
-            .background(
-                GeometryReader { g in
-                    Color.clear.preference(key: ViewportFrameKey.self,
-                                           value: g.frame(in: .global))
+            // iOS 17+ 官方滚动几何回调：直接给出可见区域与内容尺寸，
+            // 比 GeometryReader + Preference 组合在内容动态增长时更可靠，
+            // 彻底解决"无缝换章"反复失效的问题。
+            .onScrollGeometryChange(for: CGRect.self) { geo in
+                // 编码：x=滚动偏移, y=视口高度, width=内容宽, height=内容高
+                CGRect(x: geo.visibleRect.minY,
+                        y: geo.visibleRect.height,
+                        width: geo.contentSize.width,
+                        height: geo.contentSize.height)
+            } action: { _, new in
+                let offset = new.origin.x
+                let vpH = new.origin.y
+                let contentH = new.size.height
+                furthestTopOffset = max(furthestTopOffset, offset)
+                // 向下滚动超过阈值后解除前插抑制，允许后续回顶预加载
+                if offset > 200 { suppressTopSentinel = false }
+                // 接近底部：预加载下一章
+                if offset + vpH >= contentH - 200 {
+                    if sentinelsArmed, !isLoadingMore { loadNextSegment() }
                 }
-            )
-            .onPreferenceChange(ViewportFrameKey.self) { frame in
-                viewportFrame = frame
-            }
-            .onPreferenceChange(TopSentinelKey.self) { minY in
-                evaluateTopSentinel(minY, proxy: proxy)
-            }
-            .onPreferenceChange(BottomSentinelKey.self) { minY in
-                evaluateBottomSentinel(minY)
+                // 接近顶部：预加载上一章（需曾向下滚动超过阈值且未被前插抑制）
+                if offset <= 200 {
+                    guard sentinelsArmed, !isLoadingMore,
+                          !suppressTopSentinel, furthestTopOffset > 200 else { return }
+                    suppressTopSentinel = true
+                    loadPrevSegment(proxy: proxy)
+                }
             }
             .onChange(of: scrollToTopTrigger) { _, _ in
                 withAnimation { proxy.scrollTo("topAnchor", anchor: .top) }
             }
         }
-    }
-
-    // MARK: - 哨兵判定
-
-    /// 底部哨兵进入视口（含 80pt 预加载缓冲）→ 衔接下一章
-    private func evaluateBottomSentinel(_ minY: CGFloat) {
-        guard sentinelsArmed, !isLoadingMore, viewportFrame != .zero else { return }
-        if minY <= viewportFrame.maxY + 80 {
-            loadNextSegment()
-        }
-    }
-
-    /// 顶部哨兵：需同时满足——曾向下滚动超过 120pt（排除初始态/刚切章）、
-    /// 回到顶部 80pt 带内、未被前插抑制（排除前插后的过渡帧）。
-    private func evaluateTopSentinel(_ minY: CGFloat, proxy: ScrollViewProxy) {
-        guard sentinelsArmed, !isLoadingMore, viewportFrame != .zero else { return }
-        let scrolledDown = viewportFrame.minY - minY
-        // 内容顶端回到视口上方 → 解除前插抑制
-        if scrolledDown > 0 { suppressTopSentinel = false }
-        furthestTopOffset = max(furthestTopOffset, scrolledDown)
-        guard !suppressTopSentinel else { return }
-        guard furthestTopOffset > 120, scrolledDown <= 80 else { return }
-        suppressTopSentinel = true
-        loadPrevSegment(proxy: proxy)
     }
 
     private var currentChapter: ReaderChapter? {
@@ -457,8 +407,8 @@ struct BookReaderView: View {
         firstLoadedIndex -= 1
         currentIndex = firstLoadedIndex
         bookStore.updateProgress(bookID: book.id, chapterIndex: firstLoadedIndex)
-        // 前插后内容顶端暂落在视口下方，抑制顶部哨兵，直到 scrollTo 生效、
-        // 内容顶端回到视口上方后由 evaluateTopSentinel 自动解除
+        // 前插后内容顶端暂落在视口下方，抑制顶部预加载，直到用户再次向下
+        // 滚动超过阈值后由 onScrollGeometryChange 自动解除
         suppressTopSentinel = true
         // 视口保持：滚到新章节末尾，使原有阅读位置基本不变
         proxy.scrollTo("segEnd-\(firstLoadedIndex)", anchor: .bottom)

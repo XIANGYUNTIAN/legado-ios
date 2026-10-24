@@ -1,7 +1,21 @@
 import SwiftUI
 import SwiftSoup
 
-/// 书源搜索：用已导入书源的 searchUrl + ruleSearch 规则搜索书籍，一键加入书架。
+/// 搜索模式：模糊 = 关键词作为子串命中书名/作者/简介；精确 = 书名/作者完全相等，
+/// 或简介中作为独立片段命中（支持按主角名等精确检索）。
+enum SearchMode: String, CaseIterable {
+    case fuzzy
+    case precise
+}
+
+/// 单源搜索的失败记录（用于逐源报错展示）
+struct SourceSearchError: Identifiable {
+    let id = UUID()
+    let name: String
+    let message: String
+}
+
+/// 书源搜索：遍历全部可搜索书源，按 ruleSearch 规则检索书籍，一键加入书架。
 /// 加入书架的书籍保留 sourceId + bookUrl，阅读时走规则阅读路径。
 struct BookSearchView: View {
     @EnvironmentObject private var sourceStore: BookSourceStore
@@ -9,11 +23,15 @@ struct BookSearchView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var keyword = ""
-    @State private var selectedSourceURL: String?
+    @State private var mode: SearchMode = .fuzzy
     @State private var results: [ExploredBook] = []
-    @State private var isLoading = false
+    @State private var isSearching = false
+    @State private var progressText: String?
     @State private var errorMessage: String?
     @State private var addedMessage: String?
+    @State private var sourceErrors: [SourceSearchError] = []
+    /// 当前搜索任务句柄，支持随时取消（停止搜索）
+    @State private var searchTask: Task<Void, Never>?
 
     /// 可搜索的书源：配置了含 {{key}} 的 searchUrl 且具备 ruleSearch.bookList
     private var searchableSources: [BookSource] {
@@ -71,11 +89,7 @@ struct BookSearchView: View {
                     Button("关闭") { dismiss() }
                 }
             }
-            .onAppear {
-                if selectedSourceURL == nil {
-                    selectedSourceURL = searchableSources.first?.bookSourceUrl
-                }
-            }
+            .onDisappear { searchTask?.cancel() }
             .alert("提示", isPresented: .constant(addedMessage != nil)) {
                 Button("好") { addedMessage = nil }
             } message: {
@@ -89,99 +103,135 @@ struct BookSearchView: View {
     private var searchContent: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
-                // 书源选择
+                // 匹配模式 + 书源范围
                 HStack {
-                    Text("书源")
+                    Text("匹配模式")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Picker("书源", selection: $selectedSourceURL) {
-                        ForEach(searchableSources, id: \.bookSourceUrl) { source in
-                            Text(source.bookSourceName.isEmpty ? source.bookSourceUrl : source.bookSourceName)
-                                .tag(source.bookSourceUrl as String?)
-                        }
+                    Picker("匹配模式", selection: $mode) {
+                        Text("模糊").tag(SearchMode.fuzzy)
+                        Text("精确").tag(SearchMode.precise)
                     }
-                    .pickerStyle(.menu)
-                    .frame(maxWidth: 220)
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 200)
                 }
+                Text("将遍历全部 \(searchableSources.count) 个可搜索书源；关键词支持书名 / 作者 / 主角名")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
-                // 关键词 + 搜索
+                // 关键词 + 搜索 / 停止
                 HStack(spacing: 8) {
-                    TextField("书名 / 作者关键词", text: $keyword)
+                    TextField("书名 / 作者 / 主角名", text: $keyword)
                         .textFieldStyle(.roundedBorder)
                         .submitLabel(.search)
-                        .onSubmit(of: .text) { startSearch() }
+                        .onSubmit(of: .text) { if !isSearching { runSearch() } }
                     Button {
-                        startSearch()
-                    } label: {
-                        if isLoading {
-                            ProgressView()
-                                .frame(width: 56)
+                        if isSearching {
+                            stopSearch()
                         } else {
-                            Text("搜索")
-                                .frame(width: 56)
+                            runSearch()
+                        }
+                    } label: {
+                        if isSearching {
+                            Text("停止").frame(width: 56)
+                        } else {
+                            Text("搜索").frame(width: 56)
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(isLoading || keyword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(!isSearching && keyword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
             .padding()
 
+            if let progress = progressText {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(progress)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal)
+                .padding(.bottom, 6)
+            }
+
             if let error = errorMessage {
                 ContentUnavailableView {
-                    Label("搜索失败", systemImage: "exclamationmark.magnifyingglass")
+                    Label("搜索结束", systemImage: "exclamationmark.magnifyingglass")
                 } description: {
                     Text(error)
                 }
-            } else if results.isEmpty && !isLoading {
+            } else if results.isEmpty && !isSearching && progressText == nil {
                 ContentUnavailableView {
                     Label("输入关键词开始搜索", systemImage: "text.magnifyingglass")
                 } description: {
-                    Text("搜索结果来自所选书源的搜索规则")
+                    Text("将遍历全部可搜索书源，按书名 / 作者 / 主角名匹配")
                 }
             } else {
-                List(results) { book in
-                    HStack(alignment: .top, spacing: 12) {
-                        if !book.coverUrl.isEmpty, let coverURL = URLSanitizer.sanitize(book.coverUrl) {
-                            AsyncImage(url: coverURL)
-                                .frame(width: 44, height: 64)
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                        } else {
-                            Rectangle().fill(.quaternary)
-                                .frame(width: 44, height: 64)
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                List {
+                    ForEach(results) { book in
+                        HStack(alignment: .top, spacing: 12) {
+                            if !book.coverUrl.isEmpty, let coverURL = URLSanitizer.sanitize(book.coverUrl) {
+                                AsyncImage(url: coverURL)
+                                    .frame(width: 44, height: 64)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                            } else {
+                                Rectangle().fill(.quaternary)
+                                    .frame(width: 44, height: 64)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                            }
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(book.name)
+                                    .font(.body)
+                                    .foregroundStyle(.primary)
+                                if !book.author.isEmpty {
+                                    Text(book.author)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                if !book.lastChapter.isEmpty {
+                                    Text("最新：\(book.lastChapter)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                }
+                                if !book.intro.isEmpty {
+                                    Text(book.intro)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
+                                if !book.sourceName.isEmpty {
+                                    Text("来源：\(book.sourceName)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.tint)
+                                }
+                            }
+                            Spacer()
+                            Button {
+                                addToShelf(book)
+                            } label: {
+                                Image(systemName: "plus.circle.fill")
+                                    .foregroundStyle(.tint)
+                            }
                         }
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(book.name)
-                                .font(.body)
-                                .foregroundStyle(.primary)
-                            if !book.author.isEmpty {
-                                Text(book.author)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                        .padding(.vertical, 4)
+                    }
+
+                    if !sourceErrors.isEmpty {
+                        Section("以下书源未返回结果或失败") {
+                            ForEach(sourceErrors) { err in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(err.name)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Text(err.message)
+                                        .font(.caption2)
+                                        .foregroundStyle(.red)
+                                }
                             }
-                            if !book.lastChapter.isEmpty {
-                                Text("最新：\(book.lastChapter)")
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                            }
-                            if !book.intro.isEmpty {
-                                Text(book.intro)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
-                            }
-                        }
-                        Spacer()
-                        Button {
-                            addToShelf(book)
-                        } label: {
-                            Image(systemName: "plus.circle.fill")
-                                .foregroundStyle(.tint)
                         }
                     }
-                    .padding(.vertical, 4)
                 }
                 .listStyle(.plain)
             }
@@ -190,70 +240,197 @@ struct BookSearchView: View {
         }
     }
 
-    // MARK: - 搜索逻辑
+    // MARK: - 多源搜索逻辑
 
-    private func startSearch() {
+    /// 启动全源遍历搜索。取消上一次未完成任务，再并发无关地逐源检索。
+    private func runSearch() {
         let trimmedKeyword = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedKeyword.isEmpty else { return }
-        guard let source = searchableSources.first(where: { $0.bookSourceUrl == selectedSourceURL }) else {
-            errorMessage = "请选择可搜索的书源"
-            return
-        }
-        guard let rawSearchURL = source.searchUrl, !rawSearchURL.isEmpty else {
-            errorMessage = "该书源未配置 searchUrl"
-            return
-        }
-        // legado 约定：searchUrl 可带 ,{"method":...} 选项后缀，截取地址部分
-        let urlPart: String
-        if let optionsRange = rawSearchURL.range(of: ",{") {
-            urlPart = String(rawSearchURL[rawSearchURL.startIndex..<optionsRange.lowerBound])
-        } else {
-            urlPart = rawSearchURL
-        }
-
-        guard urlPart.contains("{{key}}") || urlPart.contains("searchKey") else {
-            errorMessage = "该书源搜索地址缺少 {{key}}（或遗留 searchKey）占位符，暂不支持"
-            return
-        }
-        let encoded = trimmedKeyword.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? trimmedKeyword
-        // 占位符替换：{{key}} / searchKey → 关键词；{{searchPage}} / searchPage → 页码。
-        // 顺序：先替换带花括号的页码占位符，避免 searchPage 先被换成 "1" 破坏 {{searchPage}}
-        var finalString = urlPart
-        finalString = finalString.replacingOccurrences(of: "{{key}}", with: encoded)
-        finalString = finalString.replacingOccurrences(of: "searchKey", with: encoded)
-        finalString = finalString.replacingOccurrences(of: "{{searchPage}}", with: "1")
-        finalString = finalString.replacingOccurrences(of: "searchPage", with: "1")
-        guard let finalURL = URLSanitizer.sanitize(finalString) else {
-            errorMessage = "搜索地址无效：\(urlPart)"
-            return
-        }
-        guard let rules = source.ruleSearch, !(rules.bookList ?? "").isEmpty else {
-            errorMessage = "该书源未配置搜索规则（ruleSearch.bookList）"
+        let sources = searchableSources
+        guard !sources.isEmpty else {
+            errorMessage = "没有可搜索的书源"
             return
         }
 
-        errorMessage = nil
+        searchTask?.cancel()
         results = []
-        isLoading = true
-        Task {
-            do {
-                let html = try await NetworkService.shared.fetchText(from: finalURL)
-                let extracted = try extractSearchResults(html: html, rules: rules, base: finalURL)
+        sourceErrors = []
+        errorMessage = nil
+        isSearching = true
+        progressText = "正在遍历 \(sources.count) 个书源…"
+        let currentMode = mode
+        let keywordCopy = trimmedKeyword
+
+        searchTask = Task {
+            var seen = Set<String>()
+            for (index, source) in sources.enumerated() {
+                if Task.isCancelled { break }
                 await MainActor.run {
-                    results = extracted
-                    isLoading = false
-                    if extracted.isEmpty {
-                        errorMessage = "未搜索到结果（可尝试更换关键词或书源）"
+                    progressText = "正在搜索 \(sourceLabel(source))（\(index + 1)/\(sources.count)）"
+                }
+                do {
+                    let books = try await performSingleSourceSearch(
+                        source: source, keyword: keywordCopy, mode: currentMode
+                    )
+                    await MainActor.run {
+                        let unique = books.filter { book in
+                            let key = "\(book.name.lowercased())|\(book.author.lowercased())"
+                            if seen.contains(key) { return false }
+                            seen.insert(key)
+                            return true
+                        }
+                        results.append(contentsOf: unique)
+                    }
+                } catch {
+                    if Task.isCancelled { break }
+                    let msg: String
+                    if let ne = error as? NetworkError, case .cancelled = ne {
+                        break
+                    } else {
+                        msg = error.localizedDescription
+                    }
+                    await MainActor.run {
+                        sourceErrors.append(SourceSearchError(name: sourceLabel(source), message: msg))
                     }
                 }
-            } catch {
-                await MainActor.run {
-                    errorMessage = error.localizedDescription
-                    isLoading = false
+            }
+            await MainActor.run {
+                isSearching = false
+                progressText = nil
+                if results.isEmpty {
+                    if sourceErrors.isEmpty {
+                        errorMessage = "全部书源均未搜索到「\(keywordCopy)」"
+                    } else {
+                        errorMessage = "未找到匹配结果（部分书源失败，详见下方列表）"
+                    }
                 }
             }
         }
     }
+
+    /// 随时停止：取消任务并复位状态
+    private func stopSearch() {
+        searchTask?.cancel()
+        searchTask = nil
+        isSearching = false
+        progressText = nil
+    }
+
+    /// 单个书源搜索：解析 searchUrl（含 POST 选项后缀）、发请求、按规则解析、
+    /// 再按关键词与模式过滤。返回已标注来源、已按模式过滤的结果。
+    private func performSingleSourceSearch(source: BookSource,
+                                            keyword: String,
+                                            mode: SearchMode) async throws -> [ExploredBook] {
+        let rawSearchURL = source.searchUrl ?? ""
+        guard !rawSearchURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw NetworkError.invalidURL
+        }
+        let request = parseSearchRequest(raw: rawSearchURL)
+        guard request.url.contains("{{key}}") || request.url.contains("searchKey") else {
+            throw NetworkError.invalidURL
+        }
+        let encoded = keyword.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? keyword
+        // 占位符替换：{{key}} / searchKey → 关键词；{{searchPage}} / searchPage → 页码。
+        var finalURLString = request.url
+        finalURLString = finalURLString.replacingOccurrences(of: "{{key}}", with: encoded)
+        finalURLString = finalURLString.replacingOccurrences(of: "searchKey", with: encoded)
+        finalURLString = finalURLString.replacingOccurrences(of: "{{searchPage}}", with: "1")
+        finalURLString = finalURLString.replacingOccurrences(of: "searchPage", with: "1")
+        guard let finalURL = URLSanitizer.sanitize(finalURLString) else {
+            throw NetworkError.invalidURL
+        }
+        guard let rules = source.ruleSearch, !(rules.bookList ?? "").isEmpty else {
+            throw NetworkError.invalidURL
+        }
+
+        let html: String
+        if request.method.uppercased() == "POST", let bodyTemplate = request.body {
+            var finalBody = bodyTemplate
+            finalBody = finalBody.replacingOccurrences(of: "{{key}}", with: encoded)
+            finalBody = finalBody.replacingOccurrences(of: "searchKey", with: encoded)
+            finalBody = finalBody.replacingOccurrences(of: "{{searchPage}}", with: "1")
+            finalBody = finalBody.replacingOccurrences(of: "searchPage", with: "1")
+            let bodyData = finalBody.data(using: .utf8)
+            html = try await NetworkService.shared.fetchTextWithBody(
+                from: finalURL, method: "POST", body: bodyData, headers: request.headers
+            )
+        } else {
+            html = try await NetworkService.shared.fetchText(from: finalURL, headers: request.headers)
+        }
+
+        let extracted = try extractSearchResults(html: html, rules: rules, base: finalURL)
+        let sourceName = source.bookSourceName.isEmpty ? source.bookSourceUrl : source.bookSourceName
+        return extracted
+            .filter { matches($0, keyword: keyword, mode: mode) }
+            .map { book in
+                ExploredBook(
+                    name: book.name,
+                    author: book.author,
+                    intro: book.intro,
+                    bookUrl: book.bookUrl,
+                    coverUrl: book.coverUrl,
+                    lastChapter: book.lastChapter,
+                    sourceId: source.bookSourceUrl,
+                    sourceName: sourceName
+                )
+            }
+    }
+
+    /// 解析 legado 的 searchUrl：`url,{"method":"POST","body":"...","headers":{...}}`。
+    /// 找不到选项后缀则视为 GET；body 中的 {{key}} 由调用方替换。
+    private func parseSearchRequest(raw: String) -> ParsedSearchRequest {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let range = trimmed.range(of: ",{") else {
+            return ParsedSearchRequest(url: trimmed, method: "GET", body: nil, headers: [:])
+        }
+        let urlPart = String(trimmed[trimmed.startIndex..<range.lowerBound])
+        let optionsString = String(trimmed[range.lowerBound..<trimmed.endIndex]).dropFirst() // 去掉逗号，留 {…}
+        guard let data = optionsString.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return ParsedSearchRequest(url: urlPart, method: "GET", body: nil, headers: [:])
+        }
+        let method = (obj["method"] as? String) ?? "GET"
+        let body = obj["body"] as? String
+        var headers: [String: String] = [:]
+        if let h = obj["headers"] as? [String: String] {
+            headers = h
+        }
+        return ParsedSearchRequest(url: urlPart, method: method, body: body, headers: headers)
+    }
+
+    private struct ParsedSearchRequest {
+        let url: String
+        let method: String
+        let body: String?
+        let headers: [String: String]
+    }
+
+    /// 关键词与模式的匹配判定：书名 / 作者 / 简介（简介含主角名等线索）
+    private func matches(_ book: ExploredBook, keyword: String, mode: SearchMode) -> Bool {
+        let k = keyword.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !k.isEmpty else { return true }
+        let name = book.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let author = book.author.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let intro = book.intro.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        switch mode {
+        case .fuzzy:
+            return name.contains(k) || author.contains(k) || intro.contains(k)
+        case .precise:
+            if name == k || author == k { return true }
+            // 简介中作为独立片段命中（支持按主角名等精确检索）
+            let separators = CharacterSet(charactersIn: "，,。.；;、\n\t（）()【】[]“”\"' 　")
+            let tokens = intro.components(separatedBy: separators)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            return tokens.contains(k)
+        }
+    }
+
+    private func sourceLabel(_ source: BookSource) -> String {
+        source.bookSourceName.isEmpty ? source.bookSourceUrl : source.bookSourceName
+    }
+
+    // MARK: - 规则解析（逐源复用）
 
     /// 按 ruleSearch 提取结果：优先 per-element（bookList 选容器，逐元素求值），
     /// 回退整页规则 + 按索引压缩。
@@ -311,8 +488,8 @@ struct BookSearchView: View {
     }
 
     private func addToShelf(_ book: ExploredBook) {
-        guard let source = searchableSources.first(where: { $0.bookSourceUrl == selectedSourceURL }) else {
-            addedMessage = "书源不可用"
+        guard !book.sourceId.isEmpty else {
+            addedMessage = "该书目缺少来源书源，无法加入书架"
             return
         }
         guard !book.bookUrl.isEmpty else {
@@ -320,7 +497,7 @@ struct BookSearchView: View {
             return
         }
         // 去重：同一书源同一 bookUrl 已在书架则跳过
-        if bookStore.books.contains(where: { $0.sourceId == source.bookSourceUrl && $0.bookUrl == book.bookUrl }) {
+        if bookStore.books.contains(where: { $0.sourceId == book.sourceId && $0.bookUrl == book.bookUrl }) {
             addedMessage = "《\(book.name)》已在书架"
             return
         }
@@ -333,7 +510,7 @@ struct BookSearchView: View {
             remoteURL: book.bookUrl,
             addedAt: Date(),
             fileSize: nil,
-            sourceId: source.bookSourceUrl,
+            sourceId: book.sourceId,
             bookUrl: book.bookUrl
         )
         bookStore.addBook(newBook)

@@ -93,7 +93,11 @@ enum NetworkError: LocalizedError {
 ///   `gzip, deflate, br`，而 br（Brotli）它并不解压，二进制原文会让文本
 ///   解码失败并误报"无法解码返回内容（非文本）"；
 /// - UTF-8 优先、GB18030 / UTF-16 兜底，覆盖中文站点编码；
-/// - 调用方通过 `headers` 传入书源自定义请求头（对应 legado 的 header 字段）。
+/// - 调用方通过 `headers` 传入书源自定义请求头（对应 legado 的 header 字段）；
+/// - **证书信任委托**：legado 书源大量指向自签 / 过期 / 证书链不全的中文站点，
+///   `URLSession` 默认校验会直接抛 "A TLS error caused the secure connection
+///   to fail"。这里实现 `URLSessionDelegate` 信任所有服务器证书（对应 legado
+///   关闭 SSL 校验的行为），使书源导入 / 搜索 / 阅读对这类站点可用。
 final class NetworkService: ObservableObject {
     static let shared = NetworkService()
 
@@ -117,7 +121,26 @@ final class NetworkService: ObservableObject {
             // 关键：不接受压缩编码，避免 br/gzip 原文直接进入文本解码
             "Accept-Encoding": "identity",
         ]
-        session = URLSession(configuration: config)
+        // 信任所有证书（自签 / 过期 / 链不全的中文书源站点）
+        session = URLSession(configuration: config, delegate: TrustAllDelegate(), delegateQueue: nil)
+    }
+
+    // MARK: - 证书信任委托
+
+    /// 信任所有服务器证书。书源站点的 TLS 证书质量参差，关闭校验使导入 / 搜索
+    /// / 阅读对自签、过期、证书链不全的站点可用（与 legado 一致）。
+    private class TrustAllDelegate: NSObject, URLSessionDelegate {
+        func urlSession(_ session: URLSession,
+                        didReceive challenge: URLAuthenticationChallenge,
+                        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+                  let serverTrust = challenge.protectionSpace.serverTrust else {
+                completionHandler(.performDefaultHandling, nil)
+                return
+            }
+            // 接受任意证书：用系统提供的 trust 直接构造凭据
+            completionHandler(.useCredential, URLCredential(trust: serverTrust))
+        }
     }
 
     // MARK: - 公开接口
@@ -144,11 +167,39 @@ final class NetworkService: ObservableObject {
         try await performRequest(url: url, headers: headers, timeout: timeout)
     }
 
+    /// 带请求体的抓取（支持 POST 搜索等）：method 为 "GET"/"POST"，body 为已编码的
+    /// 请求体字节。用于 legado 书源 searchUrl 的 POST 形式（含 searchKey 占位符的 body）。
+    func fetchTextWithBody(from url: URL,
+                           method: String,
+                           body: Data?,
+                           headers: [String: String]? = nil,
+                           timeout: TimeInterval? = nil) async throws -> String {
+        let data = try await performRequestWithBody(url: url, method: method, body: body, headers: headers, timeout: timeout).0
+        return try Self.decodeText(data)
+    }
+
+    /// 带请求体的原始抓取（返回数据与响应），供需要状态码/编码判断的调用方
+    func fetchDataWithBody(from url: URL,
+                           method: String,
+                           body: Data?,
+                           headers: [String: String]? = nil,
+                           timeout: TimeInterval? = nil) async throws -> (Data, HTTPURLResponse) {
+        try await performRequestWithBody(url: url, method: method, body: body, headers: headers, timeout: timeout)
+    }
+
     // MARK: - 内部
 
     private func performRequest(url: URL,
                                 headers: [String: String]?,
                                 timeout: TimeInterval?) async throws -> (Data, HTTPURLResponse) {
+        try await performRequestWithBody(url: url, method: "GET", body: nil, headers: headers, timeout: timeout)
+    }
+
+    private func performRequestWithBody(url: URL,
+                                        method: String,
+                                        body: Data?,
+                                        headers: [String: String]?,
+                                        timeout: TimeInterval?) async throws -> (Data, HTTPURLResponse) {
         // scheme 前置校验：避免 URLSession 抛出难懂的 "unsupported URL"
         guard let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
@@ -157,9 +208,17 @@ final class NetworkService: ObservableObject {
         }
 
         var request = URLRequest(url: url)
+        request.httpMethod = method.uppercased()
         request.timeoutInterval = timeout ?? Self.defaultTimeout
         request.setValue(Self.iPhoneUA, forHTTPHeaderField: "User-Agent")
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        if let body {
+            request.httpBody = body
+            // POST 搜索常见表单编码；调用方也可通过 headers 覆盖
+            if request.value(forHTTPHeaderField: "Content-Type") == nil {
+                request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+            }
+        }
         headers?.forEach { key, value in
             request.setValue(value, forHTTPHeaderField: key)
         }
