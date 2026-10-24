@@ -21,8 +21,10 @@ enum URLSanitizer {
               let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https" else { return nil }
         guard let host = url.host, !host.isEmpty else { return nil }
-        // 完全合法则直接用
-        if s.rangeOfCharacter(from: CharacterSet.urlAllowed.inverted) == nil {
+        // 完全合法（RFC 3986 未保留+保留字符）则直接用
+        let legal = CharacterSet(charactersIn:
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~:/?#[]@!$&'()*+,;=%")
+        if s.rangeOfCharacter(from: legal.inverted) == nil {
             return url
         }
         // 含非法字符（空格、中文等）→ 用 URLComponents 重建并百分号编码

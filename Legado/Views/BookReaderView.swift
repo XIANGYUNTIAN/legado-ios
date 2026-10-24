@@ -461,7 +461,7 @@ struct BookReaderView: View {
         }
         let data = try Data(contentsOf: url)
         let gb = CFStringConvertEncodingToNSStringEncoding(
-            CFStringEncoding(CFStringEncodings.GB_18000_2000.rawValue)
+            CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)
         )
         let text = String(data: data, encoding: .utf8)
             ?? String(data: data, encoding: String.Encoding(rawValue: gb))

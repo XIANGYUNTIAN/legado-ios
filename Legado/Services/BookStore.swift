@@ -208,7 +208,7 @@ final class BookStore: ObservableObject {
         if sample.contains(0) { return false }
         if String(data: sample, encoding: .utf8) != nil { return true }
         let gb = CFStringConvertEncodingToNSStringEncoding(
-            CFStringEncoding(CFStringEncodings.GB_18000_2000.rawValue)
+            CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)
         )
         return String(data: sample, encoding: String.Encoding(rawValue: gb)) != nil
     }
