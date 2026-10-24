@@ -192,8 +192,12 @@ final class EPUBReader {
             zstream.next_in = UnsafeMutablePointer<UInt8>(mutating: inBase)
             zstream.avail_in = uInt(data.count)
 
+            // inflateInit2 是 C 宏，Swift 不可见，需调用底层 inflateInit2_
             // 15 + 32：自动识别 zlib/gzip 头
-            guard inflateInit2(&zstream, 15 + 32) == Z_OK else {
+            let version = strdup("1.3")
+            defer { free(version) }
+            guard inflateInit2_(&zstream, 15 + 32, version,
+                                Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
                 throw EPUBError.unsupportedCompression
             }
 
