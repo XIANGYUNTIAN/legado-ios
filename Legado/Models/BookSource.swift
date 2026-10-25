@@ -105,6 +105,13 @@ struct SourceRuleSet: Codable, Equatable {
 /// 因此这里全部改为 `decodeIfPresent` + 默认值，并对类型做宽松强转。
 struct BookSource: Codable, Identifiable, Equatable {
     var bookSourceUrl: String = ""
+
+    /// 书源基准 URL（用于拼接相对路径）。bookSourceUrl 可能是相对路径或非法链接，
+    /// 此处只做 best-effort 解析，失败则返回 nil（调用方需自行处理）。
+    var bookSourceURL: URL? {
+        URLSanitizer.sanitize(bookSourceUrl)
+            ?? URL(string: bookSourceUrl)
+    }
     var bookSourceName: String = ""
     var bookSourceGroup: String?
     var bookSourceType: BookSourceType = .text

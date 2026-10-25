@@ -714,12 +714,21 @@ struct BookReaderView: View {
 
     /// 用书源 ruleToc 抓取目录（纯函数，不修改 @State）
     private func fetchRuleChapters() async throws -> [ReaderChapter] {
-        guard let source = sourceStore.sources.first(where: { $0.bookSourceUrl == book.sourceId }),
-              let rules = source.ruleToc, !rules.isEmpty else {
-            throw RuleError.unsupportedMode("书源缺少目录规则")
+        guard let source = sourceStore.sources.first(where: { $0.bookSourceUrl == book.sourceId }) else {
+            throw RuleError.unsupportedMode("书源不存在或已删除（sourceId=\(book.sourceId ?? "nil")）")
         }
-        guard let bookUrlStr = book.bookUrl, let bookURL = URLSanitizer.sanitize(bookUrlStr) else {
-            throw RuleError.unsupportedMode("书籍 URL 无效")
+        guard let rules = source.ruleToc, !rules.isEmpty else {
+            throw RuleError.unsupportedMode("书源「\(source.bookSourceName)」缺少目录规则（ruleToc 为空），无法阅读")
+        }
+        // bookUrl 可能是相对路径（如 /book/12345.html），需拼接书源基准 URL。
+        // legado 书源的 bookUrl 大量是相对路径，只做 URLSanitizer 会全部失败。
+        guard let bookUrlStr = book.bookUrl else {
+            throw RuleError.unsupportedMode("书籍缺少 bookUrl")
+        }
+        let bookURL = resolveURL(bookUrlStr, base: source.bookSourceURL)
+            ?? URLSanitizer.sanitize(bookUrlStr)
+        guard let bookURL else {
+            throw RuleError.unsupportedMode("书籍 URL 无效：\(bookUrlStr)")
         }
         let html = try await NetworkService.shared.fetchText(from: bookURL)
         let extracted = try extractToc(html: html, rules: rules, base: bookURL)
@@ -732,13 +741,19 @@ struct BookReaderView: View {
         guard chapters.indices.contains(index) else { return "" }
         let chapter = chapters[index]
         if let text = chapter.text, !text.isEmpty { return text }
-        guard let url = chapter.url, let u = URLSanitizer.sanitize(url) else {
+        guard let url = chapter.url else {
+            return chapter.text ?? ""
+        }
+        // 章节 URL 可能是相对路径（如 /chapter/123.html），需拼接书源基准 URL。
+        guard let source = sourceStore.sources.first(where: { $0.bookSourceUrl == book.sourceId }) else {
+            return "书源不存在或已删除"
+        }
+        let u = resolveURL(url, base: source.bookSourceURL)
+            ?? URLSanitizer.sanitize(url)
+        guard let u else {
             return chapter.text ?? ""
         }
         do {
-            guard let source = sourceStore.sources.first(where: { $0.bookSourceUrl == book.sourceId }) else {
-                return "书源不存在或已删除"
-            }
             let html = try await NetworkService.shared.fetchText(from: u)
             let engine = RuleEngine()
             let contentRule = source.ruleContent?.content ?? ""
