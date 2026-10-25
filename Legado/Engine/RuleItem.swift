@@ -21,13 +21,13 @@ enum BookListAnalyzer {
     ///           JSONPath、XPath、正则（`:regex` allInOne）、JS
     ///   - html: 页面内容
     ///   - engine: 共享引擎实例（变量跨字段共享、`$N` 分组按元素维护）
-    ///   - error: 出参——规则解析失败的具体原因（nil 表示「规则正常执行但无匹配」，
+    ///   - ruleError: 出参——规则解析失败的具体原因（nil 表示「规则正常执行但无匹配」，
     ///     如书源确实没有这本书；调用方据此区分「失败」与「无匹配」）
     /// - Returns: 元素列表（空列表 + error=nil 表示无匹配）
-    static func items(rule: String, html: String, engine: RuleEngine, error: inout String?) -> [RuleItem] {
+    static func items(rule: String, html: String, engine: RuleEngine, ruleError: inout String?) -> [RuleItem] {
         let trimmed = rule.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            error = "容器规则为空"
+            ruleError = "容器规则为空"
             return []
         }
         let lower = trimmed.lowercased()
@@ -42,10 +42,10 @@ enum BookListAnalyzer {
                 // 取桥内最近一次 getElement 命中
                 let cached = engine.lastGetElements()
                 if !cached.isEmpty { return cached.map { .element($0) } }
-                error = "JS 规则未返回元素（java.getElement 无命中）"
+                ruleError = "JS 规则未返回元素（java.getElement 无命中）"
                 return []
             } catch {
-                error = "JS 规则执行失败：\(error.localizedDescription)"
+                ruleError = "JS 规则执行失败：\(error.localizedDescription)"
                 return []
             }
         }
@@ -55,11 +55,11 @@ enum BookListAnalyzer {
             do {
                 let elements = try HtmlRuleEngine.shared.elements(trimmed, rootHTML: html)
                 if elements.isEmpty {
-                    error = "CSS 选择器未匹配到元素（页面结构可能已改版）"
+                    ruleError = "CSS 选择器未匹配到元素（页面结构可能已改版）"
                 }
                 return elements.map { .element($0) }
             } catch {
-                error = "CSS 规则解析失败：\(error.localizedDescription)"
+                ruleError = "CSS 规则解析失败：\(error.localizedDescription)"
                 return []
             }
         }
@@ -70,11 +70,11 @@ enum BookListAnalyzer {
                 let value = try engine.evaluate(trimmed, content: html)
                 let items = itemsFromValue(value)
                 if items.isEmpty {
-                    error = "JSONPath 未匹配到数据（响应可能不是 JSON 或结构已变）"
+                    ruleError = "JSONPath 未匹配到数据（响应可能不是 JSON 或结构已变）"
                 }
                 return items
             } catch {
-                error = "JSON 规则求值失败：\(error.localizedDescription)"
+                ruleError = "JSON 规则求值失败：\(error.localizedDescription)"
                 return []
             }
         }
@@ -85,11 +85,11 @@ enum BookListAnalyzer {
             do {
                 let elements = try HtmlRuleEngine.shared.elementsXPath(path, rootHTML: html)
                 if elements.isEmpty {
-                    error = "XPath 未匹配到元素"
+                    ruleError = "XPath 未匹配到元素"
                 }
                 return elements.map { .element($0) }
             } catch {
-                error = "XPath 规则解析失败：\(error.localizedDescription)"
+                ruleError = "XPath 规则解析失败：\(error.localizedDescription)"
                 return []
             }
         }
@@ -101,7 +101,7 @@ enum BookListAnalyzer {
         }
         let matches = engine.evaluateRegexMatches(pattern, content: html)
         if matches.isEmpty {
-            error = "正则未匹配到内容"
+            ruleError = "正则未匹配到内容"
         }
         return matches.map { .regex($0) }
     }

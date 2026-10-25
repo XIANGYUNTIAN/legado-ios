@@ -359,7 +359,7 @@ final class NetworkService: ObservableObject {
             return .utf16
         case "big5", "big-5", "big5-hkscs":
             let big5 = CFStringConvertEncodingToNSStringEncoding(
-                CFStringEncoding(CFStringEncodings.Big5.rawValue)
+                CFStringEncoding(CFStringEncodings.big5.rawValue)
             )
             return String.Encoding(rawValue: big5)
         case "iso-8859-1", "latin1", "ascii", "us-ascii":

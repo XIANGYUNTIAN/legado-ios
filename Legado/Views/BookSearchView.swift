@@ -597,12 +597,12 @@ struct BookSearchView: View {
     private func parseSearchRequest(raw: String) -> ParsedSearchRequest {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let range = trimmed.range(of: ",{") else {
-            return ParsedSearchRequest(url: trimmed, method: "GET", body: nil, headers: [:])
+            return ParsedSearchRequest(url: trimmed, method: "GET", body: nil, headers: [:], charset: nil)
         }
         let urlPart = String(trimmed[trimmed.startIndex..<range.lowerBound])
         let optionsString = String(trimmed[range.lowerBound..<trimmed.endIndex]).dropFirst() // 去掉逗号，留 {…}
         guard let data = optionsString.data(using: .utf8) else {
-            return ParsedSearchRequest(url: urlPart, method: "GET", body: nil, headers: [:])
+            return ParsedSearchRequest(url: urlPart, method: "GET", body: nil, headers: [:], charset: nil)
         }
         // 先试标准双引号 JSON，失败则单引号→双引号转换后再试。
         // legado 书源的选项后缀大量使用单引号（如 {'method':'post','body':'...'}），
@@ -617,7 +617,7 @@ struct BookSearchView: View {
             ) as? [String: Any]
         }
         guard let obj else {
-            return ParsedSearchRequest(url: urlPart, method: "GET", body: nil, headers: [:])
+            return ParsedSearchRequest(url: urlPart, method: "GET", body: nil, headers: [:], charset: nil)
         }
         let method = (obj["method"] as? String) ?? "GET"
         let body = obj["body"] as? String
@@ -711,7 +711,7 @@ struct BookSearchView: View {
         }
 
         var ruleError: String?
-        let items = BookListAnalyzer.items(rule: listRule, html: html, engine: engine, error: &ruleError)
+        let items = BookListAnalyzer.items(rule: listRule, html: html, engine: engine, ruleError: &ruleError)
         if items.isEmpty {
             if let ruleError {
                 // 规则解析失败（区别于「书源没有这本书」）——抛出带具体原因的可见错误

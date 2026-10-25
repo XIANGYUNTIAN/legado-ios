@@ -845,7 +845,7 @@ struct BookReaderView: View {
         engine.setChapter(title: nil, nextUrl: nil)
 
         var ruleError: String?
-        let items = BookListAnalyzer.items(rule: listRule, html: html, engine: engine, error: &ruleError)
+        let items = BookListAnalyzer.items(rule: listRule, html: html, engine: engine, ruleError: &ruleError)
         guard !items.isEmpty else {
             if let ruleError {
                 throw RuleError.ruleFailed(ruleError)
