@@ -1,5 +1,4 @@
 import SwiftUI
-import SwiftSoup
 
 /// 搜索模式：模糊 = 关键词作为子串命中书名/作者/简介；精确 = 书名/作者完全相等，
 /// 或简介中作为独立片段命中（支持按主角名等精确检索）。
@@ -45,6 +44,11 @@ private actor SearchSemaphore {
 
 /// 书源搜索：遍历全部可搜索书源，按 ruleSearch 规则检索书籍，一键加入书架。
 /// 加入书架的书籍保留 sourceId + bookUrl，阅读时走规则阅读路径。
+///
+/// searchUrl 三阶段流水线（对齐 legado AnalyzeUrl）：
+/// ① analyzeJs —— `@js:` / `<js>` 求值（绑定 key / page / baseUrl / java / source / result）；
+/// ② replaceKeyPage —— `{{key}}` / `searchKey` / `{{page}}` / `searchPage` 占位符替换；
+/// ③ splitUrlOptions —— 最后按 `,{` 切分 URL 与选项（method / body / headers / charset）。
 struct BookSearchView: View {
     @EnvironmentObject private var sourceStore: BookSourceStore
     @EnvironmentObject private var bookStore: BookStore
@@ -80,6 +84,7 @@ struct BookSearchView: View {
         let withPlaceholder = all.filter {
             let raw = $0.searchUrl ?? ""
             return raw.contains("{{key}}") || raw.contains("searchKey")
+                || raw.lowercased().hasPrefix("@js:") || raw.hasPrefix("<js>")
         }.count
         let withRule = all.filter { !($0.ruleSearch?.bookList ?? "").isEmpty }.count
         let disabledCount = all.filter { !$0.enabled }.count
@@ -88,7 +93,7 @@ struct BookSearchView: View {
             return "已导入 \(all.count) 个书源，仅 \(trimmedSearchURLCount) 个带 searchUrl 字段。缺失该字段的多为旧版本导入（当时未持久化 searchUrl）——请到「书源」页重新导入同一份书源 JSON 即可刷新。"
         }
         if withPlaceholder < trimmedSearchURLCount {
-            return "书源的搜索地址均不含 {{key}} / searchKey 占位符，无法拼接搜索请求。"
+            return "书源的搜索地址均不含 {{key}} / searchKey 占位符（或 @js: 构造形式），无法拼接搜索请求。"
         }
         if withRule < withPlaceholder {
             return "书源缺少 ruleSearch.bookList 规则，无法解析搜索结果。"
@@ -96,7 +101,7 @@ struct BookSearchView: View {
         if disabledCount == all.count {
             return "全部 \(all.count) 个书源均被停用。请到「书源」页开启后再搜索。"
         }
-        return "已导入 \(all.count) 个书源，但均不满足搜索条件（需 searchUrl 含 {{key}}/searchKey 占位符 + ruleSearch.bookList 规则，且书源处于启用状态）。"
+        return "已导入 \(all.count) 个书源，但均不满足搜索条件（需 searchUrl 含 {{key}}/searchKey 占位符或 @js: 构造 + ruleSearch.bookList 规则，且书源处于启用状态）。"
     }
 
     var body: some View {
@@ -385,8 +390,8 @@ struct BookSearchView: View {
                 } else {
                     errorMessage = nil
                 }
-                // 诊断摘要：让用户理解「成功但未命中」与「失败」的区别。
-                // 成功但未命中 = HTTP 200 但搜索结果不含关键词（书源内容不覆盖该小说）。
+                // 诊断摘要：命中 / 成功但未命中 / 失败 三分类。
+                // 「成功但未命中」= HTTP 200 且规则解析成功但无匹配书籍。
                 if timedOut {
                     searchSummary = "⏱ 已达 \(Int(globalBudget))s 全局预算，提前结束（完成 \(completed)/\(total) 个书源）"
                 } else {
@@ -404,8 +409,43 @@ struct BookSearchView: View {
         progressText = nil
     }
 
-    /// 单个书源搜索：解析 searchUrl（含 POST 选项后缀）、发请求、按规则解析、
-    /// 再按关键词与模式过滤。返回已标注来源、已按模式过滤的结果。
+    // MARK: - searchUrl 三阶段流水线（对齐 legado AnalyzeUrl）
+
+    /// 阶段一：`@js:` / `<js>` 求值。绑定 key / page / baseUrl / java / source / result / cookie。
+    /// 非 JS 形态原样返回。
+    private func analyzeSearchUrlJS(_ raw: String, engine: RuleEngine, keyword: String) throws -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        guard lower.contains("@js:") || trimmed.contains("<js>") else {
+            return raw
+        }
+        return try engine.evaluateSearchUrl(trimmed, keyword: keyword, page: 1)
+    }
+
+    /// 阶段二：占位符替换。`{{key}}` / `searchKey` → 编码后关键词；`{{page}}` / `searchPage` → 页码。
+    private func replaceKeyPage(_ urlString: String, keyword: String, page: Int = 1) -> String {
+        let encoded = Self.encodeSearchKey(keyword)
+        var output = urlString
+        output = output.replacingOccurrences(of: "{{key}}", with: encoded)
+        output = output.replacingOccurrences(of: "searchKey", with: encoded)
+        output = output.replacingOccurrences(of: "{{searchPage}}", with: "\(page)")
+        output = output.replacingOccurrences(of: "searchPage", with: "\(page)")
+        return output
+    }
+
+    /// 搜索关键词编码：查询/路径通用安全字符集，`+` 强制编码（避免被当作空格）
+    static let searchKeyAllowed: CharacterSet = {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.insert("/")
+        allowed.remove("+")
+        return allowed
+    }()
+
+    static func encodeSearchKey(_ keyword: String) -> String {
+        keyword.addingPercentEncoding(withAllowedCharacters: searchKeyAllowed) ?? keyword
+    }
+
+    /// 单个书源搜索：三阶段求值 searchUrl → 发请求 → per-element 规则解析 → 按模式过滤。
     /// - Parameter timeout: 请求超时（秒），搜索页用较短值避免死站阻塞整体进度。
     private func performSingleSourceSearch(source: BookSource,
                                             keyword: String,
@@ -415,21 +455,35 @@ struct BookSearchView: View {
         guard !rawSearchURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw NetworkError.invalidURL
         }
-        let request = parseSearchRequest(raw: rawSearchURL)
-        // 占位符可能在 URL，也可能只在 POST body（如 method=POST, body=key={{key}}）。
-        // 旧实现只查 URL，导致 body-only 的 POST 书源被误判「链接格式不正确」而全部失败。
-        let bodyTemplateText = request.body ?? ""
-        let hasKeyPlaceholder = request.url.contains("{{key}}")
-            || request.url.contains("searchKey")
-            || bodyTemplateText.contains("{{key}}")
-            || bodyTemplateText.contains("searchKey")
-            || rawSearchURL.contains("{{key}}")
-            || rawSearchURL.contains("searchKey")
-        guard hasKeyPlaceholder else {
-            throw NetworkError.invalidURL
+
+        // 共享引擎实例：变量跨 searchUrl → bookList → 各字段生效（@put/@get），
+        // 同时携带 source / baseUrl 上下文供 JS 绑定使用。
+        let engine = RuleEngine()
+        engine.setSource(source)
+        engine.setBaseUrl(source.bookSourceUrl)
+        engine.setChapter(title: nil, nextUrl: nil)
+
+        // 阶段一：JS 求值（JS 形态失败直接抛出，错误对用户可见）
+        let jsEvaluated = try analyzeSearchUrlJS(rawSearchURL, engine: engine, keyword: keyword)
+
+        // 阶段二：占位符替换
+        let urlStr = replaceKeyPage(jsEvaluated, keyword: keyword, page: 1)
+
+        // 阶段三：切分 URL 与选项（此时 `,{` 才是选项边界）
+        let request = parseSearchRequest(raw: urlStr)
+
+        // 占位符校验：非 JS 形态必须真的带过 key（JS 形态由 JS 自行构造，放行）
+        let isJSForm = rawSearchURL.lowercased().contains("@js:") || rawSearchURL.contains("<js>")
+        if !isJSForm {
+            let hasKeyPlaceholder = jsEvaluated.contains("{{key}}")
+                || jsEvaluated.contains("searchKey")
+                || urlStr.contains(Self.encodeSearchKey(keyword))
+            guard hasKeyPlaceholder else {
+                throw NetworkError.invalidURL
+            }
         }
-        let encoded = keyword.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? keyword
-        // 占位符替换：{{key}} / searchKey → 关键词；{{searchPage}} / searchPage → 页码。
+
+        let encoded = Self.encodeSearchKey(keyword)
         var finalURLString = request.url
         finalURLString = finalURLString.replacingOccurrences(of: "{{key}}", with: encoded)
         finalURLString = finalURLString.replacingOccurrences(of: "searchKey", with: encoded)
@@ -471,7 +525,9 @@ struct BookSearchView: View {
             html = try await NetworkService.shared.fetchText(from: finalURL, headers: mergedHeaders, timeout: timeout)
         }
 
-        let extracted = try extractSearchResults(html: html, rules: rules, base: finalURL, sourceBase: source.bookSourceURL)
+        let extracted = try extractSearchResults(
+            html: html, rules: rules, source: source, base: finalURL, engine: engine
+        )
         let sourceName = source.bookSourceName.isEmpty ? source.bookSourceUrl : source.bookSourceName
         return extracted
             .filter { matches($0, keyword: keyword, mode: mode) }
@@ -491,6 +547,7 @@ struct BookSearchView: View {
 
     /// 解析 legado 的 searchUrl：`url,{"method":"POST","body":"...","headers":{...}}`。
     /// 找不到选项后缀则视为 GET；body 中的 {{key}} 由调用方替换。
+    /// 注意：必须在 @js: 求值之后调用（legado AnalyzeUrl 第三阶段）。
     private func parseSearchRequest(raw: String) -> ParsedSearchRequest {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let range = trimmed.range(of: ",{") else {
@@ -589,67 +646,44 @@ struct BookSearchView: View {
         return result
     }
 
-    // MARK: - 规则解析（逐源复用）
+    // MARK: - per-element 规则解析（对应 legado BookListAnalyzer）
 
-    /// 按 ruleSearch 提取结果：优先 per-element（bookList 选容器，逐元素求值），
-    /// 回退整页规则 + 按索引压缩。
-    private func extractSearchResults(html: String, rules: SourceRuleSet, base: URL, sourceBase: URL? = nil) throws -> [ExploredBook] {
+    /// 按 ruleSearch 提取结果：bookList 求值产元素列表（CSS / JSON / 正则 / JS），
+    /// 再逐元素求值 name / author / intro / bookUrl / coverUrl / lastChapter。
+    /// 引擎实例与 searchUrl 阶段共享，保证 @put/@get 变量跨字段生效。
+    private func extractSearchResults(html: String,
+                                      rules: SourceRuleSet,
+                                      source: BookSource,
+                                      base: URL,
+                                      engine: RuleEngine) throws -> [ExploredBook] {
         let listRule = rules.bookList ?? ""
-        let nameRule = rules.name ?? ""
-        let authorRule = rules.author ?? ""
-        let introRule = rules.intro ?? ""
-        let bookUrlRule = rules.bookUrl ?? ""
-        let coverRule = rules.coverUrl ?? ""
-        let lastRule = rules.lastChapter ?? ""
-
-        // per-element 模式（仅 CSS 选择器可直接取元素节点）
-        if listRule.hasPrefix("@css:") || listRule.hasPrefix("@@") {
-            let selector = stripCssPrefix(listRule)
-            // SwiftSoup 解析/选择器可能因 malformed HTML 或选择器不匹配而抛出，
-            // 这里静默失败并回退到整页规则路径，避免单个书源的 HTML 小瑕疵拖垮全局搜索。
-            if let document = try? SwiftSoup.parse(html),
-               let elements = try? document.select(selector) {
-                var result: [ExploredBook] = []
-                for element in elements {
-                    let name = HtmlRuleEngine.extractValue(nameRule, on: element)
-                    guard !name.isEmpty else { continue }
-                    let bookUrl = HtmlRuleEngine.extractValue(bookUrlRule, on: element)
-                    // 书源的 bookUrl 通常相对于书源根路径（如 /book/12345.html），
-                    // 优先用书源基准 URL 解析，避免拼接到搜索 URL 路径下导致 404。
-                    let resolved = resolveURL(bookUrl, base: sourceBase)
-                        ?? resolveURL(bookUrl, base: base)
-                        ?? URLSanitizer.sanitize(bookUrl)
-                    result.append(ExploredBook(
-                        name: name,
-                        author: HtmlRuleEngine.extractValue(authorRule, on: element),
-                        intro: HtmlRuleEngine.extractValue(introRule, on: element),
-                        bookUrl: resolved?.absoluteString ?? bookUrl,
-                        coverUrl: HtmlRuleEngine.extractValue(coverRule, on: element),
-                        lastChapter: HtmlRuleEngine.extractValue(lastRule, on: element)
-                    ))
-                }
-                if !result.isEmpty { return result }
-            }
+        guard !listRule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw NetworkError.invalidURL
         }
 
-        // 回退：整页规则 + 按索引压缩
-        let nameEngine = RuleEngine()
-        let urlEngine = RuleEngine()
-        let names = (try? nameEngine.getStringList(nameRule, content: html)) ?? []
-        let urls = (try? urlEngine.getStringList(bookUrlRule, content: html)) ?? []
-        let count = min(names.count, urls.count)
+        let items = BookListAnalyzer.items(rule: listRule, html: html, engine: engine)
+        if items.isEmpty {
+            // 规则解析失败或无匹配：给出可定位的错误（不再静默计入「成功但未命中」）
+            throw RuleError.emptyResult
+        }
+
         var result: [ExploredBook] = []
-        for i in 0..<count {
-            let resolved = resolveURL(urls[i], base: sourceBase)
-                ?? resolveURL(urls[i], base: base)
-                ?? URLSanitizer.sanitize(urls[i])
+        for item in items {
+            let name = BookListAnalyzer.field(rules.name, item: item, engine: engine)
+            guard !name.isEmpty else { continue }
+            let bookUrlRaw = BookListAnalyzer.field(rules.bookUrl, item: item, engine: engine)
+            // 书源的 bookUrl 通常相对于书源根路径（如 /book/12345.html），
+            // 优先用书源基准 URL 解析，避免拼接到搜索 URL 路径下导致 404。
+            let resolved = resolveURL(bookUrlRaw, base: source.bookSourceURL)
+                ?? resolveURL(bookUrlRaw, base: base)
+                ?? URLSanitizer.sanitize(bookUrlRaw)
             result.append(ExploredBook(
-                name: names[i],
-                author: "",
-                intro: "",
-                bookUrl: resolved?.absoluteString ?? urls[i],
-                coverUrl: "",
-                lastChapter: ""
+                name: name,
+                author: BookListAnalyzer.field(rules.author, item: item, engine: engine),
+                intro: BookListAnalyzer.field(rules.intro, item: item, engine: engine),
+                bookUrl: resolved?.absoluteString ?? bookUrlRaw,
+                coverUrl: BookListAnalyzer.field(rules.coverUrl, item: item, engine: engine),
+                lastChapter: BookListAnalyzer.field(rules.lastChapter, item: item, engine: engine)
             ))
         }
         return result
@@ -679,7 +713,8 @@ struct BookSearchView: View {
             addedAt: Date(),
             fileSize: nil,
             sourceId: book.sourceId,
-            bookUrl: book.bookUrl
+            bookUrl: book.bookUrl,
+            originName: book.sourceName
         )
         bookStore.addBook(newBook)
         addedMessage = "已加入书架：《\(book.name)》"
@@ -687,19 +722,10 @@ struct BookSearchView: View {
 
     // MARK: - 工具
 
-    private func stripCssPrefix(_ rule: String) -> String {
-        var body = rule.trimmingCharacters(in: .whitespacesAndNewlines)
-        if body.lowercased().hasPrefix("@css:") {
-            body = String(body.dropFirst(5))
-        } else if body.hasPrefix("@@") {
-            body = String(body.dropFirst(2))
-        }
-        return body.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func resolveURL(_ relative: String, base: URL) -> URL? {
+    private func resolveURL(_ relative: String, base: URL?) -> URL? {
         guard !relative.isEmpty else { return nil }
         if let url = URLSanitizer.sanitize(relative) { return url }
+        guard let base else { return nil }
         return URL(string: relative, relativeTo: base)?.absoluteURL
     }
 }

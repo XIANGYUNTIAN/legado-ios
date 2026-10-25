@@ -173,7 +173,7 @@ case .css: return "@css:ul.chapters li a@text"
     }
 
     /// CSS / XPath 在此直接经 HtmlRuleEngine 求值（不经 RuleEngine 的链式包装），
-    /// 便于在测试台观察原始命中结果。
+    /// 便于在测试台观察原始命中结果。裸规则按 legado 默认语义 = CSS。
     private func evaluateCssXPath(_ rule: String, content: String) throws -> [String] {
         let trimmed = rule.trimmingCharacters(in: .whitespacesAndNewlines)
         let lower = trimmed.lowercased()
@@ -187,7 +187,11 @@ case .css: return "@css:ul.chapters li a@text"
             return try HtmlRuleEngine.shared.evaluateXPath(String(trimmed.dropFirst(7)), rootHTML: content)
         }
         // 裸 XPath
-        return try HtmlRuleEngine.shared.evaluateXPath(trimmed, rootHTML: content)
+        if trimmed.hasPrefix("/") || trimmed.hasPrefix("//") {
+            return try HtmlRuleEngine.shared.evaluateXPath(trimmed, rootHTML: content)
+        }
+        // 裸规则：legado 默认模式 = CSS
+        return try HtmlRuleEngine.shared.evaluateCss(trimmed, rootHTML: content)
     }
 }
 

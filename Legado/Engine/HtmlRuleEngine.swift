@@ -1,48 +1,7 @@
 import Foundation
 import SwiftSoup
 
-// MARK: - 提取器
-
-/// legado 规则串尾部的抽取器关键字（@text / @html / @href …）
-/// 与 Android 端 AnalyzeRule 的 getElements / Element 的 attr/text 取值方式对齐。
-enum HtmlExtractor: String {
-    case text
-    case html
-    case ownText
-    case href
-    case src
-    case srcset
-    case dataSrc
-    case className
-    case id
-    case tag
-
-    /// 大小写与常见别名（data-srcset / class / classname）统一映射
-    static let table: [String: HtmlExtractor] = [
-        "text": .text,
-        "html": .html,
-        "owntext": .ownText,
-        "ownText": .ownText,
-        "own_text": .ownText,
-        "href": .href,
-        "src": .src,
-        "srcset": .srcset,
-        "data-src": .dataSrc,
-        "data-srcset": .dataSrc,
-        "datasrc": .dataSrc,
-        "data_src": .dataSrc,
-        "class": .className,
-        "classname": .className,
-        "id": .id,
-        "tag": .tag,
-    ]
-}
-
-/// 解析后的 CSS 规则：选择器 + 抽取器（抽取器为 nil 时默认取文本）
-struct CssRule {
-    let selector: String
-    let extractor: HtmlExtractor?
-}
+// MARK: - CSS 规则错误
 
 enum CssRuleError: LocalizedError {
     case parseError(String)
@@ -58,51 +17,18 @@ enum CssRuleError: LocalizedError {
     }
 }
 
-// MARK: - CSS 规则解析
-
-/// 从 `@css:selector@extractor`（或 `@@selector@extractor`）切出选择器与抽取器。
-/// 抽取器只认规则串**末尾**的 `@<关键字>`，避免误伤选择器内部的 `@`。
-final class CssRuleParser {
-    static let shared = CssRuleParser()
-
-    /// 末尾抽取器匹配：@ 后跟字母/数字/下划线/连字符，且必须是已知关键字
-    private static let extractorRegex = try? NSRegularExpression(
-        pattern: "@([A-Za-z0-9_-]+)$",
-        options: []
-    )
-
-    func parse(_ body: String) -> CssRule {
-        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let regex = Self.extractorRegex else {
-            return CssRule(selector: trimmed, extractor: nil)
-        }
-        let ns = trimmed as NSString
-        let matches = regex.matches(in: trimmed, range: NSRange(location: 0, length: ns.length))
-        // 从最后一个匹配向前找第一个已知关键字（选择器本身可能不含 @，故通常只有一个）
-        for match in matches.reversed() {
-            let word = ns.substring(with: match.range(at: 1)).lowercased()
-            if let extractor = HtmlExtractor.table[word] {
-                let selector = ns.substring(to: match.range.location)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                return CssRule(selector: selector, extractor: extractor)
-            }
-        }
-        return CssRule(selector: trimmed, extractor: nil)
-    }
-}
-
 // MARK: - XPath 引擎
 
 /// 最小可用的 XPath 子集求值器，基于 SwiftSoup 的 Element 树。
 ///
 /// 支持的语法（覆盖 legado 书源常见写法）：
-/// - 轴：`/` 子轴，`//` 后代轴（含自身）
-/// - 节点测试：元素名（或 `*`）、`text()`、`@attr`
-/// - 谓词：`[n]`、`[last()]`、`[position()=n]`、`[@attr]`、`[@attr="v"]`、
-///   `[@attr~="v"]`（词包含）、`contains(@attr,"v")`、`starts-with(@attr,"v")`
+/// - 轴：`/` 子轴，`//` 后代轴（含自身），`following-sibling::` / `preceding-sibling::`，
+///   `self::` / `parent::` / `descendant::` / `child::`（显式轴名）
+/// - 节点测试：元素名（或 `*`）、`text()`、`node()`、`@attr`
+/// - 谓词：`[n]`（负索引从末尾计）、`[last()]`、`[position()=n]`、`[@attr]`、
+///   `[@attr="v"]`、`[@attr~="v"]`（词包含）、`contains(@attr,"v")`、`starts-with(@attr,"v")`
 ///
-/// 不支持的语法（如轴 sibling/following/preceding、`contains(text(),"x")` 等）
-/// 会抛出 `XPathError.unsupported`，由调用方给出友好提示，不会崩溃。
+/// 不支持的语法会抛出 `XPathError.unsupported`，由调用方给出友好提示，不会崩溃。
 enum XPathError: LocalizedError {
     case parseError(String)
     case unsupported(String)
@@ -120,7 +46,14 @@ final class XPathEvaluator {
 
     // MARK: 轴 / 节点测试 / 谓词
 
-    private enum Axis { case child, descendant }
+    private enum Axis {
+        case child
+        case descendant
+        case followingSibling
+        case precedingSibling
+        case selfAxis
+        case parent
+    }
 
     private enum NodeTest {
         case element(String)   // 元素名或 "*"
@@ -146,7 +79,24 @@ final class XPathEvaluator {
         let document = try Self.parseHTML(rootHTML)
         let steps = try Self.parse(path)
         guard let lastStep = steps.last else { return [] }
+        let elements = try walk(steps: steps, from: document)
+        var output: [String] = []
+        for element in elements {
+            let value = outputValue(element, test: lastStep.test)
+            if !value.isEmpty { output.append(value) }
+        }
+        return output
+    }
 
+    /// 对给定 HTML 求值 XPath，返回元素列表（per-element 容器规则用）
+    func elements(_ path: String, rootHTML: String) throws -> [Element] {
+        let document = try Self.parseHTML(rootHTML)
+        let steps = try Self.parse(path)
+        return try walk(steps: steps, from: document)
+    }
+
+    /// 按步骤走查，返回最终元素集
+    private func walk(steps: [Step], from document: Document) throws -> [Element] {
         var current: [Element] = [document]
         for step in steps {
             var collected: [Element] = []
@@ -170,13 +120,7 @@ final class XPathEvaluator {
             }
             current = next
         }
-
-        var output: [String] = []
-        for element in current {
-            let value = outputValue(element, test: lastStep.test)
-            if !value.isEmpty { output.append(value) }
-        }
-        return output
+        return current
     }
 
     // MARK: 节点测试匹配
@@ -198,7 +142,9 @@ final class XPathEvaluator {
         for predicate in predicates {
             switch predicate {
             case .position(let n):
-                if position != n { return false }
+                // 负索引从末尾计（legado 书源常见 `[-1]` 取最后一个）
+                let target = n >= 0 ? n : last + n + 1
+                if position != target { return false }
             case .last:
                 if position != last { return false }
             case .positionEquals(let n):
@@ -247,7 +193,27 @@ final class XPathEvaluator {
                 stack.append(contentsOf: Array(element.children()))
             }
             return result
+        case .selfAxis:
+            return [node]
+        case .parent:
+            guard let parent = (try? node.parent()) else { return [] }
+            return [parent]
+        case .followingSibling:
+            return siblings(of: node, after: true)
+        case .precedingSibling:
+            return siblings(of: node, after: false)
         }
+    }
+
+    /// 后续 / 前置兄弟元素（经父元素 children 定位，避免依赖可抛 API）
+    private func siblings(of node: Element, after: Bool) -> [Element] {
+        guard let parent = (try? node.parent()) else { return [] }
+        let children = Array(parent.children())
+        guard let index = children.firstIndex(where: { $0 === node }) else { return [] }
+        if after {
+            return index + 1 < children.count ? Array(children[(index + 1)...]) : []
+        }
+        return index > 0 ? Array(children[..<index]) : []
     }
 
     // MARK: HTML 解析
@@ -299,7 +265,18 @@ final class XPathEvaluator {
                 index += 1
             }
             let testText = String(chars[testStart..<index]).trimmingCharacters(in: .whitespaces)
-            let test = try parseNodeTest(testText)
+
+            // 显式轴名（`following-sibling::dd` 等）：覆盖由 "/" 推导出的轴
+            if let separator = testText.range(of: "::") {
+                let axisName = String(testText[..<separator.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                if let explicit = axisByName(axisName) {
+                    axis = explicit
+                }
+            }
+            let bareTest = testText.components(separatedBy: "::").last ?? testText
+            let test = try parseNodeTest(bareTest)
 
             // 读取谓词
             var predicates: [Predicate] = []
@@ -316,6 +293,18 @@ final class XPathEvaluator {
 
         guard !steps.isEmpty else { throw XPathError.parseError("路径为空") }
         return steps
+    }
+
+    private static func axisByName(_ name: String) -> Axis? {
+        switch name {
+        case "child": return .child
+        case "descendant", "descendant-or-self": return .descendant
+        case "following-sibling": return .followingSibling
+        case "preceding-sibling": return .precedingSibling
+        case "self": return .selfAxis
+        case "parent": return .parent
+        default: return nil
+        }
     }
 
     private static func matchingBracket(_ chars: [Character], start: Int) throws -> Int {
@@ -435,33 +424,78 @@ final class XPathEvaluator {
 
 // MARK: - HTML 规则引擎（CSS / XPath 统一入口）
 
-/// 对 legado 的 @css / @xpath 规则做统一求值，返回 `[String]`（无命中返回空数组）。
+/// 对 legado 的 @css / @xpath / 默认 CSS 规则做统一求值。
+/// CSS 规则经 `LegadoCssTranslator` 翻译为 SwiftSoup 选择器链后执行，
+/// 覆盖 legado 扩展语法：`tag.a.0`、`class.foo.-1`、`a!0`、`a[-1:0]`、`@children[n]`。
 final class HtmlRuleEngine {
     static let shared = HtmlRuleEngine()
 
-    /// CSS 求值。body 为 `selector@extractor`（抽取器可缺省，默认 text）。
-    func evaluateCss(_ body: String, rootHTML: String) throws -> [String] {
-        let rule = CssRuleParser.shared.parse(body)
-        let document = try XPathEvaluator.parseHTML(rootHTML)
-        let elements: Elements
-        do {
-            elements = try document.select(rule.selector)
-        } catch {
-            throw CssRuleError.selectError(rule.selector)
+    /// 剥离 `@css:` / `@@` 前缀
+    static func stripCssPrefix(_ rule: String) -> String {
+        var body = rule.trimmingCharacters(in: .whitespacesAndNewlines)
+        if body.lowercased().hasPrefix("@css:") {
+            body = String(body.dropFirst(5))
+        } else if body.hasPrefix("@@") {
+            body = String(body.dropFirst(2))
         }
-        let extractor = rule.extractor ?? .text
+        return body.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: CSS
+
+    /// 字段规则求值（整页）：选择器链 + 抽取器，返回字符串列表（无命中返回空数组）。
+    func evaluateCss(_ body: String, rootHTML: String) throws -> [String] {
+        let document = try XPathEvaluator.parseHTML(rootHTML)
+        return try Self.evaluateFieldRule(stripCssPrefix(body), root: document)
+    }
+
+    /// 容器规则求值（整页）：返回元素列表（bookList / chapterList 用）。
+    /// 规则可为 `@css:` / `@@` 前缀或裸 legado 选择器链。
+    func elements(_ legadoRule: String, rootHTML: String) throws -> [Element] {
+        let body = stripCssPrefix(legadoRule)
+        let document = try XPathEvaluator.parseHTML(rootHTML)
+        let translation = try LegadoCssTranslator.translate(body, forElements: true)
+        return try LegadoCssTranslator.elements(translation, root: document)
+    }
+
+    /// 容器规则求值（元素内）：在指定元素的后代中按规则选元素。
+    func elements(_ legadoRule: String, in element: Element) throws -> [Element] {
+        let body = stripCssPrefix(legadoRule)
+        let translation = try LegadoCssTranslator.translate(body, forElements: true)
+        return try LegadoCssTranslator.elements(translation, root: element)
+    }
+
+    /// 字段规则求值（以 root 为上下文）：选择器链 + 抽取器。
+    /// root 可以是 Document（整页）或 Element（per-element）。
+    static func evaluateFieldRule(_ rule: String, root: Element) throws -> [String] {
+        let body = stripCssPrefix(rule)
+        let translation = try LegadoCssTranslator.translate(body, forElements: false)
+        if translation.isExtractorOnly {
+            let value = Self.value(for: root, extractor: translation.extractor)
+            return value.isEmpty ? [] : [value]
+        }
+        let elements = try LegadoCssTranslator.elements(translation, root: root)
         var output: [String] = []
         for element in elements {
-            let value = Self.value(for: element, extractor: extractor)
+            let value = Self.value(for: element, extractor: translation.extractor)
             if !value.isEmpty { output.append(value) }
         }
         return output
     }
 
+    // MARK: XPath
+
     /// XPath 求值。
     func evaluateXPath(_ path: String, rootHTML: String) throws -> [String] {
         try XPathEvaluator.shared.evaluate(path, rootHTML: rootHTML)
     }
+
+    /// XPath 元素列表求值（per-element 容器规则用）。
+    func elementsXPath(_ path: String, rootHTML: String) throws -> [Element] {
+        try XPathEvaluator.shared.elements(path, rootHTML: rootHTML)
+    }
+
+    // MARK: 取值
 
     static func value(for element: Element, extractor: HtmlExtractor) -> String {
         switch extractor {
@@ -471,6 +505,12 @@ final class HtmlRuleEngine {
             return (try? element.outerHtml()) ?? ""
         case .ownText:
             return element.ownText()
+        case .allText:
+            return (try? element.text()) ?? ""
+        case .textNodes:
+            var texts: [String] = []
+            collectTextNodes(element, into: &texts)
+            return texts.joined(separator: "\n")
         case .href:
             return (try? element.attr("href")) ?? ""
         case .src:
@@ -485,25 +525,40 @@ final class HtmlRuleEngine {
             return element.id()
         case .tag:
             return element.tagName()
+        case .alt:
+            return (try? element.attr("alt")) ?? ""
+        case .title:
+            return (try? element.attr("title")) ?? ""
+        case .attr(let name):
+            return (try? element.attr(name)) ?? ""
         }
     }
 
-    /// 对单个元素求值规则：支持裸抽取器（@text / @href …）与完整规则（@css:… / @xpath:…）。
-    /// 供目录 / 发现的逐元素提取复用。
-    static func extractValue(_ rule: String, on element: Element) -> String {
-        let trimmed = rule.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lower = trimmed.lowercased()
-        if lower.hasPrefix("@") && !lower.hasPrefix("@css:") && !lower.hasPrefix("@xpath:")
-            && !lower.hasPrefix("@json:") && !lower.hasPrefix("@js:") && !lower.hasPrefix("@get:")
-            && !lower.hasPrefix("@put:") && !trimmed.hasPrefix("@@") {
-            let key = String(trimmed.dropFirst()).lowercased()
-            if let extractor = HtmlExtractor.table[key] {
-                return Self.value(for: element, extractor: extractor)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+    /// 递归收集所有子孙文本节点（对应 legado @textNodes）
+    private static func collectTextNodes(_ element: Element, into output: inout [String]) {
+        for node in element.getChildNodes() {
+            if let textNode = node as? TextNode {
+                let text = textNode.getWholeText()
+                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    output.append(text)
+                }
+            } else if let child = node as? Element {
+                collectTextNodes(child, into: &output)
             }
         }
+    }
+
+    // MARK: 逐元素字段提取
+
+    /// 对单个元素求值规则：CSS（含 legado 扩展语法与 ## 替换）、JSON、正则、JS
+    /// 统一走 RuleEngine（以元素为 input、outerHtml 为 content），
+    /// 传入的 engine 实例保证变量跨字段共享与 $N 分组上下文。
+    static func extractValue(_ rule: String, on element: Element, engine: RuleEngine? = nil) -> String {
+        let trimmed = rule.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return "" }
         let fragment = (try? element.outerHtml()) ?? ""
-        return ((try? RuleEngine().getString(rule, content: fragment)) ?? "")
+        let targetEngine = engine ?? RuleEngine()
+        return ((try? targetEngine.getString(trimmed, content: fragment, input: element)) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

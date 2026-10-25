@@ -1,27 +1,35 @@
 import Foundation
+import SwiftSoup
 #if canImport(JavaScriptCore)
 import JavaScriptCore
 #endif
 
-/// legado AnalyzeRule 的 iOS 复刻核心（P0：JSON / 正则 / JS 三种模式）
+/// legado AnalyzeRule 的 iOS 复刻核心
 ///
-/// 与 Android 原版的对应关系：
-/// - splitSourceRule(_:)          → splitSourceRule（切出 `<js>` / `@js:` 段）
+/// 与 Android 原版的对应关系（语义对齐，2026-10-25 按 legado 源码重校准）：
+/// - splitSourceRule(_:)          → splitSourceRule（`<js>…</js>` / `@js:…` 任意位置切分）
 /// - RuleSplitter.splitBalanced   → RuleAnalyzer.splitRule（&& / || / %% 平衡组切分）
-/// - JsonPath.evaluate            → AnalyzeByJSonPath（JSONPath 子集）
-/// - applyRegex                   → AnalyzeByRegex（分组提取 + ## 替换）
-/// - evalJS                       → AnalyzeRule.evalJS（JavaScriptCore + java.* 桥）
-/// - substituteTemplate           → makeUpRule（@get / {{}} / $n 回填）
+/// - detectMode(_:)               → SourceRule.init（默认 CSS；`@get:`/`{{}}`/`$N` 强制改判 Regex）
+/// - substituteTemplate           → makeUpRule（@get / {{}} / $n 回填，先于求值）
+/// - applyRule 的 ## 切分          → makeUpRule 尾部切分（rule##replaceRegex##replacement）
+/// - applyCssOrXPath              → AnalyzeByJSoup / AnalyzeByXPath（默认 CSS，legado 扩展语法经翻译层）
+/// - JsonPath.evaluate            → AnalyzeByJSonPath（JSONPath 子集，含 `..` 递归下降）
+/// - applyRegex                   → AnalyzeByRegex（分组提取）
+/// - evalJS                       → AnalyzeRule.evalJS（JavaScriptCore + java.* / source / book / cookie 桥）
 /// - put(_:_:)                    → AnalyzeRule.put / get
-///
-/// CSS / XPath 模式依赖 HTML 解析（SwiftSoup），留待 P1 开放；
-/// 触达这些模式时会抛出带说明的 unsupportedMode 错误。
 final class RuleEngine {
 
     // MARK: - 内部状态
 
+    /// 规则变量（@put / @get / java.put / java.get），同一实例跨字段共享
     private var variables: [String: String] = [:]
+    /// 最近一次正则求值的分组（$N 回填来源，per-element 时按元素更新）
     private var lastRegexGroups: [String] = []
+    /// java.setContent 设置的当前内容（优先级高于调用方传入的 content）
+    var jsContent: String?
+    /// 最近一次求值使用的 content（java.getElement 用）
+    private var lastContent: String = ""
+
     private let jsBridge = JsJavaBridge()
 
     #if canImport(JavaScriptCore)
@@ -36,22 +44,88 @@ final class RuleEngine {
                 print("[RuleEngine] JS 异常: \(message)")
             }
         }
+        jsBridge.engine = self
+        jsBridge.jsContext = context
         context?.setObject(jsBridge, forKeyedSubscript: "java" as NSString)
         jsContext = context
         #endif
     }
 
+    // MARK: - 上下文绑定（搜索 / 目录 / 正文场景注入）
+
+    func setSource(_ source: BookSource?) { jsBridge.source = source }
+    func setBook(_ book: Book?) { jsBridge.book = book }
+    func setBaseUrl(_ url: String?) { jsBridge.baseUrl = url ?? "" }
+    func setChapter(title: String?, nextUrl: String?) {
+        jsBridge.chapterTitle = title ?? ""
+        jsBridge.nextChapterUrl = nextUrl ?? ""
+    }
+
     // MARK: - 公开 API
 
     /// 对应 AnalyzeRule.getString
-    func getString(_ rule: String, content: String) throws -> String {
-        let value = try run(rule, content: content)
+    func getString(_ rule: String, content: String, input: Any? = nil) throws -> String {
+        let value = try run(rule, content: content, input: input)
         return try makeUp(stringValue(value), content: content)
     }
 
+    /// 求值规则并返回原始值（String / [String] / 字典 / 数组），供 per-element 分析使用
+    func evaluate(_ rule: String, content: String, input: Any? = nil) throws -> Any? {
+        try run(rule, content: content, input: input)
+    }
+
+    /// 正则规则求值，返回每次匹配的完整分组列表（per-element 用）
+    func evaluateRegexMatches(_ pattern: String, content: String) -> [[String]] {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let ns = content as NSString
+        var result: [[String]] = []
+        let matches = regex.matches(in: content, range: NSRange(location: 0, length: ns.length))
+        for match in matches {
+            var groups: [String] = []
+            for index in 0..<match.numberOfRanges {
+                let range = match.range(at: index)
+                groups.append(range.location == NSNotFound ? "" : ns.substring(with: range))
+            }
+            result.append(groups)
+        }
+        return result
+    }
+
+    /// 设置正则分组上下文（per-element 求值时 $N 回填用）
+    func setRegexGroups(_ groups: [String]) {
+        lastRegexGroups = groups
+    }
+
+    /// searchUrl 的 JS 求值（对应 legado AnalyzeUrl.analyzeJs）：
+    /// 按 JS_PATTERN 切分，JS 段在绑定 key / page / baseUrl / java / source / result 下求值，
+    /// 非 JS 段原样保留，拼接为最终 URL 串。
+    func evaluateSearchUrl(_ rule: String, keyword: String, page: Int = 1) throws -> String {
+        // result 初始绑定：剥离 JS 标记后的规则串——legado 部分书源（如 69书吧）
+        // 写成 `<js>URL,{options};result;</js>`，靠 result 初始值取出 URL
+        var stripped = rule
+            .replacingOccurrences(of: "<js>", with: "")
+            .replacingOccurrences(of: "</js>", with: "")
+        if stripped.lowercased().hasPrefix("@js:") {
+            stripped = String(stripped.dropFirst(4))
+        }
+        var output = ""
+        for segment in splitSourceRule(rule) {
+            switch segment.mode {
+            case .js:
+                let value = try evalSearchUrlJS(
+                    segment.text, keyword: keyword, page: page, initialResult: stripped
+                )
+                output += stringValue(value)
+            default:
+                output += segment.text
+            }
+        }
+        return output
+    }
+
     /// 对应 AnalyzeRule.getStringList
-    func getStringList(_ rule: String, content: String) throws -> [String] {
-        let text = try getString(rule, content: content)
+    func getStringList(_ rule: String, content: String, input: Any? = nil) throws -> [String] {
+        let text = try getString(rule, content: content, input: input)
         return text.isEmpty ? [] : text.components(separatedBy: "\n")
     }
 
@@ -60,21 +134,37 @@ final class RuleEngine {
         variables[key] = value
     }
 
-    private func get(_ key: String) -> String? {
-        variables[key]
+    /// 对应 AnalyzeRule.get
+    func get(_ key: String) -> String {
+        variables[key] ?? ""
+    }
+
+    /// 最近一次求值的内容（java.getElement / 调试用）
+    func currentContent() -> String { jsContent ?? lastContent }
+
+    /// java.getElement 最近一次命中的元素（bookList 的 <js> 依赖其副作用时兜底）
+    func lastGetElements() -> [Element] {
+        jsBridge.lastGetElementResultForJS
     }
 
     // MARK: - 主流程
 
-    private func run(_ rule: String, content: String) throws -> Any {
+    private func run(_ rule: String, content: String, input: Any?) throws -> Any {
         if rule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return content
+            return input ?? content
         }
-        var result: Any?
+        lastContent = content
+        var result: Any? = input
         for segment in splitSourceRule(rule) {
             switch segment.mode {
             case .js:
-                result = try evalJS(segment.text, result: result, content: content)
+                // JS 段先做模板回填（legado makeUpRule 对每个 SourceRule 统一执行，
+                // $N / @get / {{}} 在 JS 代码中同样生效——起点 chapterUrl 的 `$3` 依赖此行为），
+                // 再执行 JS
+                let filled = try substituteTemplate(
+                    segment.text, input: result, content: content, substituteGroups: true
+                )
+                result = try evalJS(filled, result: result, content: content)
             default:
                 result = try executeChain(segment.text, input: result, content: content)
             }
@@ -85,7 +175,7 @@ final class RuleEngine {
         return result
     }
 
-    /// 整串切分：`<js>...</js>` 与 `@js:...`（对应 splitSourceRule）
+    /// 整串切分：`<js>...</js>` 与 `@js:...`（对应 splitSourceRule，任意位置切分）
     private func splitSourceRule(_ rule: String) -> [RuleSegment] {
         let pattern = "<js>([\\w\\W]*?)</js>|@js:([\\w\\W]*)"
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
@@ -103,7 +193,7 @@ final class RuleEngine {
                 let text = nsRule.substring(
                     with: NSRange(location: cursor, length: match.range.location - cursor)
                 )
-                if !text.isEmpty {
+                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     segments.append(RuleSegment(mode: .plain, text: text))
                 }
             }
@@ -120,7 +210,7 @@ final class RuleEngine {
             let text = nsRule.substring(
                 with: NSRange(location: cursor, length: nsRule.length - cursor)
             )
-            if !text.isEmpty {
+            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 segments.append(RuleSegment(mode: .plain, text: text))
             }
         }
@@ -152,11 +242,18 @@ final class RuleEngine {
         return result
     }
 
-    /// 单条规则求值（对应 SourceRule 各解析器入口）
+    /// 单条规则求值（对应 SourceRule + getString 主循环）
+    /// 流程：@put 剥离 → 模式识别（原始串）→ ## 切分 + makeUpRule 回填 → 模式求值 → ## 替换
+    ///
+    /// 与 legado 的关键对应：
+    /// - `$N` 回填只作用于 ## 之前的规则段（legado splitRegex 只处理 ruleStrArray[0]）；
+    /// - Regex 模式返回回填后的字面量（legado getString 的 `else -> sourceRule.rule`），
+    ///   真正的正则提取只发生在容器规则（bookList / chapterList，见 BookListAnalyzer）；
+    /// - `##` 替换的 `$1` 走 NSRegularExpression 模板语义（引用 ## 模式自身分组）。
     private func applyRule(_ rule: String, input: Any?, content: String) throws -> Any? {
         var rule = rule
         if rule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return input
+            return input ?? content
         }
 
         // ① @put:{"k":"v"} —— 先剥离并求值存入变量
@@ -166,77 +263,165 @@ final class RuleEngine {
             put(putRule.key, stringValue(value))
         }
 
-        // ② 模式识别（对应 SourceRule.init）
+        // ② 模式识别（对应 SourceRule.init：先前缀，后 evalMatcher / $N 覆盖）
         let mode = detectMode(rule)
+
+        // ③ ## 切分 + makeUpRule 回填（rule##replaceRegex##replacement[##first]）
+        let parts = rule.components(separatedBy: "##")
+        let baseRule = try substituteTemplate(
+            parts[0], input: input, content: content, substituteGroups: true
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        let replaceRegex: String? = parts.count > 1
+            ? try substituteTemplate(parts[1], input: input, content: content, substituteGroups: false)
+            : nil
+        let replacement: String = parts.count > 2
+            ? try substituteTemplate(parts[2], input: input, content: content, substituteGroups: false)
+            : ""
+        let replaceFirst = parts.count > 3
+
+        if baseRule.isEmpty {
+            // 纯替换规则（## 开头）：对 input / content 应用替换
+            if let replaceRegex, !replaceRegex.isEmpty {
+                return try applyReplacement(
+                    input as? String ?? content,
+                    pattern: replaceRegex, replacement: replacement,
+                    firstOnly: replaceFirst, input: input, content: content
+                )
+            }
+            return input ?? content
+        }
+
+        // ④ 按模式求值
+        var result: Any?
         switch mode {
         case .js:
-            return try evalJS(rule, result: input, content: content)
-        case .regex:
-            return try applyRegex(rule, input: input, content: content)
+            result = try evalJS(baseRule, result: input, content: content)
         case .json:
-            return try applyJson(rule, input: input, content: content)
+            result = try applyJson(baseRule, input: input, content: content)
         case .css:
-            return try applyCssOrXPath(rule, input: input, content: content)
+            result = try applyCssOrXPath(baseRule, input: input, content: content)
         case .xpath:
-            return try applyCssOrXPath(rule, input: input, content: content)
+            result = try applyCssOrXPath(baseRule, input: input, content: content)
+        case .regex:
+            // 对应 legado getString 的 else -> sourceRule.rule：回填后字面量
+            result = baseRule
         case .webJs:
             throw RuleError.unsupportedMode("WebJs（后台 WebView）")
         case .plain:
-            if rule.contains("@get:") || rule.contains("{{") || isPlainLiteral(rule) {
-                return try substituteTemplate(rule, input: input, content: content, substituteGroups: false)
-            }
-            throw RuleError.unsupportedMode("CSS（HTML 选择器）")
+            result = baseRule
         }
+
+        // ⑤ ## 替换（legado replaceRegex）
+        if let replaceRegex, !replaceRegex.isEmpty {
+            result = try applyReplacement(
+                result, pattern: replaceRegex, replacement: replacement,
+                firstOnly: replaceFirst, input: input, content: content
+            )
+        }
+        return result
     }
 
     /// 模式识别（对应 SourceRule.init 的规则串特征判断）
+    ///
+    /// legado 语义（AnalyzeRule.kt SourceRule.init）：
+    /// 1. 前缀初判：@CSS:/@@ → CSS；@XPath: → XPath；@Json: → JSON；$. / $[ → JSON；/ → XPath；
+    /// 2. evalMatcher 覆盖：含 @get:{ 或 {{}} 且模式非 Js/Regex、且 {{ 前段不含 ## → **强制 Regex**；
+    /// 3. $N 分组引用 → Regex；
+    /// 4. 其余：纯字面量 → 字面量；否则 → **CSS（默认模式）**。
     private func detectMode(_ rule: String) -> RuleMode {
         let trimmed = rule.trimmingCharacters(in: .whitespacesAndNewlines)
         let lower = trimmed.lowercased()
-        if lower.hasPrefix("@css:") { return .css }
-        if trimmed.hasPrefix("@@") { return .css }
-        if lower.hasPrefix("@xpath:") { return .xpath }
-        if lower.hasPrefix("@json:") { return .json }
-        if lower.hasPrefix("@js:") { return .js }
-        if trimmed.hasPrefix("<js>") { return .js }
-        if trimmed.hasPrefix("$.") || trimmed.hasPrefix("$[") { return .json }
-        if trimmed.hasPrefix("/") { return .xpath }
-        if (trimmed.contains("@get:") || trimmed.contains("{{")) && !trimmed.contains("##") {
-            return .regex
+
+        // ① 前缀初判
+        var mode: RuleMode
+        if lower.hasPrefix("@css:") || trimmed.hasPrefix("@@") {
+            mode = .css
+        } else if lower.hasPrefix("@xpath:") {
+            mode = .xpath
+        } else if lower.hasPrefix("@json:") {
+            mode = .json
+        } else if lower.hasPrefix("@js:") || trimmed.hasPrefix("<js>") {
+            mode = .js
+        } else if trimmed.hasPrefix("$.") || trimmed.hasPrefix("$[") {
+            mode = .json
+        } else if trimmed.hasPrefix("/") {
+            mode = .xpath
+        } else if trimmed.hasPrefix(":") {
+            // legado allInOne 正则（TocRule 等容器场景；容器规则由 BookListAnalyzer 剥离前缀匹配）
+            mode = .regex
+        } else {
+            mode = .plain
         }
-        return .plain
+
+        // ② evalMatcher 覆盖：@get: / {{}} 强制 Regex（优先级高于 $./ / 前缀判定）
+        if mode != .js && mode != .regex {
+            if let templateStart = firstTemplateStart(trimmed) {
+                let prefix = String(trimmed[..<templateStart])
+                if templateStart == trimmed.startIndex || !prefix.contains("##") {
+                    mode = .regex
+                }
+            }
+        }
+
+        // ③ $N 分组引用 → Regex
+        if mode != .js && mode != .regex && containsGroupReference(trimmed) {
+            mode = .regex
+        }
+
+        // ④ 纯字面量 vs 默认 CSS
+        if mode == .plain {
+            mode = isPlainLiteral(trimmed) ? .plain : .css
+        }
+        return mode
+    }
+
+    /// 首个 `@get:{` 或 `{{` 的位置
+    private func firstTemplateStart(_ rule: String) -> String.Index? {
+        var start: String.Index?
+        if let range = rule.range(of: "@get:\\{") {
+            start = range.lowerBound
+        }
+        if let range = rule.range(of: "{{"), start == nil || range.lowerBound < start! {
+            start = range.lowerBound
+        }
+        return start
+    }
+
+    /// 是否含 `$1`..`$99` 分组引用
+    private func containsGroupReference(_ rule: String) -> Bool {
+        rule.range(of: "\\$\\d{1,2}", options: .regularExpression) != nil
     }
 
     /// 纯字面量判断：不含 CSS 语法字符时可作为模板字符串直出
     private func isPlainLiteral(_ rule: String) -> Bool {
-        let syntaxCharacters = CharacterSet(charactersIn: ".#@[]>")
+        let syntaxCharacters = CharacterSet(charactersIn: ".#@[]>:")
         return rule.rangeOfCharacter(from: syntaxCharacters) == nil
     }
 
-    // MARK: - CSS / XPath 模式（P1：SwiftSoup）
+    // MARK: - CSS / XPath 模式（默认 CSS，legado 扩展语法经 LegadoCssTranslator 翻译）
 
-    /// 统一入口：剥离 `@css:` / `@@` / `@xpath:` 前缀后分别调用 HTML 规则引擎。
-    /// 求值失败时抛出的错误会沿调用链向上给出友好提示，不会导致应用崩溃。
     private func applyCssOrXPath(_ rule: String, input: Any?, content: String) throws -> Any? {
         let trimmed = rule.trimmingCharacters(in: .whitespacesAndNewlines)
         let lower = trimmed.lowercased()
-        if lower.hasPrefix("@css:") {
-            let body = String(trimmed.dropFirst(5))
-            return try applyCss(body, input: input, content: content)
-        }
-        if trimmed.hasPrefix("@@") {
-            let body = String(trimmed.dropFirst(2))
-            return try applyCss(body, input: input, content: content)
-        }
         if lower.hasPrefix("@xpath:") {
             let body = String(trimmed.dropFirst(7))
             return try applyXPath(body, input: input, content: content)
         }
-        // 裸 XPath（以 / 或 // 开头，由 detectMode 归为 .xpath）
-        return try applyXPath(trimmed, input: input, content: content)
+        // 裸 XPath（/ 或 // 开头）——legado 无需前缀标识
+        if trimmed.hasPrefix("/") {
+            return try applyXPath(trimmed, input: input, content: content)
+        }
+        // @css: / @@ / 默认 CSS 统一走翻译层
+        let body = HtmlRuleEngine.stripCssPrefix(trimmed)
+        return try applyCss(body, input: input, content: content)
     }
 
     private func applyCss(_ body: String, input: Any?, content: String) throws -> Any? {
+        // per-element：input 为 Element 时在元素内选择（不含自身，对应 legado Jsoup 语义）
+        if let element = input as? Element {
+            let results = try HtmlRuleEngine.evaluateFieldRule(body, root: element)
+            return results.isEmpty ? nil : results
+        }
         let html = cssRoot(input, content: content)
         let results = try HtmlRuleEngine.shared.evaluateCss(body, rootHTML: html)
         return results.isEmpty ? nil : results
@@ -248,9 +433,12 @@ final class RuleEngine {
         return results.isEmpty ? nil : results
     }
 
-    /// CSS / XPath 的求值根：优先使用上一步产出的 HTML 片段（支持 @html 链式），
+    /// CSS / XPath 的求值根：优先使用上一步产出的 HTML 片段 / Element（支持 @html 链式），
     /// 否则使用页面原文 content。
     private func cssRoot(_ input: Any?, content: String) -> String {
+        if let element = input as? Element {
+            return (try? element.outerHtml()) ?? content
+        }
         if let text = input as? String, !text.isEmpty, text.contains("<") {
             return text
         }
@@ -264,14 +452,16 @@ final class RuleEngine {
         if path.lowercased().hasPrefix("@json:") {
             path = String(path.dropFirst(6))
         }
-        path = try substituteTemplate(path, input: input, content: content, substituteGroups: false)
         return JsonPath.evaluate(path, root: jsonRoot(input, content: content))
     }
 
     private func jsonRoot(_ input: Any?, content: String) -> Any {
         if let dictionary = input as? [String: Any] { return dictionary }
         if let array = input as? [Any] { return array }
-        if let text = input as? String { return parseJSON(text) ?? text }
+        if let text = input as? String {
+            if let parsed = parseJSON(text) { return parsed }
+            return text
+        }
         if let parsed = parseJSON(content) { return parsed }
         return content
     }
@@ -281,90 +471,64 @@ final class RuleEngine {
         return try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
     }
 
-    // MARK: - 正则模式
+    // MARK: - ## 替换（legado replaceRegex）
 
-    /// 对应 AnalyzeByRegex：`rule##regex##replacement` 提取/替换，`###` 只替换首个
-    private func applyRegex(_ rule: String, input: Any?, content: String) throws -> Any? {
-        let parts = rule.components(separatedBy: "##")
-        var pattern = parts[0]
-        var replacement: String?
-        var replaceFirstOnly = false
-        if parts.count >= 3 {
-            pattern = parts[0]
-            let rawReplacement = parts[2]
-            if rawReplacement.hasPrefix("#") {
-                replaceFirstOnly = true
-                replacement = String(rawReplacement.dropFirst())
-            } else {
-                replacement = rawReplacement
-            }
-        }
-        pattern = try substituteTemplate(pattern, input: input, content: content, substituteGroups: false)
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            throw RuleError.regexError(pattern)
-        }
+    /// `##` 替换：对求值结果应用 replaceRegex（replacement 的 `$1` 引用 ## 模式自身分组）
+    private func applyReplacement(_ result: Any?,
+                                  pattern: String,
+                                  replacement: String,
+                                  firstOnly: Bool,
+                                  input: Any?,
+                                  content: String) throws -> Any? {
+        // replacement 只做 @get / {{}} 回填；$N 留给 NSRegularExpression 模板
+        // （legado splitRegex 只处理 ## 前的规则段，replacement 的 $1 是正则分组引用）
+        let filledReplacement = try substituteTemplate(
+            replacement, input: input, content: content, substituteGroups: false
+        )
+        let groupCount = capturingGroupCount(pattern)
+        let template = safeReplacementTemplate(filledReplacement, groupCount: groupCount)
 
-        let targets = regexTargets(input, content: content)
-        var groupLists: [[String]] = []
-        var firstGroups: [String] = []
-        for target in targets {
-            let nsTarget = target as NSString
-            let matches = regex.matches(in: target, range: NSRange(location: 0, length: nsTarget.length))
-            for match in matches {
-                var groups: [String] = []
-                for index in 0..<match.numberOfRanges {
-                    let range = match.range(at: index)
-                    if range.location == NSNotFound {
-                        groups.append("")
-                    } else {
-                        groups.append(nsTarget.substring(with: range))
-                    }
-                }
-                groupLists.append(groups)
-                if firstGroups.isEmpty {
-                    firstGroups = groups
-                }
+        func replace(_ text: String) -> String {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+            let ns = text as NSString
+            let range = NSRange(location: 0, length: ns.length)
+            if firstOnly, let match = regex.firstMatch(in: text, range: range) {
+                return regex.stringByReplacingMatches(
+                    in: text, options: [], range: match.range, withTemplate: template
+                )
             }
-        }
-        lastRegexGroups = firstGroups
-
-        if var template = replacement {
-            template = try substituteTemplate(template, input: input, content: content, substituteGroups: false)
-            template = safeReplacementTemplate(template, groupCount: max(firstGroups.count - 1, 0))
-            var output: [String] = []
-            for target in targets {
-                let nsTarget = target as NSString
-                output.append(regex.stringByReplacingMatches(
-                    in: target,
-                    options: [],
-                    range: NSRange(location: 0, length: nsTarget.length),
-                    withTemplate: template
-                ))
-                if replaceFirstOnly { break }
-            }
-            return output
+            return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: template)
         }
 
-        guard !groupLists.isEmpty else {
-            return nil
-        }
-        if groupLists.count == 1 {
-            let groups = groupLists[0]
-            if groups.count > 1 {
-                return Array(groups[1...]).joined(separator: "\n")
-            }
-            return groups[0]
-        }
-        return groupLists.map { groups -> String in
-            groups.count > 1 ? Array(groups[1...]).joined(separator: "\n") : groups[0]
+        switch result {
+        case let text as String:
+            return replace(text)
+        case let list as [Any]:
+            return list.map { replace(stringValue($0)) }
+        default:
+            return result
         }
     }
 
-    private func regexTargets(_ input: Any?, content: String) -> [String] {
-        if let list = input as? [String] { return list }
-        if let list = input as? [Any] { return list.map { stringValue($0) } }
-        if let text = input as? String { return [text] }
-        return [content]
+    /// 统计正则 pattern 的捕获组数量（用于 $N 引用安全转义）
+    private func capturingGroupCount(_ pattern: String) -> Int {
+        var count = 0
+        var inClass = false
+        var escaped = false
+        for character in pattern {
+            if escaped { escaped = false; continue }
+            if character == "\\" { escaped = true; continue }
+            if inClass {
+                if character == "]" { inClass = false }
+                continue
+            }
+            if character == "[" { inClass = true; continue }
+            if character == "(" {
+                // 跳过 (?: (?= (?! 等非捕获组
+                count += 1
+            }
+        }
+        return max(count - 1, 0)
     }
 
     /// 转义替换模板中非法的 $ 引用，避免 NSRegularExpression 抛 ObjC 异常
@@ -398,13 +562,60 @@ final class RuleEngine {
 
     // MARK: - JS 模式
 
-    /// 对应 AnalyzeRule.evalJS：bindings 暴露 result / src / java
+    /// 对应 AnalyzeRule.evalJS：绑定 java / source / book / cookie / result / baseUrl / src 等
     private func evalJS(_ js: String, result: Any?, content: String) throws -> Any? {
         #if canImport(JavaScriptCore)
         guard let context = jsContext else {
             throw RuleError.unsupportedMode("js")
         }
+        // legado 语义：result 缺省时回退为当前内容（bookList 的 <js> 依赖此行为）
+        var resultValue: Any? = result
+        if let element = resultValue as? Element {
+            resultValue = (try? element.outerHtml()) ?? ""
+        }
+        if resultValue == nil {
+            resultValue = jsContent ?? content
+        }
+        setupJSContext(context, content: jsContent ?? content, result: resultValue)
+        return try evaluateJSInContext(context, js: js)
+        #else
+        throw RuleError.unsupportedMode("js")
+        #endif
+    }
+
+    /// searchUrl 的 JS 求值（AnalyzeUrl 场景）：额外绑定 key / page，
+    /// result 初值为剥离 JS 标记后的规则串（`<js>URL;result;</js>` 书源依赖）
+    private func evalSearchUrlJS(_ js: String, keyword: String, page: Int, initialResult: String) throws -> Any? {
+        #if canImport(JavaScriptCore)
+        guard let context = jsContext else {
+            throw RuleError.unsupportedMode("js")
+        }
+        context.setObject(keyword, forKeyedSubscript: "key" as NSString)
+        context.setObject(NSNumber(value: page), forKeyedSubscript: "page" as NSString)
+        context.setObject(keyword, forKeyedSubscript: "searchKey" as NSString)
+        setupJSContext(context, content: "", result: initialResult)
+        return try evaluateJSInContext(context, js: js)
+        #else
+        throw RuleError.unsupportedMode("js")
+        #endif
+    }
+
+    /// 公共 JS 上下文绑定（对应 legado evalJS 的 bindings）
+    #if canImport(JavaScriptCore)
+    private func setupJSContext(_ context: JSContext, content: String, result: Any?) {
         context.setObject(content, forKeyedSubscript: "src" as NSString)
+        context.setObject(jsBridge.baseUrl, forKeyedSubscript: "baseUrl" as NSString)
+        context.setObject(jsBridge.chapterTitle, forKeyedSubscript: "chapter" as NSString)
+        context.setObject(jsBridge.chapterTitle, forKeyedSubscript: "title" as NSString)
+        context.setObject(jsBridge.nextChapterUrl, forKeyedSubscript: "nextChapterUrl" as NSString)
+        if let sourceProxy = jsBridge.sourceProxyForJS {
+            context.setObject(sourceProxy, forKeyedSubscript: "source" as NSString)
+        }
+        if let bookProxy = jsBridge.bookProxyForJS {
+            context.setObject(bookProxy, forKeyedSubscript: "book" as NSString)
+        }
+        context.setObject(jsBridge.cookieProxyForJS, forKeyedSubscript: "cookie" as NSString)
+
         if let text = result as? String {
             context.setObject(text, forKeyedSubscript: "result" as NSString)
         } else if let list = result as? [String] {
@@ -414,6 +625,9 @@ final class RuleEngine {
         } else {
             context.setObject(String(describing: result!), forKeyedSubscript: "result" as NSString)
         }
+    }
+
+    private func evaluateJSInContext(_ context: JSContext, js: String) throws -> Any? {
         let value = context.evaluateScript("(function(){ \(js) })()")
         if let exception = context.exception {
             context.exception = nil
@@ -423,14 +637,12 @@ final class RuleEngine {
             return nil
         }
         return value.toString() ?? ""
-        #else
-        throw RuleError.unsupportedMode("js")
-        #endif
     }
+    #endif
 
     // MARK: - 模板回填（对应 makeUpRule）
 
-    /// substituteGroups = true 时替换 $1..$99（仅用于结果回填，避免污染正则）
+    /// substituteGroups = true 时替换 $1..$99（makeUpRule 语义，先于求值）
     private func substituteTemplate(_ template: String,
                                     input: Any?,
                                     content: String,
@@ -444,7 +656,7 @@ final class RuleEngine {
             let key = token
                 .replacingOccurrences(of: "@get:{", with: "")
                 .replacingOccurrences(of: "}", with: "")
-            output.replaceSubrange(range, with: get(key) ?? "")
+            output.replaceSubrange(range, with: get(key))
             guardCount += 1
             if guardCount > 50 { break }
         }
@@ -457,7 +669,8 @@ final class RuleEngine {
             let trimmed = inner.trimmingCharacters(in: .whitespacesAndNewlines)
             let replacement: String
             if trimmed.hasPrefix("@") || trimmed.hasPrefix("$.") || trimmed.hasPrefix("$[") || trimmed.hasPrefix("//") {
-                replacement = try getString(trimmed, content: content)
+                // 嵌套规则：带 input 求值（per-element 时按元素回填）
+                replacement = try getString(trimmed, content: content, input: input)
             } else {
                 replacement = stringValue(try evalJS(inner, result: input, content: content))
             }
@@ -466,7 +679,8 @@ final class RuleEngine {
             if guardCount > 50 { break }
         }
 
-        // $1..$99 正则分组回填（仅结果上下文）
+        // $1..$99 正则分组回填（makeUpRule：result 为 List 时按分组回填；
+        // per-element 场景由调用方维护 lastRegexGroups）
         if substituteGroups, let regex = try? NSRegularExpression(pattern: "\\$\\d{1,2}") {
             let matches = regex.matches(in: output, range: NSRange(location: 0, length: (output as NSString).length))
             for match in matches.reversed() {
@@ -495,6 +709,8 @@ final class RuleEngine {
             return ""
         case let text as String:
             return text
+        case let element as Element:
+            return (try? element.outerHtml()) ?? ""
         case let list as [Any]:
             return list.map { stringValue($0) }.joined(separator: "\n")
         case let dictionary as [String: Any]:

@@ -15,7 +15,7 @@ enum RuleError: LocalizedError {
         case .emptyResult:
             return "规则求值为空"
         case .unsupportedMode(let mode):
-            return "\(mode) 模式尚未支持（P1 集成 HTML 解析后开放）"
+            return "\(mode) 模式暂不支持"
         case .jsError(let message):
             return "JS 执行错误：\(message)"
         case .regexError(let pattern):

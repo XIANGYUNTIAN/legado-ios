@@ -1,5 +1,4 @@
 import SwiftUI
-import SwiftSoup
 
 // MARK: - 章节模型
 
@@ -66,6 +65,7 @@ struct ReaderChapter: Identifiable {
     let title: String
     var text: String?      // 本地章节正文（网络章节为 nil，按需抓取）
     var url: String?       // 网络章节 URL
+    var isVolume: Bool = false  // 是否为卷标题（ruleToc.isVolume）
 }
 
 /// 数组安全下标：切章 / 异步回调里索引可能越界，避免崩溃
@@ -712,7 +712,10 @@ struct BookReaderView: View {
 
     // MARK: - 规则阅读器
 
-    /// 用书源 ruleToc 抓取目录（纯函数，不修改 @State）
+    /// 规则阅读器（对应 legado 的 ruleToc / ruleContent 链路）
+    ///
+    /// 用书源 ruleToc 抓取目录（纯函数，不修改 @State）。
+    /// bookUrl 可能是相对路径（如 /book/12345.html），需拼接书源基准 URL。
     private func fetchRuleChapters() async throws -> [ReaderChapter] {
         guard let source = sourceStore.sources.first(where: { $0.bookSourceUrl == book.sourceId }) else {
             throw RuleError.unsupportedMode("书源不存在或已删除（sourceId=\(book.sourceId ?? "nil")）")
@@ -720,8 +723,6 @@ struct BookReaderView: View {
         guard let rules = source.ruleToc, !rules.isEmpty else {
             throw RuleError.unsupportedMode("书源「\(source.bookSourceName)」缺少目录规则（ruleToc 为空），无法阅读")
         }
-        // bookUrl 可能是相对路径（如 /book/12345.html），需拼接书源基准 URL。
-        // legado 书源的 bookUrl 大量是相对路径，只做 URLSanitizer 会全部失败。
         guard let bookUrlStr = book.bookUrl else {
             throw RuleError.unsupportedMode("书籍缺少 bookUrl")
         }
@@ -730,10 +731,36 @@ struct BookReaderView: View {
         guard let bookURL else {
             throw RuleError.unsupportedMode("书籍 URL 无效：\(bookUrlStr)")
         }
-        let html = try await NetworkService.shared.fetchText(from: bookURL)
-        let extracted = try extractToc(html: html, rules: rules, base: bookURL, sourceBase: source.bookSourceURL)
+        // 阅读链路同样合并书源 header（UA / Referer / Cookie），与搜索路径一致
+        let headers = sourceHeaders(source)
+        let html = try await NetworkService.shared.fetchText(from: bookURL, headers: headers)
+        let extracted = try extractToc(html: html, rules: rules, base: bookURL, sourceBase: source.bookSourceURL, source: source)
         if extracted.isEmpty { throw RuleError.emptyResult }
         return extracted
+    }
+
+    /// 书源 header 字段 → 请求头字典（ legado header 字段，缺它会被站点 401/403 拒绝）
+    private func sourceHeaders(_ source: BookSource) -> [String: String] {
+        guard let raw = source.header?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty,
+              let data = raw.data(using: .utf8) else {
+            return [:]
+        }
+        let obj: [String: Any]?
+        if let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            obj = result
+        } else {
+            let converted = raw.replacingOccurrences(of: "'", with: "\"")
+            obj = try? JSONSerialization.jsonObject(
+                with: converted.data(using: .utf8) ?? Data()
+            ) as? [String: Any]
+        }
+        guard let obj else { return [:] }
+        var result: [String: String] = [:]
+        for (key, value) in obj {
+            result[key] = value is String ? value as! String : String(describing: value)
+        }
+        return result
     }
 
     /// 抓取指定章节正文（网络章节），返回文本字符串
@@ -754,9 +781,14 @@ struct BookReaderView: View {
             return chapter.text ?? ""
         }
         let engine = RuleEngine()
+        engine.setSource(source)
+        engine.setBook(book)
+        engine.setBaseUrl(source.bookSourceUrl)
+        engine.setChapter(title: chapter.title, nextUrl: chapters[safe: index + 1]?.url)
         let contentRule = source.ruleContent?.content ?? ""
+        let headers = sourceHeaders(source)
         do {
-            let html = try await NetworkService.shared.fetchText(from: u)
+            let html = try await NetworkService.shared.fetchText(from: u, headers: headers)
             let text = (try? engine.getString(contentRule, content: html)) ?? ""
             let finalText = text.isEmpty ? "（本章无内容）" : text
             // 缓存到章节，便于离线回看
@@ -773,7 +805,7 @@ struct BookReaderView: View {
                let retry = resolveURL(url, base: bookURL) ?? URLSanitizer.sanitize(url),
                retry != u {
                 do {
-                    let html2 = try await NetworkService.shared.fetchText(from: retry)
+                    let html2 = try await NetworkService.shared.fetchText(from: retry, headers: headers)
                     let text2 = (try? engine.getString(contentRule, content: html2)) ?? ""
                     let finalText2 = text2.isEmpty ? "（本章无内容）" : text2
                     await MainActor.run {
@@ -794,68 +826,47 @@ struct BookReaderView: View {
 
     // MARK: - 目录提取
 
-    /// 从目录页 HTML 按规则提取章节列表。
-    /// 优先 legado 的 per-element 模式：chapterList 选择容器，chapterName / chapterUrl 逐元素求值；
-    /// 不支持时回退到整页规则 + 按索引压缩。
-    private func extractToc(html: String, rules: SourceRuleSet, base: URL, sourceBase: URL? = nil) throws -> [ReaderChapter] {
+    /// 从目录页 HTML 按规则提取章节列表（对应 legado TocAnalyzer 的 per-element 语义）：
+    /// chapterList 求值产元素列表（CSS / XPath / JSON / 正则 / JS），
+    /// chapterName / chapterUrl 逐元素求值（$N 分组、{{$.field}} 按元素回填）。
+    /// 引擎实例贯穿目录抓取，@put/@get 变量在 chapterList → 字段间共享。
+    private func extractToc(html: String, rules: SourceRuleSet, base: URL, sourceBase: URL? = nil, source: BookSource? = nil) throws -> [ReaderChapter] {
         let listRule = rules.chapterList ?? ""
         let nameRule = rules.chapterName ?? ""
         let urlRule = rules.chapterUrl ?? ""
 
-        // per-element 模式（仅 CSS 选择器可直接取元素节点）
-        if listRule.hasPrefix("@css:") || listRule.hasPrefix("@@") {
-            let selector = stripCssPrefix(listRule)
-            // SwiftSoup 解析/选择器失败时静默回退到整页规则路径，
-            // 避免单个书源的 HTML 小瑕疵导致整源目录抓取失败。
-            if let document = try? SwiftSoup.parse(html),
-               let elements = try? document.select(selector) {
-                var result: [ReaderChapter] = []
-                for element in elements {
-                    let name = extractValue(nameRule, on: element)
-                    let urlRel = extractValue(urlRule, on: element)
-                    guard !name.isEmpty else { continue }
-                    // 章节 URL 通常相对于书源根路径（如 /chapter/123.html），
-                    // 优先用书源基准 URL 解析；拼接到书籍详情页路径下会导致 404。
-                    // sourceBase 为 nil 时回退到 base（书籍详情页 URL）。
-                    let resolved = resolveURL(urlRel, base: sourceBase)
-                        ?? resolveURL(urlRel, base: base)
-                        ?? URLSanitizer.sanitize(urlRel)
-                    result.append(ReaderChapter(title: name, text: nil, url: resolved?.absoluteString))
-                }
-                if !result.isEmpty { return result }
-            }
+        let engine = RuleEngine()
+        if let source {
+            engine.setSource(source)
         }
+        // baseUrl 用目录页（书籍详情页）URL——起点 chapterUrl 的 JS 从 baseUrl 提取书籍 ID
+        engine.setBaseUrl(base.absoluteString)
+        engine.setBook(book)
+        engine.setChapter(title: nil, nextUrl: nil)
 
-        // 回退：整页规则 + 按索引压缩
-        let nameEngine = RuleEngine()
-        let urlEngine = RuleEngine()
-        let names = (try? nameEngine.getStringList(nameRule, content: html)) ?? []
-        let urls = (try? urlEngine.getStringList(urlRule, content: html)) ?? []
-        let count = min(names.count, urls.count)
-        guard count > 0 else { return [] }
+        let items = BookListAnalyzer.items(rule: listRule, html: html, engine: engine)
+        guard !items.isEmpty else { return [] }
+
         var result: [ReaderChapter] = []
-        for i in 0..<count {
-            let resolved = resolveURL(urls[i], base: sourceBase)
-                ?? resolveURL(urls[i], base: base)
-                ?? URLSanitizer.sanitize(urls[i])
-            result.append(ReaderChapter(title: names[i], text: nil, url: resolved?.absoluteString))
+        for item in items {
+            let name = BookListAnalyzer.field(nameRule, item: item, engine: engine)
+            guard !name.isEmpty else { continue }
+            let urlRel = BookListAnalyzer.field(urlRule, item: item, engine: engine)
+            // 章节 URL 通常相对于书源根路径（如 /chapter/123.html），
+            // 优先用书源基准 URL 解析；拼接到书籍详情页路径下会导致 404。
+            // sourceBase 为 nil 时回退到 base（书籍详情页 URL）。
+            let resolved = resolveURL(urlRel, base: sourceBase)
+                ?? resolveURL(urlRel, base: base)
+                ?? URLSanitizer.sanitize(urlRel)
+            let isVolumeText = BookListAnalyzer.field(rules.isVolume, item: item, engine: engine)
+            result.append(ReaderChapter(
+                title: name,
+                text: nil,
+                url: resolved?.absoluteString,
+                isVolume: isVolumeText == "true" || isVolumeText == "1"
+            ))
         }
         return result
-    }
-
-    private func stripCssPrefix(_ rule: String) -> String {
-        var body = rule.trimmingCharacters(in: .whitespacesAndNewlines)
-        if body.lowercased().hasPrefix("@css:") {
-            body = String(body.dropFirst(5))
-        } else if body.hasPrefix("@@") {
-            body = String(body.dropFirst(2))
-        }
-        return body.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// 对单个元素求值规则（委托给 HtmlRuleEngine，支持裸抽取器与完整规则）
-    private func extractValue(_ rule: String, on element: Element) -> String {
-        HtmlRuleEngine.extractValue(rule, on: element)
     }
 
     private func resolveURL(_ relative: String, base: URL?) -> URL? {

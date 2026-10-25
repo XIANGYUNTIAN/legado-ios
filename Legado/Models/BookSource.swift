@@ -120,6 +120,10 @@ struct BookSource: Codable, Identifiable, Equatable {
     var enabledExplore: Bool = true
     var header: String?
     var loginUrl: String?
+    /// 书源级持久变量（对应 legado BaseSource.variable，source.getVariable/setVariable 读写）
+    var variable: String?
+    /// 登录信息键值表（source.getLoginInfoMap 读取，如「密钥」）
+    var loginInfo: [String: String]?
     var jsLib: String?
     var concurrentRate: String?
     var exploreUrl: String?
@@ -160,16 +164,18 @@ struct BookSource: Codable, Identifiable, Equatable {
     /// 占位符兼容两种：新格式 `{{key}}` 与遗留格式 `searchKey`
     /// （legado ImportOldData 会把 searchKey 替换为 {{key}}，说明存量书源
     /// 大量使用 searchKey，原生默认书源即是如此）。
+    /// `@js:` / `<js>` 型 searchUrl 由 JS 通过 key 绑定自行构造地址，
+    /// 不要求字面占位符（legado AnalyzeUrl 语义）。
     var supportsSearch: Bool {
         guard let raw = searchUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty else { return false }
-        guard raw.contains("{{key}}") || raw.contains("searchKey") else { return false }
-        // @js: / <js> / @@ 前缀的搜索地址走 JS 引擎，跳过 URL 格式校验
+        // @js: / <js> / @@ 前缀的搜索地址走 JS 引擎，跳过 URL 格式与占位符校验
         let lower = raw.lowercased()
         if lower.hasPrefix("@js:") || lower.hasPrefix("<js>") || lower.hasPrefix("@@") {
             guard let list = ruleSearch?.bookList, !list.isEmpty else { return false }
             return true
         }
+        guard raw.contains("{{key}}") || raw.contains("searchKey") else { return false }
         // 地址部分（截掉 ,{"method":...} 选项后缀）。
         // 相对地址（无 scheme，如 /search?kw={{key}}）由调用方拼接书源基准 URL，
         // 此处只拒绝明显非法的地址（非相对路径、非绝对 URL）。
@@ -185,7 +191,7 @@ struct BookSource: Codable, Identifiable, Equatable {
     enum CodingKeys: String, CodingKey {
         case bookSourceUrl, bookSourceName, bookSourceGroup, bookSourceType
         case bookSourceComment, enabled, enabledExplore
-        case header, loginUrl, jsLib, concurrentRate, exploreUrl, searchUrl, lastUpdateTime
+        case header, loginUrl, variable, loginInfo, jsLib, concurrentRate, exploreUrl, searchUrl, lastUpdateTime
         case ruleSearch, ruleBookInfo, ruleToc, ruleContent, ruleExplore
     }
 
@@ -203,6 +209,8 @@ struct BookSource: Codable, Identifiable, Equatable {
         enabledExplore = Self.lenientBool(c, .enabledExplore, default: true)
         header = Self.lenientString(c, .header)
         loginUrl = Self.lenientString(c, .loginUrl)
+        variable = Self.lenientString(c, .variable)
+        loginInfo = Self.lenientStringMap(c, .loginInfo)
         jsLib = Self.lenientString(c, .jsLib)
         concurrentRate = Self.lenientString(c, .concurrentRate)
         exploreUrl = Self.lenientString(c, .exploreUrl)
@@ -246,6 +254,15 @@ struct BookSource: Codable, Identifiable, Equatable {
             return Int64(s.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
         }
         return 0
+    }
+
+    /// 宽松字符串字典解码：仅接受全字符串值（loginInfo 的键值均为字符串，如「密钥」）；
+    /// 结构不符整体忽略，不影响书源导入
+    private static func lenientStringMap(_ c: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) -> [String: String]? {
+        guard let raw = try? c.decodeIfPresent([String: String].self, forKey: key), !raw.isEmpty else {
+            return nil
+        }
+        return raw
     }
 
     private static func lenientSourceType(_ c: KeyedDecodingContainer<CodingKeys>) -> BookSourceType {

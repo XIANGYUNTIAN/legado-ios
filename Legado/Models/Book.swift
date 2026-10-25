@@ -21,6 +21,8 @@ struct Book: Identifiable, Codable, Equatable {
     var remoteURL: String?
     var addedAt: Date
     var fileSize: Int64?
+    /// 书源名称快照（book.originName，JS 规则可用；加入书架时从书源复制）
+    var originName: String?
 
     /// 规则阅读专用：书籍所在书源的 bookSourceUrl（为空表示本地书籍）
     var sourceId: String?
@@ -42,7 +44,7 @@ struct Book: Identifiable, Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id, title, author, format
         case fileRelativePath, remoteURL, addedAt, fileSize
-        case sourceId, bookUrl
+        case sourceId, bookUrl, originName
         case lastChapterIndex, lastReadAt
     }
 
@@ -57,6 +59,7 @@ struct Book: Identifiable, Codable, Equatable {
          fileSize: Int64? = nil,
          sourceId: String? = nil,
          bookUrl: String? = nil,
+         originName: String? = nil,
          lastChapterIndex: Int = 0,
          lastReadAt: Date? = nil) {
         self.id = id
@@ -69,6 +72,7 @@ struct Book: Identifiable, Codable, Equatable {
         self.fileSize = fileSize
         self.sourceId = sourceId
         self.bookUrl = bookUrl
+        self.originName = originName
         self.lastChapterIndex = lastChapterIndex
         self.lastReadAt = lastReadAt
     }
@@ -97,6 +101,7 @@ struct Book: Identifiable, Codable, Equatable {
         }
         sourceId = try? c.decodeIfPresent(String.self, forKey: .sourceId)
         bookUrl = try? c.decodeIfPresent(String.self, forKey: .bookUrl)
+        originName = try? c.decodeIfPresent(String.self, forKey: .originName)
         lastChapterIndex = (try? c.decodeIfPresent(Int.self, forKey: .lastChapterIndex)) ?? 0
         lastReadAt = try? c.decodeIfPresent(Date.self, forKey: .lastReadAt)
     }

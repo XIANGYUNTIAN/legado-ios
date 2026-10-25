@@ -180,45 +180,29 @@ struct SourceExploreView: View {
     private func extractExplore(html: String) throws -> [ExploredBook] {
         guard let rules = source.ruleExplore else { return [] }
         let listRule = rules.bookList ?? ""
-        guard listRule.hasPrefix("@css:") || listRule.hasPrefix("@@") else { return [] }
-        let selector = stripCssPrefix(listRule)
-        let document = try SwiftSoup.parse(html)
-        let elements = try document.select(selector)
+        guard !listRule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
 
-        let nameRule = rules.name ?? ""
-        let authorRule = rules.author ?? ""
-        let introRule = rules.intro ?? ""
-        let bookUrlRule = rules.bookUrl ?? ""
-        let coverRule = rules.coverUrl ?? ""
-        let lastRule = rules.lastChapter ?? ""
+        // per-element 分析（与搜索/目录同一引擎）：CSS / JSON / 正则 / JS 容器规则通用
+        let engine = RuleEngine()
+        engine.setSource(source)
+        engine.setBaseUrl(source.bookSourceUrl)
+        let items = BookListAnalyzer.items(rule: listRule, html: html, engine: engine)
+        guard !items.isEmpty else { return [] }
 
         var result: [ExploredBook] = []
-        for element in elements {
-            let name = HtmlRuleEngine.extractValue(nameRule, on: element)
+        for item in items {
+            let name = BookListAnalyzer.field(rules.name, item: item, engine: engine)
             guard !name.isEmpty else { continue }
-
-            let bookUrl = HtmlRuleEngine.extractValue(bookUrlRule, on: element)
-            let author = HtmlRuleEngine.extractValue(authorRule, on: element)
-            let intro = HtmlRuleEngine.extractValue(introRule, on: element)
-            let cover = HtmlRuleEngine.extractValue(coverRule, on: element)
-            let last = HtmlRuleEngine.extractValue(lastRule, on: element)
-
             result.append(ExploredBook(
-                name: name, author: author, intro: intro,
-                bookUrl: bookUrl, coverUrl: cover, lastChapter: last
+                name: name,
+                author: BookListAnalyzer.field(rules.author, item: item, engine: engine),
+                intro: BookListAnalyzer.field(rules.intro, item: item, engine: engine),
+                bookUrl: BookListAnalyzer.field(rules.bookUrl, item: item, engine: engine),
+                coverUrl: BookListAnalyzer.field(rules.coverUrl, item: item, engine: engine),
+                lastChapter: BookListAnalyzer.field(rules.lastChapter, item: item, engine: engine)
             ))
         }
         return result
-    }
-
-    private func stripCssPrefix(_ rule: String) -> String {
-        var body = rule.trimmingCharacters(in: .whitespacesAndNewlines)
-        if body.lowercased().hasPrefix("@css:") {
-            body = String(body.dropFirst(5))
-        } else if body.hasPrefix("@@") {
-            body = String(body.dropFirst(2))
-        }
-        return body.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
