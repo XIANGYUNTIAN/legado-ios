@@ -423,6 +423,8 @@ struct BookSearchView: View {
             || request.url.contains("searchKey")
             || bodyTemplateText.contains("{{key}}")
             || bodyTemplateText.contains("searchKey")
+            || rawSearchURL.contains("{{key}}")
+            || rawSearchURL.contains("searchKey")
         guard hasKeyPlaceholder else {
             throw NetworkError.invalidURL
         }
@@ -497,7 +499,10 @@ struct BookSearchView: View {
         let urlPart = String(trimmed[trimmed.startIndex..<range.lowerBound])
         let optionsString = String(trimmed[range.lowerBound..<trimmed.endIndex]).dropFirst() // 去掉逗号，留 {…}
         guard let data = optionsString.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                ?? try? JSONSerialization.jsonObject(
+                    with: optionsString.replacingOccurrences(of: "'", with: "\"").data(using: .utf8) ?? Data()
+                ) as? [String: Any] else {
             return ParsedSearchRequest(url: urlPart, method: "GET", body: nil, headers: [:])
         }
         let method = (obj["method"] as? String) ?? "GET"
@@ -547,7 +552,10 @@ struct BookSearchView: View {
         guard let raw = source.header?.trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty,
               let data = raw.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                ?? try? JSONSerialization.jsonObject(
+                    with: raw.replacingOccurrences(of: "'", with: "\"").data(using: .utf8) ?? Data()
+                ) as? [String: Any] else {
             return [:]
         }
         var result: [String: String] = [:]
@@ -577,8 +585,12 @@ struct BookSearchView: View {
         // per-element 模式（仅 CSS 选择器可直接取元素节点）
         if listRule.hasPrefix("@css:") || listRule.hasPrefix("@@") {
             let selector = stripCssPrefix(listRule)
-            let document = try SwiftSoup.parse(html)
-            let elements = try document.select(selector)
+            // SwiftSoup 解析/选择器可能因 malformed HTML 或选择器不匹配而抛出，
+            // 这里静默失败并回退到整页规则路径，避免单个书源的 HTML 小瑕疵拖垮全局搜索。
+            guard let document = try? SwiftSoup.parse(html),
+                  let elements = try? document.select(selector) else {
+                break
+            }
             var result: [ExploredBook] = []
             for element in elements {
                 let name = HtmlRuleEngine.extractValue(nameRule, on: element)

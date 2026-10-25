@@ -731,7 +731,7 @@ struct BookReaderView: View {
             throw RuleError.unsupportedMode("书籍 URL 无效：\(bookUrlStr)")
         }
         let html = try await NetworkService.shared.fetchText(from: bookURL)
-        let extracted = try extractToc(html: html, rules: rules, base: bookURL)
+        let extracted = try extractToc(html: html, rules: rules, base: bookURL, sourceBase: source.bookSourceURL)
         if extracted.isEmpty { throw RuleError.emptyResult }
         return extracted
     }
@@ -776,7 +776,7 @@ struct BookReaderView: View {
     /// 从目录页 HTML 按规则提取章节列表。
     /// 优先 legado 的 per-element 模式：chapterList 选择容器，chapterName / chapterUrl 逐元素求值；
     /// 不支持时回退到整页规则 + 按索引压缩。
-    private func extractToc(html: String, rules: SourceRuleSet, base: URL) throws -> [ReaderChapter] {
+    private func extractToc(html: String, rules: SourceRuleSet, base: URL, sourceBase: URL? = nil) throws -> [ReaderChapter] {
         let listRule = rules.chapterList ?? ""
         let nameRule = rules.chapterName ?? ""
         let urlRule = rules.chapterUrl ?? ""
@@ -784,14 +784,22 @@ struct BookReaderView: View {
         // per-element 模式（仅 CSS 选择器可直接取元素节点）
         if listRule.hasPrefix("@css:") || listRule.hasPrefix("@@") {
             let selector = stripCssPrefix(listRule)
-            let document = try SwiftSoup.parse(html)
-            let elements = try document.select(selector)
+            // SwiftSoup 解析/选择器失败时静默回退到整页规则路径，
+            // 避免单个书源的 HTML 小瑕疵导致整源目录抓取失败。
+            guard let document = try? SwiftSoup.parse(html),
+                  let elements = try? document.select(selector) else {
+                break
+            }
             var result: [ReaderChapter] = []
             for element in elements {
                 let name = extractValue(nameRule, on: element)
                 let urlRel = extractValue(urlRule, on: element)
                 guard !name.isEmpty else { continue }
+                // 章节 URL 可能是相对于书籍详情页（base）或书源根路径（sourceBase），
+                // 两层回退确保相对路径都能被解析。
                 let resolved = resolveURL(urlRel, base: base)
+                    ?? resolveURL(urlRel, base: sourceBase)
+                    ?? URLSanitizer.sanitize(urlRel)
                 result.append(ReaderChapter(title: name, text: nil, url: resolved?.absoluteString))
             }
             if !result.isEmpty { return result }
@@ -807,6 +815,8 @@ struct BookReaderView: View {
         var result: [ReaderChapter] = []
         for i in 0..<count {
             let resolved = resolveURL(urls[i], base: base)
+                ?? resolveURL(urls[i], base: sourceBase)
+                ?? URLSanitizer.sanitize(urls[i])
             result.append(ReaderChapter(title: names[i], text: nil, url: resolved?.absoluteString))
         }
         return result
