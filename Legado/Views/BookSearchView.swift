@@ -425,12 +425,16 @@ struct BookSearchView: View {
     }
 
     /// 阶段二：占位符替换。`{{key}}` / `searchKey` → 编码后关键词；`{{page}}` / `searchPage` → 页码。
+    /// `{{searchKey}}` 先归一化为 `{{key}}`——直接替换 "searchKey" 会残留 `{{}}`，
+    /// 导致 URL 含非法字符构造失败（legado ImportOldData 的归一化语义）。
     private func replaceKeyPage(_ urlString: String, keyword: String, page: Int = 1) -> String {
         let encoded = Self.encodeSearchKey(keyword)
         var output = urlString
+            .replacingOccurrences(of: "{{searchKey}}", with: "{{key}}")
+            .replacingOccurrences(of: "{{searchPage}}", with: "{{page}}")
         output = output.replacingOccurrences(of: "{{key}}", with: encoded)
         output = output.replacingOccurrences(of: "searchKey", with: encoded)
-        output = output.replacingOccurrences(of: "{{searchPage}}", with: "\(page)")
+        output = output.replacingOccurrences(of: "{{page}}", with: "\(page)")
         output = output.replacingOccurrences(of: "searchPage", with: "\(page)")
         return output
     }
@@ -491,6 +495,13 @@ struct BookSearchView: View {
         finalURLString = finalURLString.replacingOccurrences(of: "searchKey", with: encoded)
         finalURLString = finalURLString.replacingOccurrences(of: "{{searchPage}}", with: "1")
         finalURLString = finalURLString.replacingOccurrences(of: "searchPage", with: "1")
+        // 兜底：占位符替换后仍残留的 {{ }} 做 percent 编码
+        //（URL 含花括号会构造失败，报「链接格式不正确」）
+        if finalURLString.contains("{{") || finalURLString.contains("}}") {
+            finalURLString = finalURLString
+                .replacingOccurrences(of: "{{", with: "%7B%7B")
+                .replacingOccurrences(of: "}}", with: "%7D%7D")
+        }
         // 相对地址（无 scheme，如 /search?kw={{key}}）需拼接书源基准 URL。
         // legado 书源的 searchUrl 大量是相对路径，不解析会导致全部被判「链接格式不正确」。
         let finalURL: URL
@@ -510,6 +521,11 @@ struct BookSearchView: View {
         // 修复需要鉴权头的书源返回 HTTP 401/403 的问题。
         var mergedHeaders = sourceHeaders(source)
         for (key, value) in request.headers { mergedHeaders[key] = value }
+        // 默认 Referer：中文站点普遍校验，缺失时用书源基准 URL 兜底
+        if mergedHeaders["Referer"] == nil && mergedHeaders["referer"] == nil,
+           let base = URLSanitizer.sanitize(source.bookSourceUrl) {
+            mergedHeaders["Referer"] = base.absoluteString
+        }
 
         let html: String
         if request.method.uppercased() == "POST", let bodyTemplate = request.body {
@@ -518,11 +534,36 @@ struct BookSearchView: View {
             finalBody = finalBody.replacingOccurrences(of: "searchKey", with: encoded)
             finalBody = finalBody.replacingOccurrences(of: "{{searchPage}}", with: "1")
             finalBody = finalBody.replacingOccurrences(of: "searchPage", with: "1")
-            let bodyData = finalBody.data(using: .utf8)
-            html = try await NetworkService.shared.fetchTextWithBody(
-                from: finalURL, method: "POST", body: bodyData, headers: mergedHeaders,
-                timeout: timeout
+            let bodyData: Data
+            if let charset = request.charset,
+               let encoding = NetworkService.encoding(named: charset) {
+                // GBK 站点的 POST 表单必须按 gbk 编码，否则关键词乱码
+                bodyData = finalBody.data(using: encoding) ?? Data()
+            } else {
+                bodyData = finalBody.data(using: .utf8) ?? Data()
+            }
+            if let charset = request.charset {
+                // 书源显式声明 charset（如 gbk）：取原始数据按声明解码
+                let (data, response) = try await NetworkService.shared.fetchDataWithBody(
+                    from: finalURL, method: "POST", body: bodyData, headers: mergedHeaders,
+                    timeout: timeout
+                )
+                html = (try? NetworkService.decodeText(
+                    data, charset: charset.isEmpty ? response.textEncodingName : charset
+                )) ?? ""
+            } else {
+                html = try await NetworkService.shared.fetchTextWithBody(
+                    from: finalURL, method: "POST", body: bodyData, headers: mergedHeaders,
+                    timeout: timeout
+                )
+            }
+        } else if let charset = request.charset, !charset.isEmpty {
+            let (data, response) = try await NetworkService.shared.fetchDataWithResponse(
+                from: finalURL, headers: mergedHeaders, timeout: timeout
             )
+            html = (try? NetworkService.decodeText(
+                data, charset: charset.isEmpty ? response.textEncodingName : charset
+            )) ?? ""
         } else {
             html = try await NetworkService.shared.fetchText(from: finalURL, headers: mergedHeaders, timeout: timeout)
         }
@@ -580,11 +621,12 @@ struct BookSearchView: View {
         }
         let method = (obj["method"] as? String) ?? "GET"
         let body = obj["body"] as? String
+        let charset = obj["charset"] as? String
         var headers: [String: String] = [:]
         if let h = obj["headers"] as? [String: String] {
             headers = h
         }
-        return ParsedSearchRequest(url: urlPart, method: method, body: body, headers: headers)
+        return ParsedSearchRequest(url: urlPart, method: method, body: body, headers: headers, charset: charset)
     }
 
     private struct ParsedSearchRequest {
@@ -592,6 +634,8 @@ struct BookSearchView: View {
         let method: String
         let body: String?
         let headers: [String: String]
+        /// searchUrl 选项的 charset（如 gbk）；nil 表示未声明
+        let charset: String?
     }
 
     /// 关键词与模式的匹配判定：书名 / 作者 / 简介（简介含主角名等线索）
@@ -666,10 +710,15 @@ struct BookSearchView: View {
             throw NetworkError.invalidURL
         }
 
-        let items = BookListAnalyzer.items(rule: listRule, html: html, engine: engine)
+        var ruleError: String?
+        let items = BookListAnalyzer.items(rule: listRule, html: html, engine: engine, error: &ruleError)
         if items.isEmpty {
-            // 规则解析失败或无匹配：给出可定位的错误（不再静默计入「成功但未命中」）
-            throw RuleError.emptyResult
+            if let ruleError {
+                // 规则解析失败（区别于「书源没有这本书」）——抛出带具体原因的可见错误
+                throw RuleError.ruleFailed(ruleError)
+            }
+            // 规则正常执行但无匹配：书源未收录该书，不算失败
+            return []
         }
 
         var result: [ExploredBook] = []

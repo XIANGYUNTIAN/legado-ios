@@ -271,7 +271,7 @@ private final class ResultBox<T> {
                 from: url, headers: headers
             )
         }
-        let text = (try? NetworkService.decodeText(data)) ?? ""
+        let text = (try? NetworkService.decodeText(data, charset: response.textEncodingName)) ?? ""
         var headerMap: [String: String] = [:]
         for (key, value) in response.allHeaderFields {
             if let key = key as? String {

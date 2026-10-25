@@ -4,6 +4,7 @@ struct SourceListView: View {
     @EnvironmentObject private var store: BookSourceStore
     @State private var showImport = false
     @State private var showScan = false
+    @State private var showExport = false
 
     // 批量选择模式
     @State private var isSelecting = false
@@ -67,6 +68,12 @@ struct SourceListView: View {
                             Image(systemName: "plus")
                         }
                         Button {
+                            showExport = true
+                        } label: {
+                            Image(systemName: "square.and.arrow.up")
+                        }
+                        .disabled(store.sources.isEmpty)
+                        Button {
                             isSelecting = true
                             selection = []
                         } label: {
@@ -81,6 +88,9 @@ struct SourceListView: View {
         }
         .sheet(isPresented: $showScan) {
             QRSourceScanSheet()
+        }
+        .sheet(isPresented: $showExport) {
+            SourceExportSheet(sources: store.sources)
         }
         .confirmationDialog("确认删除", isPresented: $showDeleteConfirm) {
             Button("删除 \(selection.count) 个书源", role: .destructive) {

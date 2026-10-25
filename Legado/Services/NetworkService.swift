@@ -149,8 +149,8 @@ final class NetworkService: ObservableObject {
     func fetchText(from url: URL,
                    headers: [String: String]? = nil,
                    timeout: TimeInterval? = nil) async throws -> String {
-        let data = try await fetchDataWithResponse(from: url, headers: headers, timeout: timeout).0
-        return try Self.decodeText(data)
+        let (data, response) = try await fetchDataWithResponse(from: url, headers: headers, timeout: timeout)
+        return try Self.decodeText(data, charset: response.textEncodingName)
     }
 
     /// 抓取远端原始 Data（含状态码校验与空内容校验）
@@ -174,8 +174,8 @@ final class NetworkService: ObservableObject {
                            body: Data?,
                            headers: [String: String]? = nil,
                            timeout: TimeInterval? = nil) async throws -> String {
-        let data = try await performRequestWithBody(url: url, method: method, body: body, headers: headers, timeout: timeout).0
-        return try Self.decodeText(data)
+        let (data, response) = try await performRequestWithBody(url: url, method: method, body: body, headers: headers, timeout: timeout)
+        return try Self.decodeText(data, charset: response.textEncodingName)
     }
 
     /// 带请求体的原始抓取（返回数据与响应），供需要状态码/编码判断的调用方
@@ -304,9 +304,25 @@ final class NetworkService: ObservableObject {
 
     // MARK: - 编码 / 工具
 
-    /// 文本解码：UTF-8 优先，GB18030 兜底，再退 UTF-16，并去除 BOM 与首尾空白
-    static func decodeText(_ data: Data) throws -> String {
+    /// 文本解码。优先级：
+    /// 1. 显式 charset（调用方传入，如 searchUrl 选项的 charset: "gbk"）；
+    /// 2. UTF-8 优先——但解码成功后**再查 meta charset**，若页面声明 gb2312/gbk
+    ///    而字节恰好是合法 UTF-8（GBK 中文大量落入该情形），按声明重新用 GB18030 解码；
+    /// 3. GB18030 / UTF-16 兜底。
+    /// - Parameter charset: 显式字符集（大小写不敏感），nil 表示自动探测
+    static func decodeText(_ data: Data, charset: String? = nil) throws -> String {
+        if let charset, let encoding = encoding(named: charset),
+           let text = String(data: data, encoding: encoding) {
+            return Self.stripBOM(text)
+        }
         if let text = String(data: data, encoding: .utf8) {
+            // meta charset 复核：声明 GBK 系但被 UTF-8 成功解码 → 乱码，按声明重解
+            if let declared = Self.metaCharset(text),
+               declared.lowercased().contains("gb"),
+               let encoding = encoding(named: declared),
+               let gbkText = String(data: data, encoding: encoding) {
+                return Self.stripBOM(gbkText)
+            }
             return Self.stripBOM(text)
         }
         let gbEncoding = CFStringConvertEncodingToNSStringEncoding(
@@ -322,6 +338,60 @@ final class NetworkService: ObservableObject {
             return Self.stripBOM(text)
         }
         throw NetworkError.encodingFailed
+    }
+
+    /// charset 名 → String.Encoding。覆盖中文站点常见声明
+    static func encoding(named charset: String) -> String.Encoding? {
+        switch charset.lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\"", with: "")
+            .replacingOccurrences(of: "'", with: "") {
+        case "utf-8", "utf8", "utf_8":
+            return .utf8
+        case "gbk", "gb2312", "gb-2312", "gb_2312", "gb18030", "gb-18030", "chinese", "zh-cn", "cp936":
+            let gb = CFStringConvertEncodingToNSStringEncoding(
+                CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)
+            )
+            return String.Encoding(rawValue: gb)
+        case "utf-16", "utf16", "utf_16":
+            return .utf16
+        case "utf-16le", "utf-16be":
+            return .utf16
+        case "big5", "big-5", "big5-hkscs":
+            let big5 = CFStringConvertEncodingToNSStringEncoding(
+                CFStringEncoding(CFStringEncodings.Big5.rawValue)
+            )
+            return String.Encoding(rawValue: big5)
+        case "iso-8859-1", "latin1", "ascii", "us-ascii":
+            return .isoLatin1
+        default:
+            // 未知声明交给 CFString 转换（覆盖 x- 前缀等变体）
+            let cf = CFStringConvertIANACharSetNameToEncoding(charset as CFString)
+            if cf != kCFStringEncodingInvalidId {
+                return String.Encoding(
+                    rawValue: CFStringConvertEncodingToNSStringEncoding(cf)
+                )
+            }
+            return nil
+        }
+    }
+
+    /// 从 HTML 头部提取 meta charset 声明（`<meta charset="gbk">` 或
+    /// `<meta http-equiv="Content-Type" content="text/html; charset=gbk">`）
+    static func metaCharset(_ html: String) -> String? {
+        let head = String(html.prefix(2048))
+        // 形如 charset=xxx 的声明
+        if let regex = try? NSRegularExpression(
+            pattern: "charset\\s*=\\s*[\"']?\\s*([A-Za-z0-9_\\-]+)", options: .caseInsensitive
+        ) {
+            let ns = head as NSString
+            if let match = regex.firstMatch(
+                in: head, range: NSRange(location: 0, length: ns.length)
+            ) {
+                return ns.substring(with: match.range(at: 1))
+            }
+        }
+        return nil
     }
 
     /// 去除 UTF-8 BOM 并修剪首尾空白

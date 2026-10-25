@@ -844,8 +844,14 @@ struct BookReaderView: View {
         engine.setBook(book)
         engine.setChapter(title: nil, nextUrl: nil)
 
-        let items = BookListAnalyzer.items(rule: listRule, html: html, engine: engine)
-        guard !items.isEmpty else { return [] }
+        var ruleError: String?
+        let items = BookListAnalyzer.items(rule: listRule, html: html, engine: engine, error: &ruleError)
+        guard !items.isEmpty else {
+            if let ruleError {
+                throw RuleError.ruleFailed(ruleError)
+            }
+            return []
+        }
 
         var result: [ReaderChapter] = []
         for item in items {

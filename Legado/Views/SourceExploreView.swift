@@ -186,7 +186,8 @@ struct SourceExploreView: View {
         let engine = RuleEngine()
         engine.setSource(source)
         engine.setBaseUrl(source.bookSourceUrl)
-        let items = BookListAnalyzer.items(rule: listRule, html: html, engine: engine)
+        var ruleError: String?
+        let items = BookListAnalyzer.items(rule: listRule, html: html, engine: engine, error: &ruleError)
         guard !items.isEmpty else { return [] }
 
         var result: [ExploredBook] = []
