@@ -446,13 +446,13 @@ final class HtmlRuleEngine {
     /// 字段规则求值（整页）：选择器链 + 抽取器，返回字符串列表（无命中返回空数组）。
     func evaluateCss(_ body: String, rootHTML: String) throws -> [String] {
         let document = try XPathEvaluator.parseHTML(rootHTML)
-        return try Self.evaluateFieldRule(stripCssPrefix(body), root: document)
+        return try Self.evaluateFieldRule(Self.stripCssPrefix(body), root: document)
     }
 
     /// 容器规则求值（整页）：返回元素列表（bookList / chapterList 用）。
     /// 规则可为 `@css:` / `@@` 前缀或裸 legado 选择器链。
     func elements(_ legadoRule: String, rootHTML: String) throws -> [Element] {
-        let body = stripCssPrefix(legadoRule)
+        let body = Self.stripCssPrefix(legadoRule)
         let document = try XPathEvaluator.parseHTML(rootHTML)
         let translation = try LegadoCssTranslator.translate(body, forElements: true)
         return try LegadoCssTranslator.elements(translation, root: document)
@@ -460,7 +460,7 @@ final class HtmlRuleEngine {
 
     /// 容器规则求值（元素内）：在指定元素的后代中按规则选元素。
     func elements(_ legadoRule: String, in element: Element) throws -> [Element] {
-        let body = stripCssPrefix(legadoRule)
+        let body = Self.stripCssPrefix(legadoRule)
         let translation = try LegadoCssTranslator.translate(body, forElements: true)
         return try LegadoCssTranslator.elements(translation, root: element)
     }

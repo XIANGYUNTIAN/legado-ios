@@ -1,4 +1,5 @@
 import Foundation
+import SwiftSoup
 
 // MARK: - 抽取器（对应 legado Element 取值方式）
 

@@ -126,6 +126,13 @@ enum JsBridgeError: LocalizedError {
     var originName: String { book.originName ?? "" }
 }
 
+// MARK: - 同步结果盒（泛型，文件作用域）
+
+/// 跨 semaphore 传递 async 求值结果的泛型盒（信号量建立 happens-before，无需加锁）
+private final class ResultBox<T> {
+    var result: Result<T, Error>?
+}
+
 // MARK: - java.* 桥（对应 legado JsExtensions 常用子集）
 
 /// 注入 JavaScriptCore 的 `java` 对象。
@@ -223,16 +230,12 @@ enum JsBridgeError: LocalizedError {
 
     // MARK: - 同步网络（JavaScriptCore 无 Continuation，用信号量等待 async 请求）
 
-    private final class Box {
-        var result: Result<(String, [String: String], Int), Error>?
-    }
-
     /// 同步执行 async 网络请求。Task.detached 避免继承调用方 actor 上下文导致死锁；
     /// 桥内统一入口、统一超时，禁止在桥内再嵌套 async 回调。
-    private func runSyncNetwork(timeout: TimeInterval = 20,
-                                _ body: @escaping () async throws -> (String, [String: String], Int)) throws -> (String, [String: String], Int) {
+    private func runSyncNetwork<T>(timeout: TimeInterval = 20,
+                                   _ body: @escaping () async throws -> T) throws -> T {
         let semaphore = DispatchSemaphore(value: 0)
-        let box = Box()
+        let box = ResultBox<T>()
         let task = Task.detached {
             do {
                 box.result = .success(try await body())
@@ -261,7 +264,9 @@ enum JsBridgeError: LocalizedError {
                     from: url, method: method, body: body, headers: headers
                 )
             }
-            return try await NetworkService.shared.fetchData(from: url, headers: headers)
+            return try await NetworkService.shared.fetchDataWithResponse(
+                from: url, headers: headers
+            )
         }
         let text = (try? NetworkService.decodeText(data)) ?? ""
         var headerMap: [String: String] = [:]
@@ -336,7 +341,8 @@ enum JsBridgeError: LocalizedError {
     func get(_ keyOrUrl: String, _ options: JSValue?) -> NSObject? {
         let hasOptions = options.map { !$0.isUndefined && !$0.isNull } ?? false
         if !hasOptions && !isURLLike(keyOrUrl) {
-            return engine?.get(keyOrUrl) ?? ""
+            // 显式桥接为 NSString，满足 NSObject? 返回类型
+            return (engine?.get(keyOrUrl) ?? "") as NSString
         }
         let parsed = parseOptions(options)
         do {
