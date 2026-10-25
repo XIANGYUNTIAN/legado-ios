@@ -275,7 +275,9 @@ enum LegadoCssTranslator {
                 next = current
             } else {
                 for element in current {
-                    next.append(contentsOf: (try? element.select(segment.selector)) ?? [])
+                    // SwiftSoup select 抛异常时返回空（与现有调用点一致）
+                    guard let selected = try? element.select(segment.selector) else { continue }
+                    next.append(contentsOf: Array(selected))
                 }
             }
             // 去重保序（跨段选择可能重复命中同一节点）
