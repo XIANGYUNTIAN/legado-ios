@@ -205,7 +205,10 @@ private final class ResultBox<T> {
 
     private var sourceProxy: JsSource?
     private var bookProxy: JsBook?
-    private lazy var cookieProxy: JsCookie = CookieStore.shared.jsProxy
+    /// 每个引擎实例独立的 JsCookie——JSCore 对同一 ObjC 对象在多个 JSContext
+    /// 的并发导出非线程安全（20 路并发搜索时共享单例会触发数据竞争崩溃），
+    /// 必须每实例新建。
+    private var cookieProxy = JsCookie()
 
     /// java.getElement 最近一次命中缓存的元素（legado 起点等书源的 bookList <js>
     /// 不返回元素、依赖 getElement 的副作用，此处供 BookListAnalyzer 兜底读取）
@@ -453,7 +456,8 @@ private final class ResultBox<T> {
 
     /// 打开 WebView 等待用户完成操作（起点 Cookie 验证流），
     /// 完成后带回 Cookie 重新抓取目标页并返回 HTML。
-    /// 同步等待上限 120s；无 UI 附着时降级为直接抓取。
+    /// 同步等待上限 30s（超时即失败，避免阻塞搜索任务的协作线程过久）；
+    /// 无 UI 附着时降级为直接抓取。
     func startBrowserAwait(_ url: String, _ title: String) -> String {
         guard let presenter = Self.webViewPresenter else {
             return (try? performSyncRequest(urlString: url, method: "GET", body: nil, headers: [:]).0) ?? ""
@@ -469,7 +473,7 @@ private final class ResultBox<T> {
             presenter(url, title)
         }
 
-        guard semaphore.wait(timeout: .now() + 120) == .success else {
+        guard semaphore.wait(timeout: .now() + 30) == .success else {
             webViewLock.lock()
             webViewSemaphore = nil
             webViewLock.unlock()

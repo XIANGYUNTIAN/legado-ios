@@ -218,9 +218,19 @@ final class XPathEvaluator {
 
     // MARK: HTML 解析
 
+    /// HTML 解析统一入口。防护：
+    /// - 空文档直接抛错（SwiftSoup 对空串的边界行为不稳定）；
+    /// - 超大文档拒绝（>3MB，畸形/超大文档有栈溢出风险，报错优于崩溃）。
     static func parseHTML(_ html: String) throws -> Document {
+        let trimmed = html.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw XPathError.parseError("内容为空")
+        }
+        if trimmed.count > 3_000_000 {
+            throw XPathError.parseError("文档过大（\(trimmed.count) 字符，上限 300 万）")
+        }
         do {
-            return try SwiftSoup.parse(html)
+            return try SwiftSoup.parse(trimmed)
         } catch {
             throw XPathError.parseError(error.localizedDescription)
         }

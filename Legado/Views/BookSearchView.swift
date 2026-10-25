@@ -324,7 +324,9 @@ struct BookSearchView: View {
             }
 
             await withTaskGroup { group in
-                let semaphore = SearchSemaphore(value: 20)
+                // 并发档位：JS 桥的网络方法会阻塞协作线程（信号量等待），
+                // 并发过高会耗尽协作线程池导致整体挂起——12 路是速度与稳定的平衡点
+                let semaphore = SearchSemaphore(value: 12)
 
                 for source in sources {
                     if Task.isCancelled { break }
@@ -528,6 +530,9 @@ struct BookSearchView: View {
         let extracted = try extractSearchResults(
             html: html, rules: rules, source: source, base: finalURL, engine: engine
         )
+        // 网络/JS 阶段可能耗时较长（如 startBrowserAwait 等待用户操作），
+        // 完成后检查取消，避免已取消的任务继续做无谓的解析
+        if Task.isCancelled { return [] }
         let sourceName = source.bookSourceName.isEmpty ? source.bookSourceUrl : source.bookSourceName
         return extracted
             .filter { matches($0, keyword: keyword, mode: mode) }

@@ -30,6 +30,9 @@ import JavaScriptCore
 /// 本类提供书源级的显式操作：
 /// - JS 侧 `cookie.getCookie / setCookie / removeCookie`（起点等验证流依赖）；
 /// - startBrowserAwait 的 WKWebView cookie 回写（WKHTTPCookieStore 与 shared 隔离）。
+///
+/// 注意：JS 代理 `JsCookie` **每引擎实例新建**（不在此类共享）——
+/// JSCore 对同一 ObjC 对象在多个 JSContext 的并发导出非线程安全。
 final class CookieStore {
     static let shared = CookieStore()
 
@@ -83,9 +86,6 @@ final class CookieStore {
             storage.setCookie(cookie)
         }
     }
-
-    /// JS 代理对象（evalJS 绑定用）
-    let jsProxy = JsCookie()
 }
 
 // MARK: - 书源级变量存储
