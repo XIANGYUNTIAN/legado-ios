@@ -771,11 +771,14 @@ struct BookReaderView: View {
         guard let url = chapter.url else {
             return chapter.text ?? ""
         }
-        // 章节 URL 可能是相对路径（如 /chapter/123.html），需拼接书源基准 URL。
+        // 章节 URL 可能是相对路径（如 /chapter/123.html），需拼接基准 URL。
+        // 解析基准（对齐 legado）：书籍详情页 URL 优先，书源根兜底。
         guard let source = sourceStore.sources.first(where: { $0.bookSourceUrl == book.sourceId }) else {
             return "书源不存在或已删除"
         }
-        let u = resolveURL(url, base: source.bookSourceURL)
+        let bookURL = resolveURL(book.bookUrl ?? "", base: source.bookSourceURL)
+        let u = resolveURL(url, base: bookURL)
+            ?? resolveURL(url, base: source.bookSourceURL)
             ?? URLSanitizer.sanitize(url)
         guard let u else {
             return chapter.text ?? ""
@@ -787,41 +790,54 @@ struct BookReaderView: View {
         engine.setChapter(title: chapter.title, nextUrl: chapters[safe: index + 1]?.url)
         let contentRule = source.ruleContent?.content ?? ""
         let headers = sourceHeaders(source)
+
+        // 404 时的候选基准（依次重试）：当前 URL → 书源根 → 书籍详情页
+        let retryBases: [URL?] = [source.bookSourceURL, bookURL]
+        var retried: [URL] = []
+
         do {
-            let html = try await NetworkService.shared.fetchText(from: u, headers: headers)
-            let text = (try? engine.getString(contentRule, content: html)) ?? ""
-            let finalText = text.isEmpty ? "（本章无内容）" : text
-            // 缓存到章节，便于离线回看
-            await MainActor.run {
-                if chapters.indices.contains(index) {
-                    chapters[index].text = finalText
-                }
-            }
-            return finalText
+            return try await fetchAndExtract(
+                url: u, engine: engine, contentRule: contentRule,
+                headers: headers, index: index, title: chapter.title
+            )
         } catch NetworkError.badStatus(404) {
-            // 章节 URL 可能被解析到了错误的基准（书源根 vs 书籍详情页）。
-            // HTTP 404 时尝试用书籍详情页 URL 重新解析路径后重试。
-            if let bookURL = resolveURL(book.bookUrl ?? "", base: source.bookSourceURL),
-               let retry = resolveURL(url, base: bookURL) ?? URLSanitizer.sanitize(url),
-               retry != u {
-                do {
-                    let html2 = try await NetworkService.shared.fetchText(from: retry, headers: headers)
-                    let text2 = (try? engine.getString(contentRule, content: html2)) ?? ""
-                    let finalText2 = text2.isEmpty ? "（本章无内容）" : text2
-                    await MainActor.run {
-                        if chapters.indices.contains(index) {
-                            chapters[index].text = finalText2
-                        }
+            // 章节 URL 可能被解析到了错误的基准。404 时换基准重新解析重试。
+            for base in retryBases {
+                if let candidate = resolveURL(url, base: base),
+                   candidate != u, !retried.contains(candidate) {
+                    retried.append(candidate)
+                    do {
+                        return try await fetchAndExtract(
+                            url: candidate, engine: engine, contentRule: contentRule,
+                            headers: headers, index: index, title: chapter.title
+                        )
+                    } catch {
+                        continue
                     }
-                    return finalText2
-                } catch {
-                    return "加载失败：\(error.localizedDescription)"
                 }
             }
-            return "加载失败：服务器返回 HTTP 404，链接可能已失效或被拦截"
+            return "加载失败：HTTP 404（\(u.absoluteString)）"
         } catch {
-            return "加载失败：\(error.localizedDescription)"
+            return "加载失败：\(error.localizedDescription)（\(u.absoluteString)）"
         }
+    }
+
+    /// 抓取章节页并提取正文，缓存到章节
+    private func fetchAndExtract(url: URL,
+                                 engine: RuleEngine,
+                                 contentRule: String,
+                                 headers: [String: String],
+                                 index: Int,
+                                 title: String) async throws -> String {
+        let html = try await NetworkService.shared.fetchText(from: url, headers: headers)
+        let text = (try? engine.getString(contentRule, content: html)) ?? ""
+        let finalText = text.isEmpty ? "（本章无内容）" : text
+        await MainActor.run {
+            if chapters.indices.contains(index) {
+                chapters[index].text = finalText
+            }
+        }
+        return finalText
     }
 
     // MARK: - 目录提取
@@ -858,11 +874,11 @@ struct BookReaderView: View {
             let name = BookListAnalyzer.field(nameRule, item: item, engine: engine)
             guard !name.isEmpty else { continue }
             let urlRel = BookListAnalyzer.field(urlRule, item: item, engine: engine)
-            // 章节 URL 通常相对于书源根路径（如 /chapter/123.html），
-            // 优先用书源基准 URL 解析；拼接到书籍详情页路径下会导致 404。
-            // sourceBase 为 nil 时回退到 base（书籍详情页 URL）。
-            let resolved = resolveURL(urlRel, base: sourceBase)
-                ?? resolveURL(urlRel, base: base)
+            // 章节 URL 解析基准（对齐 legado）：**目录页（书籍详情页）URL 优先**，
+            // 书源根兜底。纯相对文件名（如 `456.html`）只有相对目录页才正确；
+            // 带前导 `/` 的绝对路径对两者等价。
+            let resolved = resolveURL(urlRel, base: base)
+                ?? resolveURL(urlRel, base: sourceBase)
                 ?? URLSanitizer.sanitize(urlRel)
             let isVolumeText = BookListAnalyzer.field(rules.isVolume, item: item, engine: engine)
             result.append(ReaderChapter(
