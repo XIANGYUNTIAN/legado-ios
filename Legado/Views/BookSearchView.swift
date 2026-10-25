@@ -471,7 +471,7 @@ struct BookSearchView: View {
             html = try await NetworkService.shared.fetchText(from: finalURL, headers: mergedHeaders, timeout: timeout)
         }
 
-        let extracted = try extractSearchResults(html: html, rules: rules, base: finalURL)
+        let extracted = try extractSearchResults(html: html, rules: rules, base: finalURL, sourceBase: source.bookSourceURL)
         let sourceName = source.bookSourceName.isEmpty ? source.bookSourceUrl : source.bookSourceName
         return extracted
             .filter { matches($0, keyword: keyword, mode: mode) }
@@ -593,7 +593,7 @@ struct BookSearchView: View {
 
     /// 按 ruleSearch 提取结果：优先 per-element（bookList 选容器，逐元素求值），
     /// 回退整页规则 + 按索引压缩。
-    private func extractSearchResults(html: String, rules: SourceRuleSet, base: URL) throws -> [ExploredBook] {
+    private func extractSearchResults(html: String, rules: SourceRuleSet, base: URL, sourceBase: URL? = nil) throws -> [ExploredBook] {
         let listRule = rules.bookList ?? ""
         let nameRule = rules.name ?? ""
         let authorRule = rules.author ?? ""
@@ -614,7 +614,11 @@ struct BookSearchView: View {
                     let name = HtmlRuleEngine.extractValue(nameRule, on: element)
                     guard !name.isEmpty else { continue }
                     let bookUrl = HtmlRuleEngine.extractValue(bookUrlRule, on: element)
-                    let resolved = resolveURL(bookUrl, base: base)
+                    // 书源的 bookUrl 通常相对于书源根路径（如 /book/12345.html），
+                    // 优先用书源基准 URL 解析，避免拼接到搜索 URL 路径下导致 404。
+                    let resolved = resolveURL(bookUrl, base: sourceBase)
+                        ?? resolveURL(bookUrl, base: base)
+                        ?? URLSanitizer.sanitize(bookUrl)
                     result.append(ExploredBook(
                         name: name,
                         author: HtmlRuleEngine.extractValue(authorRule, on: element),
@@ -636,7 +640,9 @@ struct BookSearchView: View {
         let count = min(names.count, urls.count)
         var result: [ExploredBook] = []
         for i in 0..<count {
-            let resolved = resolveURL(urls[i], base: base)
+            let resolved = resolveURL(urls[i], base: sourceBase)
+                ?? resolveURL(urls[i], base: base)
+                ?? URLSanitizer.sanitize(urls[i])
             result.append(ExploredBook(
                 name: names[i],
                 author: "",

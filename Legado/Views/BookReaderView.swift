@@ -753,10 +753,10 @@ struct BookReaderView: View {
         guard let u else {
             return chapter.text ?? ""
         }
+        let engine = RuleEngine()
+        let contentRule = source.ruleContent?.content ?? ""
         do {
             let html = try await NetworkService.shared.fetchText(from: u)
-            let engine = RuleEngine()
-            let contentRule = source.ruleContent?.content ?? ""
             let text = (try? engine.getString(contentRule, content: html)) ?? ""
             let finalText = text.isEmpty ? "（本章无内容）" : text
             // 缓存到章节，便于离线回看
@@ -766,6 +766,27 @@ struct BookReaderView: View {
                 }
             }
             return finalText
+        } catch NetworkError.badStatus(404) {
+            // 章节 URL 可能被解析到了错误的基准（书源根 vs 书籍详情页）。
+            // HTTP 404 时尝试用书籍详情页 URL 重新解析路径后重试。
+            if let bookURL = resolveURL(book.bookUrl ?? "", base: source.bookSourceURL),
+               let retry = resolveURL(url, base: bookURL) ?? URLSanitizer.sanitize(url),
+               retry != u {
+                do {
+                    let html2 = try await NetworkService.shared.fetchText(from: retry)
+                    let text2 = (try? engine.getString(contentRule, content: html2)) ?? ""
+                    let finalText2 = text2.isEmpty ? "（本章无内容）" : text2
+                    await MainActor.run {
+                        if chapters.indices.contains(index) {
+                            chapters[index].text = finalText2
+                        }
+                    }
+                    return finalText2
+                } catch {
+                    return "加载失败：\(error.localizedDescription)"
+                }
+            }
+            return "加载失败：服务器返回 HTTP 404，链接可能已失效或被拦截"
         } catch {
             return "加载失败：\(error.localizedDescription)"
         }
@@ -793,10 +814,11 @@ struct BookReaderView: View {
                     let name = extractValue(nameRule, on: element)
                     let urlRel = extractValue(urlRule, on: element)
                     guard !name.isEmpty else { continue }
-                    // 章节 URL 可能是相对于书籍详情页（base）或书源根路径（sourceBase），
-                    // 两层回退确保相对路径都能被解析。
-                    let resolved = resolveURL(urlRel, base: base)
-                        ?? resolveURL(urlRel, base: sourceBase)
+                    // 章节 URL 通常相对于书源根路径（如 /chapter/123.html），
+                    // 优先用书源基准 URL 解析；拼接到书籍详情页路径下会导致 404。
+                    // sourceBase 为 nil 时回退到 base（书籍详情页 URL）。
+                    let resolved = resolveURL(urlRel, base: sourceBase)
+                        ?? resolveURL(urlRel, base: base)
                         ?? URLSanitizer.sanitize(urlRel)
                     result.append(ReaderChapter(title: name, text: nil, url: resolved?.absoluteString))
                 }
@@ -813,8 +835,8 @@ struct BookReaderView: View {
         guard count > 0 else { return [] }
         var result: [ReaderChapter] = []
         for i in 0..<count {
-            let resolved = resolveURL(urls[i], base: base)
-                ?? resolveURL(urls[i], base: sourceBase)
+            let resolved = resolveURL(urls[i], base: sourceBase)
+                ?? resolveURL(urls[i], base: base)
                 ?? URLSanitizer.sanitize(urls[i])
             result.append(ReaderChapter(title: names[i], text: nil, url: resolved?.absoluteString))
         }
