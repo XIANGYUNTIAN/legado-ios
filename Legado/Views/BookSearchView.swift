@@ -58,6 +58,8 @@ struct BookSearchView: View {
     @State private var errorMessage: String?
     @State private var addedMessage: String?
     @State private var sourceErrors: [SourceSearchError] = []
+    /// 搜索完成后的诊断摘要（命中/成功未命中/失败/超时统计）
+    @State private var searchSummary: String = ""
     /// 当前搜索任务句柄，支持随时取消（停止搜索）
     @State private var searchTask: Task<Void, Never>?
 
@@ -260,6 +262,15 @@ struct BookSearchView: View {
                             }
                         }
                     }
+                    if !searchSummary.isEmpty {
+                        Section {
+                            Text(searchSummary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
                 }
                 .listStyle(.plain)
             }
@@ -271,7 +282,9 @@ struct BookSearchView: View {
     // MARK: - 多源搜索逻辑
 
     /// 启动全源并发搜索：同时调度多个书源请求，死源不阻塞活源。
-    /// 限流 6 路并发，搜索页超时 12s，避免弱网下连接池耗尽。
+    /// 限流 20 路并发，搜索页超时 6s，全局预算 90s——642 源在 90s 内必然结束，
+    /// 不再出现「遍历几十分钟」的情况。搜索页是小 HTML，6s 对绝大多数站点足够；
+    /// 超时的源本身就是死源/慢源，继续等待没有意义。
     private func runSearch() {
         let trimmedKeyword = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedKeyword.isEmpty else { return }
@@ -287,18 +300,26 @@ struct BookSearchView: View {
         errorMessage = nil
         isSearching = true
         let total = sources.count
-        progressText = "正在遍历 \(total) 个书源…"
         let currentMode = mode
         let keywordCopy = trimmedKeyword
-        let searchTimeout: TimeInterval = 12  // 搜索页是小 HTML，12s 足够
+        let searchTimeout: TimeInterval = 6   // 搜索页是小 HTML，6s 足够
+        let globalBudget: TimeInterval = 90    // 全局搜索预算，超时即停
+        let startTime = Date()
 
         searchTask = Task {
             var seen = Set<String>()
             var completed = 0
+            var noMatchCount = 0  // 成功但未命中（返回 200 但结果不含关键词）
             let lock = NSLock()
 
+            // 全局超时：到达预算即取消剩余搜索，避免 642 源遍历几十分钟。
+            let globalGuard = Task {
+                try? await Task.sleep(nanoseconds: UInt64(globalBudget * 1_000_000_000))
+                searchTask?.cancel()
+            }
+
             await withTaskGroup { group in
-                let semaphore = SearchSemaphore(value: 6)
+                let semaphore = SearchSemaphore(value: 20)
 
                 for source in sources {
                     if Task.isCancelled { break }
@@ -322,6 +343,12 @@ struct BookSearchView: View {
                                 }
                                 results.append(contentsOf: unique)
                             }
+                            // 成功但未命中：计数但不报错，用于诊断摘要。
+                            if books.isEmpty {
+                                lock.lock()
+                                noMatchCount += 1
+                                lock.unlock()
+                            }
                         } catch {
                             guard !Task.isCancelled else { return }
                             let msg: String
@@ -339,22 +366,31 @@ struct BookSearchView: View {
                         completed += 1
                         lock.unlock()
                         await MainActor.run {
-                            progressText = "已完成 \(completed)/\(total) 个书源，找到 \(results.count) 本"
+                            let elapsed = Date().timeIntervalSince(startTime)
+                            progressText = "已完成 \(completed)/\(total) 个书源 · \(String(format: "%.0fs", elapsed)) · 找到 \(results.count) 本"
                         }
                     }
                 }
             }
 
+            globalGuard.cancel()
+
             await MainActor.run {
                 isSearching = false
                 progressText = nil
-                // 有失败书源时不清除 errorMessage 会让下方列表被 ContentUnavailableView
-                // 覆盖——用户搜完看不到失败原因。此处仅在无结果且无失败书源时设错误态，
-                // 否则清空 errorMessage 走下方 List + sourceErrors 分区展示。
+                let timedOut = completed < total  // 被全局预算截断
+
                 if results.isEmpty && sourceErrors.isEmpty {
                     errorMessage = "全部书源均未搜索到「\(keywordCopy)」"
                 } else {
                     errorMessage = nil
+                }
+                // 诊断摘要：让用户理解「成功但未命中」与「失败」的区别。
+                // 成功但未命中 = HTTP 200 但搜索结果不含关键词（书源内容不覆盖该小说）。
+                if timedOut {
+                    searchSummary = "⏱ 已达 \(Int(globalBudget))s 全局预算，提前结束（完成 \(completed)/\(total) 个书源）"
+                } else {
+                    searchSummary = "📊 命中 \(results.count) 本 · 成功但未命中 \(noMatchCount) 个 · 失败 \(sourceErrors.count) 个"
                 }
             }
         }
