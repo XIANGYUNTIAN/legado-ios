@@ -190,7 +190,7 @@ struct BookSearchView: View {
                 } description: {
                     Text(error)
                 }
-            } else if results.isEmpty && !isSearching && progressText == nil {
+            } else if results.isEmpty && sourceErrors.isEmpty && !isSearching && progressText == nil {
                 ContentUnavailableView {
                     Label("输入关键词开始搜索", systemImage: "text.magnifyingglass")
                 } description: {
@@ -348,12 +348,13 @@ struct BookSearchView: View {
             await MainActor.run {
                 isSearching = false
                 progressText = nil
-                if results.isEmpty {
-                    if sourceErrors.isEmpty {
-                        errorMessage = "全部书源均未搜索到「\(keywordCopy)」"
-                    } else {
-                        errorMessage = "未找到匹配结果（\(sourceErrors.count) 个书源失败，详见下方列表）"
-                    }
+                // 有失败书源时不清除 errorMessage 会让下方列表被 ContentUnavailableView
+                // 覆盖——用户搜完看不到失败原因。此处仅在无结果且无失败书源时设错误态，
+                // 否则清空 errorMessage 走下方 List + sourceErrors 分区展示。
+                if results.isEmpty && sourceErrors.isEmpty {
+                    errorMessage = "全部书源均未搜索到「\(keywordCopy)」"
+                } else {
+                    errorMessage = nil
                 }
             }
         }
