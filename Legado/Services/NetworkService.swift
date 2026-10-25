@@ -208,9 +208,10 @@ final class NetworkService: ObservableObject {
         }
 
         var lastError: Error = NetworkError.network("请求失败")
-        // 瞬时错误（连接被丢弃 / 无法连接 / 超时）重试一次：
-        // 中文书源站点在弱网或反爬时偶发掉连接，单次重试可显著减少「全部失败」。
-        for attempt in 0..<2 {
+        // 瞬时错误（连接被丢弃 / 无法连接 / 超时）最多重试 2 次，
+        // 间隔 0.6s / 1.2s 指数退避。中文书源站点在弱网或反爬时
+        // 偶发掉连接，多轮重试可显著减少「全部失败」。
+        for attempt in 0..<3 {
             do {
                 return try await attemptRequest(url: url, method: method, body: body,
                                                 headers: headers, timeout: timeout)
@@ -220,9 +221,10 @@ final class NetworkService: ObservableObject {
             } catch {
                 throw NetworkError.network(error.localizedDescription)
             }
-            if attempt == 0 {
+            if attempt < 2 {
                 if Task.isCancelled { throw NetworkError.cancelled }
-                try? await Task.sleep(nanoseconds: 600_000_000)  // 0.6s
+                let delay: UInt64 = attempt == 0 ? 600_000_000 : 1_200_000_000  // 0.6s / 1.2s
+                try? await Task.sleep(nanoseconds: delay)
             }
         }
         throw lastError

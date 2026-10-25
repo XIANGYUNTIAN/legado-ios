@@ -15,6 +15,34 @@ struct SourceSearchError: Identifiable {
     let message: String
 }
 
+/// 并发搜索的简单信号量（actor 保证线程安全）。
+/// 限流同时请求数，避免弱网下连接池耗尽或触发站点反爬。
+private actor SearchSemaphore {
+    private var available: Int
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(value: Int) { available = max(1, value) }
+
+    func wait() async {
+        if available > 0 {
+            available -= 1
+            return
+        }
+        await withCheckedContinuation { cont in
+            waiters.append(cont)
+        }
+    }
+
+    func release() {
+        if let cont = waiters.first {
+            waiters.removeFirst()
+            cont.resume()
+        } else {
+            available += 1
+        }
+    }
+}
+
 /// 书源搜索：遍历全部可搜索书源，按 ruleSearch 规则检索书籍，一键加入书架。
 /// 加入书架的书籍保留 sourceId + bookUrl，阅读时走规则阅读路径。
 struct BookSearchView: View {
@@ -242,7 +270,8 @@ struct BookSearchView: View {
 
     // MARK: - 多源搜索逻辑
 
-    /// 启动全源遍历搜索。取消上一次未完成任务，再并发无关地逐源检索。
+    /// 启动全源并发搜索：同时调度多个书源请求，死源不阻塞活源。
+    /// 限流 6 路并发，搜索页超时 12s，避免弱网下连接池耗尽。
     private func runSearch() {
         let trimmedKeyword = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedKeyword.isEmpty else { return }
@@ -257,43 +286,65 @@ struct BookSearchView: View {
         sourceErrors = []
         errorMessage = nil
         isSearching = true
-        progressText = "正在遍历 \(sources.count) 个书源…"
+        let total = sources.count
+        progressText = "正在遍历 \(total) 个书源…"
         let currentMode = mode
         let keywordCopy = trimmedKeyword
+        let searchTimeout: TimeInterval = 12  // 搜索页是小 HTML，12s 足够
 
         searchTask = Task {
             var seen = Set<String>()
-            for (index, source) in sources.enumerated() {
-                if Task.isCancelled { break }
-                await MainActor.run {
-                    progressText = "正在搜索 \(sourceLabel(source))（\(index + 1)/\(sources.count)）"
-                }
-                do {
-                    let books = try await performSingleSourceSearch(
-                        source: source, keyword: keywordCopy, mode: currentMode
-                    )
-                    await MainActor.run {
-                        let unique = books.filter { book in
-                            let key = "\(book.name.lowercased())|\(book.author.lowercased())"
-                            if seen.contains(key) { return false }
-                            seen.insert(key)
-                            return true
-                        }
-                        results.append(contentsOf: unique)
-                    }
-                } catch {
+            var completed = 0
+            let lock = NSLock()
+
+            await withTaskGroup { group in
+                let semaphore = SearchSemaphore(value: 6)
+
+                for source in sources {
                     if Task.isCancelled { break }
-                    let msg: String
-                    if let ne = error as? NetworkError, case .cancelled = ne {
-                        break
-                    } else {
-                        msg = error.localizedDescription
-                    }
-                    await MainActor.run {
-                        sourceErrors.append(SourceSearchError(name: sourceLabel(source), message: msg))
+                    await semaphore.wait()
+
+                    group.addTask {
+                        defer { semaphore.release() }
+                        guard !Task.isCancelled else { return }
+
+                        do {
+                            let books = try await performSingleSourceSearch(
+                                source: source, keyword: keywordCopy, mode: currentMode,
+                                timeout: searchTimeout
+                            )
+                            await MainActor.run {
+                                let unique = books.filter { book in
+                                    let key = "\(book.name.lowercased())|\(book.author.lowercased())"
+                                    if seen.contains(key) { return false }
+                                    seen.insert(key)
+                                    return true
+                                }
+                                results.append(contentsOf: unique)
+                            }
+                        } catch {
+                            guard !Task.isCancelled else { return }
+                            let msg: String
+                            if let ne = error as? NetworkError, case .cancelled = ne {
+                                return
+                            } else {
+                                msg = error.localizedDescription
+                            }
+                            await MainActor.run {
+                                sourceErrors.append(SourceSearchError(name: sourceLabel(source), message: msg))
+                            }
+                        }
+
+                        lock.lock()
+                        completed += 1
+                        lock.unlock()
+                        await MainActor.run {
+                            progressText = "已完成 \(completed)/\(total) 个书源，找到 \(results.count) 本"
+                        }
                     }
                 }
             }
+
             await MainActor.run {
                 isSearching = false
                 progressText = nil
@@ -301,7 +352,7 @@ struct BookSearchView: View {
                     if sourceErrors.isEmpty {
                         errorMessage = "全部书源均未搜索到「\(keywordCopy)」"
                     } else {
-                        errorMessage = "未找到匹配结果（部分书源失败，详见下方列表）"
+                        errorMessage = "未找到匹配结果（\(sourceErrors.count) 个书源失败，详见下方列表）"
                     }
                 }
             }
@@ -318,9 +369,11 @@ struct BookSearchView: View {
 
     /// 单个书源搜索：解析 searchUrl（含 POST 选项后缀）、发请求、按规则解析、
     /// 再按关键词与模式过滤。返回已标注来源、已按模式过滤的结果。
+    /// - Parameter timeout: 请求超时（秒），搜索页用较短值避免死站阻塞整体进度。
     private func performSingleSourceSearch(source: BookSource,
                                             keyword: String,
-                                            mode: SearchMode) async throws -> [ExploredBook] {
+                                            mode: SearchMode,
+                                            timeout: TimeInterval? = nil) async throws -> [ExploredBook] {
         let rawSearchURL = source.searchUrl ?? ""
         guard !rawSearchURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw NetworkError.invalidURL
@@ -364,10 +417,11 @@ struct BookSearchView: View {
             finalBody = finalBody.replacingOccurrences(of: "searchPage", with: "1")
             let bodyData = finalBody.data(using: .utf8)
             html = try await NetworkService.shared.fetchTextWithBody(
-                from: finalURL, method: "POST", body: bodyData, headers: mergedHeaders
+                from: finalURL, method: "POST", body: bodyData, headers: mergedHeaders,
+                timeout: timeout
             )
         } else {
-            html = try await NetworkService.shared.fetchText(from: finalURL, headers: mergedHeaders)
+            html = try await NetworkService.shared.fetchText(from: finalURL, headers: mergedHeaders, timeout: timeout)
         }
 
         let extracted = try extractSearchResults(html: html, rules: rules, base: finalURL)
