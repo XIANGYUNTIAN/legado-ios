@@ -827,9 +827,10 @@ struct BookReaderView: View {
         HtmlRuleEngine.extractValue(rule, on: element)
     }
 
-    private func resolveURL(_ relative: String, base: URL) -> URL? {
+    private func resolveURL(_ relative: String, base: URL?) -> URL? {
         guard !relative.isEmpty else { return nil }
         if let url = URLSanitizer.sanitize(relative) { return url }
+        guard let base else { return nil }
         return URL(string: relative, relativeTo: base)?.absoluteURL
     }
 }
