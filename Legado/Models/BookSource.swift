@@ -157,9 +157,20 @@ struct BookSource: Codable, Identifiable, Equatable {
         guard let raw = searchUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty else { return false }
         guard raw.contains("{{key}}") || raw.contains("searchKey") else { return false }
-        // 地址部分（截掉 ,{"method":...} 选项后缀）需为可请求链接
+        // @js: / <js> / @@ 前缀的搜索地址走 JS 引擎，跳过 URL 格式校验
+        let lower = raw.lowercased()
+        if lower.hasPrefix("@js:") || lower.hasPrefix("<js>") || lower.hasPrefix("@@") {
+            guard let list = ruleSearch?.bookList, !list.isEmpty else { return false }
+            return true
+        }
+        // 地址部分（截掉 ,{"method":...} 选项后缀）。
+        // 相对地址（无 scheme，如 /search?kw={{key}}）由调用方拼接书源基准 URL，
+        // 此处只拒绝明显非法的地址（非相对路径、非绝对 URL）。
         let address = raw.components(separatedBy: ",{").first ?? raw
-        guard URLSanitizer.sanitize(address) != nil else { return false }
+        if URLSanitizer.sanitize(address) == nil,
+           !address.hasPrefix("/") {
+            return false
+        }
         guard let list = ruleSearch?.bookList, !list.isEmpty else { return false }
         return true
     }

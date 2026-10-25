@@ -397,7 +397,15 @@ struct BookSearchView: View {
         finalURLString = finalURLString.replacingOccurrences(of: "searchKey", with: encoded)
         finalURLString = finalURLString.replacingOccurrences(of: "{{searchPage}}", with: "1")
         finalURLString = finalURLString.replacingOccurrences(of: "searchPage", with: "1")
-        guard let finalURL = URLSanitizer.sanitize(finalURLString) else {
+        // 相对地址（无 scheme，如 /search?kw={{key}}）需拼接书源基准 URL。
+        // legado 书源的 searchUrl 大量是相对路径，不解析会导致全部被判「链接格式不正确」。
+        let finalURL: URL
+        if let sanitized = URLSanitizer.sanitize(finalURLString) {
+            finalURL = sanitized
+        } else if let base = URLSanitizer.sanitize(source.bookSourceUrl),
+                  let resolved = URL(string: finalURLString, relativeTo: base)?.absoluteURL {
+            finalURL = resolved
+        } else {
             throw NetworkError.invalidURL
         }
         guard let rules = source.ruleSearch, !(rules.bookList ?? "").isEmpty else {
