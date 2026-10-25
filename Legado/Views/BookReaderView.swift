@@ -786,23 +786,22 @@ struct BookReaderView: View {
             let selector = stripCssPrefix(listRule)
             // SwiftSoup 解析/选择器失败时静默回退到整页规则路径，
             // 避免单个书源的 HTML 小瑕疵导致整源目录抓取失败。
-            guard let document = try? SwiftSoup.parse(html),
-                  let elements = try? document.select(selector) else {
-                break
+            if let document = try? SwiftSoup.parse(html),
+               let elements = try? document.select(selector) {
+                var result: [ReaderChapter] = []
+                for element in elements {
+                    let name = extractValue(nameRule, on: element)
+                    let urlRel = extractValue(urlRule, on: element)
+                    guard !name.isEmpty else { continue }
+                    // 章节 URL 可能是相对于书籍详情页（base）或书源根路径（sourceBase），
+                    // 两层回退确保相对路径都能被解析。
+                    let resolved = resolveURL(urlRel, base: base)
+                        ?? resolveURL(urlRel, base: sourceBase)
+                        ?? URLSanitizer.sanitize(urlRel)
+                    result.append(ReaderChapter(title: name, text: nil, url: resolved?.absoluteString))
+                }
+                if !result.isEmpty { return result }
             }
-            var result: [ReaderChapter] = []
-            for element in elements {
-                let name = extractValue(nameRule, on: element)
-                let urlRel = extractValue(urlRule, on: element)
-                guard !name.isEmpty else { continue }
-                // 章节 URL 可能是相对于书籍详情页（base）或书源根路径（sourceBase），
-                // 两层回退确保相对路径都能被解析。
-                let resolved = resolveURL(urlRel, base: base)
-                    ?? resolveURL(urlRel, base: sourceBase)
-                    ?? URLSanitizer.sanitize(urlRel)
-                result.append(ReaderChapter(title: name, text: nil, url: resolved?.absoluteString))
-            }
-            if !result.isEmpty { return result }
         }
 
         // 回退：整页规则 + 按索引压缩

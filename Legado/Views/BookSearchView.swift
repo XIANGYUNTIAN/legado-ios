@@ -498,11 +498,22 @@ struct BookSearchView: View {
         }
         let urlPart = String(trimmed[trimmed.startIndex..<range.lowerBound])
         let optionsString = String(trimmed[range.lowerBound..<trimmed.endIndex]).dropFirst() // 去掉逗号，留 {…}
-        guard let data = optionsString.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                ?? try? JSONSerialization.jsonObject(
-                    with: optionsString.replacingOccurrences(of: "'", with: "\"").data(using: .utf8) ?? Data()
-                ) as? [String: Any] else {
+        guard let data = optionsString.data(using: .utf8) else {
+            return ParsedSearchRequest(url: urlPart, method: "GET", body: nil, headers: [:])
+        }
+        // 先试标准双引号 JSON，失败则单引号→双引号转换后再试。
+        // legado 书源的选项后缀大量使用单引号（如 {'method':'post','body':'...'}），
+        // JSONSerialization 只认双引号，不转换会导致 POST body/method 全部丢失。
+        let obj: [String: Any]?
+        if let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            obj = result
+        } else {
+            let converted = optionsString.replacingOccurrences(of: "'", with: "\"")
+            obj = try? JSONSerialization.jsonObject(
+                with: converted.data(using: .utf8) ?? Data()
+            ) as? [String: Any]
+        }
+        guard let obj else {
             return ParsedSearchRequest(url: urlPart, method: "GET", body: nil, headers: [:])
         }
         let method = (obj["method"] as? String) ?? "GET"
@@ -551,11 +562,20 @@ struct BookSearchView: View {
     private func sourceHeaders(_ source: BookSource) -> [String: String] {
         guard let raw = source.header?.trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty,
-              let data = raw.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                ?? try? JSONSerialization.jsonObject(
-                    with: raw.replacingOccurrences(of: "'", with: "\"").data(using: .utf8) ?? Data()
-                ) as? [String: Any] else {
+              let data = raw.data(using: .utf8) else {
+            return [:]
+        }
+        // 先试标准双引号 JSON，失败则单引号→双引号转换后再试。
+        let obj: [String: Any]?
+        if let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            obj = result
+        } else {
+            let converted = raw.replacingOccurrences(of: "'", with: "\"")
+            obj = try? JSONSerialization.jsonObject(
+                with: converted.data(using: .utf8) ?? Data()
+            ) as? [String: Any]
+        }
+        guard let obj else {
             return [:]
         }
         var result: [String: String] = [:]
@@ -587,26 +607,25 @@ struct BookSearchView: View {
             let selector = stripCssPrefix(listRule)
             // SwiftSoup 解析/选择器可能因 malformed HTML 或选择器不匹配而抛出，
             // 这里静默失败并回退到整页规则路径，避免单个书源的 HTML 小瑕疵拖垮全局搜索。
-            guard let document = try? SwiftSoup.parse(html),
-                  let elements = try? document.select(selector) else {
-                break
+            if let document = try? SwiftSoup.parse(html),
+               let elements = try? document.select(selector) {
+                var result: [ExploredBook] = []
+                for element in elements {
+                    let name = HtmlRuleEngine.extractValue(nameRule, on: element)
+                    guard !name.isEmpty else { continue }
+                    let bookUrl = HtmlRuleEngine.extractValue(bookUrlRule, on: element)
+                    let resolved = resolveURL(bookUrl, base: base)
+                    result.append(ExploredBook(
+                        name: name,
+                        author: HtmlRuleEngine.extractValue(authorRule, on: element),
+                        intro: HtmlRuleEngine.extractValue(introRule, on: element),
+                        bookUrl: resolved?.absoluteString ?? bookUrl,
+                        coverUrl: HtmlRuleEngine.extractValue(coverRule, on: element),
+                        lastChapter: HtmlRuleEngine.extractValue(lastRule, on: element)
+                    ))
+                }
+                if !result.isEmpty { return result }
             }
-            var result: [ExploredBook] = []
-            for element in elements {
-                let name = HtmlRuleEngine.extractValue(nameRule, on: element)
-                guard !name.isEmpty else { continue }
-                let bookUrl = HtmlRuleEngine.extractValue(bookUrlRule, on: element)
-                let resolved = resolveURL(bookUrl, base: base)
-                result.append(ExploredBook(
-                    name: name,
-                    author: HtmlRuleEngine.extractValue(authorRule, on: element),
-                    intro: HtmlRuleEngine.extractValue(introRule, on: element),
-                    bookUrl: resolved?.absoluteString ?? bookUrl,
-                    coverUrl: HtmlRuleEngine.extractValue(coverRule, on: element),
-                    lastChapter: HtmlRuleEngine.extractValue(lastRule, on: element)
-                ))
-            }
-            if !result.isEmpty { return result }
         }
 
         // 回退：整页规则 + 按索引压缩
