@@ -188,7 +188,6 @@ enum SearchCoordinator {
         if message.contains("网络") { return "网络错误" }
         return "其他"
     }
-    }
 
     // MARK: - searchUrl 三阶段流水线（对齐 legado AnalyzeUrl）
 
