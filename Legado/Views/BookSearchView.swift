@@ -279,10 +279,10 @@ struct BookSearchView: View {
         let keywordCopy = trimmedKeyword
         // 搜索超时 15s：仅对「可达但偏慢」的书源生效（连接被拒等错误是亚秒级失败，
         // 不占用超时）；超时不再重试（见 NetworkService.isTransient），避免 3× 等待。
-        // 全局预算 300s：720 个书源、12 路并发下足以真实尝试约 240 个，
-        // 其余在尾部按预算自然收敛，用户可随时取消。
-        let searchTimeout: TimeInterval = 15
-        let globalBudget: TimeInterval = 300
+        // 全局预算 600s：720 源实测大量超时/死源会快速消耗预算，导致可达源被饿死而 0 结果；
+        // 上调到 600s 让更多源被真实尝试。单源超时 20s：放行偏慢但可达的源。
+        let searchTimeout: TimeInterval = 20
+        let globalBudget: TimeInterval = 600
 
         let sink = progressSink
         searchTask = Task.detached(priority: .userInitiated) {
