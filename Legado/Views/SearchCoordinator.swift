@@ -437,8 +437,11 @@ enum SearchCoordinator {
             let name = BookListAnalyzer.field(rules.name, item: item, engine: engine)
             guard !name.isEmpty else { continue }
             let bookUrlRaw = BookListAnalyzer.field(rules.bookUrl, item: item, engine: engine)
-            let resolved = resolveURL(bookUrlRaw, base: source.bookSourceURL)
-                ?? resolveURL(bookUrlRaw, base: base)
+            // legado 基准：bookUrl 优先相对「搜索结果页（bookList 求值页）」解析，源根兜底。
+            // 原顺序（先源根后搜索页）会让「相对搜索页目录」的详情 URL 解析到错误地址，
+            // 进书架后目录/正文请求 404。
+            let resolved = resolveURL(bookUrlRaw, base: base)
+                ?? resolveURL(bookUrlRaw, base: source.bookSourceURL)
                 ?? URLSanitizer.sanitize(bookUrlRaw)
             result.append(ExploredBook(
                 name: name,

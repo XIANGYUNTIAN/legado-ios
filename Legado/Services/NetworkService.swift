@@ -252,6 +252,13 @@ final class NetworkService: ObservableObject {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
+        // 显式附加按域 Cookie。CookieStore 将 Cookie 写入 HTTPCookieStorage.shared，
+        // 但隐式自动附带在自定义 session 配置下并非 100% 可靠；起点等需会话 Cookie 的
+        // 书源依赖此头，否则搜索/阅读被拒（404/403）。手动设置 Cookie 头会接管自动附带，不重复。
+        if let cookie = CookieStore.shared.getCookie(url.absoluteString), !cookie.isEmpty {
+            request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        }
+
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
