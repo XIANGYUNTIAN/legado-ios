@@ -267,9 +267,13 @@ enum SearchCoordinator {
                 let (data, response) = try await NetworkService.shared.fetchDataWithBody(
                     from: finalURL, method: "POST", body: bodyData, headers: mergedHeaders, timeout: timeout
                 )
-                html = (try? NetworkService.decodeText(
+                guard let decoded = try? NetworkService.decodeText(
                     data, charset: charset.isEmpty ? response.textEncodingName : charset
-                )) ?? ""
+                ), !decoded.isEmpty else {
+                    throw NSError(domain: "Search", code: -3,
+                                  userInfo: [NSLocalizedDescriptionKey: "响应解码失败（charset=\(charset)）"])
+                }
+                html = decoded
             } else {
                 html = try await NetworkService.shared.fetchTextWithBody(
                     from: finalURL, method: "POST", body: bodyData, headers: mergedHeaders, timeout: timeout
@@ -279,9 +283,13 @@ enum SearchCoordinator {
             let (data, response) = try await NetworkService.shared.fetchDataWithResponse(
                 from: finalURL, headers: mergedHeaders, timeout: timeout
             )
-            html = (try? NetworkService.decodeText(
+            guard let decoded = try? NetworkService.decodeText(
                 data, charset: charset.isEmpty ? response.textEncodingName : charset
-            )) ?? ""
+            ), !decoded.isEmpty else {
+                throw NSError(domain: "Search", code: -3,
+                              userInfo: [NSLocalizedDescriptionKey: "响应解码失败（charset=\(charset)）"])
+            }
+            html = decoded
         } else {
             html = try await NetworkService.shared.fetchText(from: finalURL, headers: mergedHeaders, timeout: timeout)
         }
@@ -414,7 +422,9 @@ enum SearchCoordinator {
             if let ruleError {
                 throw RuleError.ruleFailed(ruleError)
             }
-            return []
+            // 解析静默为空：此前会被吞掉导致「无结果也无报错」，这里显式抛出便于诊断
+            throw NSError(domain: "Search", code: -4,
+                          userInfo: [NSLocalizedDescriptionKey: "bookList 解析为空（HTML 长度 \(html.count)）"])
         }
 
         var result: [ExploredBook] = []

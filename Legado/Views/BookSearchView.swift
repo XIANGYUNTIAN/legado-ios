@@ -1,4 +1,11 @@
 import SwiftUI
+import Combine
+
+/// 搜索进度中转：让后台线程能把进度文本推到主线程 @State，
+/// 规避 @Sendable 闭包直接捕获 @State 的编译/并发问题。
+final class SearchProgressSink: ObservableObject {
+    @Published var text: String? = nil
+}
 
 /// 搜索模式：模糊 = 关键词作为子串命中书名/作者/简介；精确 = 书名/作者完全相等，
 /// 或简介中作为独立片段命中（支持按主角名等精确检索）。
@@ -23,7 +30,7 @@ struct BookSearchView: View {
     @State private var mode: SearchMode = .fuzzy
     @State private var results: [ExploredBook] = []
     @State private var isSearching = false
-    @State private var progressText: String?
+    @StateObject private var progressSink = SearchProgressSink()
     @State private var errorMessage: String?
     @State private var addedMessage: String?
     @State private var sourceErrors: [SourceSearchError] = []
@@ -145,7 +152,7 @@ struct BookSearchView: View {
             }
             .padding()
 
-            if let progress = progressText {
+            if let progress = progressSink.text {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
                     Text(progress)
@@ -162,7 +169,7 @@ struct BookSearchView: View {
                 } description: {
                     Text(error)
                 }
-            } else if results.isEmpty && sourceErrors.isEmpty && !isSearching && progressText == nil {
+            } else if results.isEmpty && sourceErrors.isEmpty && !isSearching && progressSink.text == nil {
                 ContentUnavailableView {
                     Label("输入关键词开始搜索", systemImage: "text.magnifyingglass")
                 } description: {
@@ -267,19 +274,21 @@ struct BookSearchView: View {
         sourceErrors = []
         errorMessage = nil
         isSearching = true
-        progressText = "正在搜索 \(sources.count) 个书源…"
+        progressSink.text = "正在搜索 \(sources.count) 个书源…"
         let currentMode = mode
         let keywordCopy = trimmedKeyword
         let searchTimeout: TimeInterval = 6
         let globalBudget: TimeInterval = 90
 
+        let sink = progressSink
         searchTask = Task.detached(priority: .userInitiated) {
             let outcome = await SearchCoordinator.run(
                 keyword: keywordCopy,
                 mode: currentMode,
                 sources: sources,
                 searchTimeout: searchTimeout,
-                globalBudget: globalBudget
+                globalBudget: globalBudget,
+                onProgress: { text in DispatchQueue.main.async { sink.text = text } }
             )
             await MainActor.run {
                 results = outcome.results
@@ -287,7 +296,7 @@ struct BookSearchView: View {
                 searchSummary = outcome.summary
                 errorMessage = outcome.errorMessage
                 isSearching = false
-                progressText = nil
+                progressSink.text = nil
             }
         }
     }
@@ -297,7 +306,7 @@ struct BookSearchView: View {
         searchTask?.cancel()
         searchTask = nil
         isSearching = false
-        progressText = nil
+        progressSink.text = nil
     }
 
     private func addToShelf(_ book: ExploredBook) {
