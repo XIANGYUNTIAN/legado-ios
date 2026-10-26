@@ -155,6 +155,16 @@ enum SearchCoordinator {
         // 便于定位是 URL 构造 / 网络 / 规则解析哪一环（对应 P1-6 错误可见性）。
         var summary = "📊 命中 \(outcome.results.count) 本 · 失败 \(failed) 个"
         if failed > 0 {
+            // 失败分类计数：一眼区分「网络/死源」与「规则解析 bug」——前者需查网络，
+            // 后者（bookList解析为空 / name提取全空 / JS规则失败）才是引擎要修的地方。
+            var buckets: [String: Int] = [:]
+            for err in outcome.errors {
+                buckets[categorizeError(err.message), default: 0] += 1
+            }
+            let bucketLine = buckets.sorted { $0.value > $1.value }
+                .map { "\($0.key)×\($0.value)" }
+                .joined(separator: "  ")
+            summary += "\n失败分布：\(bucketLine)"
             let samples = outcome.errors.prefix(3).map { "· \($0.name)：\($0.message)" }
             summary += "\n失败样例：\n" + samples.joined(separator: "\n")
         }
@@ -163,6 +173,21 @@ enum SearchCoordinator {
         }
         outcome.summary = summary
         return outcome
+    }
+
+    /// 失败原因归类（按关键词粗分），用于摘要里的分桶计数。
+    private static func categorizeError(_ message: String) -> String {
+        if message.contains("超时") { return "请求超时" }
+        if message.contains("404") { return "HTTP404" }
+        if message.contains("403") { return "HTTP403" }
+        if message.contains("链接格式不正确") { return "链接格式" }
+        if message.contains("JS 规则执行失败") { return "JS规则失败" }
+        if message.contains("bookList 解析为空") { return "bookList空" }
+        if message.contains("name 字段提取全部为空") { return "name提取空" }
+        if message.contains("响应解码失败") { return "解码失败" }
+        if message.contains("网络") { return "网络错误" }
+        return "其他"
+    }
     }
 
     // MARK: - searchUrl 三阶段流水线（对齐 legado AnalyzeUrl）
