@@ -76,6 +76,10 @@ enum SearchCoordinator {
                     searchTimeout: TimeInterval,
                     globalBudget: TimeInterval,
                     onProgress: (@Sendable (String) -> Void)? = nil) async -> SearchOutcome {
+        // 批量搜索期间抑制 WebView UI：书源 JS 的 java.webView（素书卷过冷却等）
+        // 降级为直接抓取，不弹登录页打断用户；退出时恢复，保留手动 Cookie 验证流
+        JsJavaBridge.suppressWebViewUI = true
+        defer { JsJavaBridge.suppressWebViewUI = false }
         var outcome = SearchOutcome()
         let total = sources.count
         let startTime = Date()

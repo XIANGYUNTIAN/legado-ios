@@ -231,6 +231,11 @@ private final class ResultBox<T> {
 
     /// 全局 WebView 呈现回调（App 启动时注入；nil 时降级为直接抓取）
     static var webViewPresenter: ((String, String) -> Void)?
+    /// 批量自动化场景（多源搜索等）置 true：startBrowserAwait 不再弹 UI，
+    /// 降级为直接抓取。书源 JS 多以 `try{java.webView(...)}catch(e){}` 取副作用
+    /// （素书卷过冷却等），丢弃返回值——降级不影响 JS 继续；个别真依赖
+    /// 浏览器执行结果的源会失败并进入逐源报错，属可接受降级。
+    static var suppressWebViewUI: Bool = false
     /// 正在等待 WebView 完成的桥实例（finishWebView 路由用）
     static weak var pendingWebViewBridge: JsJavaBridge?
 
@@ -472,9 +477,10 @@ private final class ResultBox<T> {
     /// 打开 WebView 等待用户完成操作（起点 Cookie 验证流），
     /// 完成后带回 Cookie 重新抓取目标页并返回 HTML。
     /// 同步等待上限 30s（超时即失败，避免阻塞搜索任务的协作线程过久）；
-    /// 无 UI 附着时降级为直接抓取。
+    /// 无 UI 附着时降级为直接抓取；批量搜索场景（suppressWebViewUI）同样降级，
+    /// 避免 858 源并发时反复弹登录页打断用户（素书卷等源仅需副作用，无需登录）。
     func startBrowserAwait(_ url: String, _ title: String) -> String {
-        guard let presenter = Self.webViewPresenter else {
+        guard let presenter = Self.webViewPresenter, !Self.suppressWebViewUI else {
             return (try? performSyncRequest(urlString: url, method: "GET", body: nil, headers: [:]).0) ?? ""
         }
         let semaphore = DispatchSemaphore(value: 0)
