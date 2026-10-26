@@ -460,6 +460,14 @@ enum SearchCoordinator {
                 lastChapter: BookListAnalyzer.field(rules.lastChapter, item: item, engine: engine)
             ))
         }
+        if result.isEmpty {
+            // 静默空分支（此前被吞掉，无法区分 A 网络/规则不匹配 与 B 字段提取 bug）：
+            // bookList 已命中元素，但逐元素的 name 字段全部提取为空。显式抛出错误，
+            // 配合 e37a62b 的失败样例展示，下一轮可一眼定位是哪一类。
+            throw NSError(domain: "Search", code: -5,
+                          userInfo: [NSLocalizedDescriptionKey:
+                            "bookList 命中 \(items.count) 个元素，但 name 字段提取全部为空（name 规则：『\(rules.name ?? "")』）"])
+        }
         return result
     }
 
