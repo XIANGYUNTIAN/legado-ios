@@ -86,6 +86,7 @@ enum SearchCoordinator {
         var seen = Set<String>()
         var completed = 0
         var noMatchCount = 0
+        var enqueued = 0
         let lock = NSLock()
 
         await withTaskGroup(of: [(ExploredBook, String?)].self) { group in
@@ -95,9 +96,13 @@ enum SearchCoordinator {
 
             for source in sources {
                 if Task.isCancelled { break }
-                // 全局预算到期：不再入队新源（在途请求仍受各自 6s 超时约束，尾部有界）
+                // 全局预算到期：不再入队新源（在途请求仍受各自超时约束，尾部有界）
                 if Date().timeIntervalSince(startTime) > globalBudget { break }
                 await semaphore.wait()
+                enqueued += 1
+                // 入队即回传：开始阶段首批并发源还在等待响应时，
+                // 用「已入队」计数给用户即时反馈，消除「长时间无进展」的假死观感
+                onProgress?("已入队 \(enqueued)/\(total) 个书源 · 等待响应中…")
 
                 group.addTask {
                     defer { Task.detached { await semaphore.release() } }

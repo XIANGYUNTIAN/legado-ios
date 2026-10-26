@@ -284,9 +284,17 @@ final class NetworkService: ObservableObject {
     }
 
     /// 判定是否为值得重试的瞬时错误。
+    ///
+    /// 仅对「连接类」错误（连接被拒 / 被重置 / DNS / 无法连接等，对应 `.network`）
+    /// 重试——这类错误通常瞬时且失败极快（亚秒级），重试收益高、代价低。
+    ///
+    /// **超时（`.timeout`）不再重试**：弱网下服务器响应慢，重试只会把单次等待
+    /// 放大成 N 倍（默认 3 次 = 3× 超时），既拖垮搜索全局预算、又造成「一搜就
+    /// 长时间无进展」的假死观感。超时源直接失败，交由上层（搜索预算 / 阅读重试）
+    /// 决策，比盲目重试更优。
     private static func isTransient(_ error: NetworkError) -> Bool {
         switch error {
-        case .network, .timeout: return true
+        case .network: return true
         default: return false
         }
     }
