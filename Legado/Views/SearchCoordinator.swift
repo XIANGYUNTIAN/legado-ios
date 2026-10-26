@@ -146,14 +146,22 @@ enum SearchCoordinator {
         }
 
         let timedOut = completed < total
-        if outcome.results.isEmpty && outcome.errors.isEmpty {
+        let failed = outcome.errors.count
+        if outcome.results.isEmpty && failed == 0 {
             outcome.errorMessage = "全部书源均未搜索到「\(keyword)」"
         }
-        if timedOut {
-            outcome.summary = "⏱ 已达 \(Int(globalBudget))s 全局预算，提前结束（完成 \(completed)/\(total) 个书源）"
-        } else {
-            outcome.summary = "📊 命中 \(outcome.results.count) 本 · 成功但未命中 \(noMatchCount) 个 · 失败 \(outcome.errors.count) 个"
+        // 始终暴露命中/失败分布，避免超时分支吞掉诊断信息。此前"完成 X/Y"无法区分
+        // 网络失败与规则解析失败，是反复修不好的观测盲区；失败样例直接展示原因，
+        // 便于定位是 URL 构造 / 网络 / 规则解析哪一环（对应 P1-6 错误可见性）。
+        var summary = "📊 命中 \(outcome.results.count) 本 · 失败 \(failed) 个"
+        if failed > 0 {
+            let samples = outcome.errors.prefix(3).map { "· \($0.name)：\($0.message)" }
+            summary += "\n失败样例：\n" + samples.joined(separator: "\n")
         }
+        if timedOut {
+            summary = "⏱ 已达 \(Int(globalBudget))s 全局预算，提前结束（完成 \(completed)/\(total)）\n" + summary
+        }
+        outcome.summary = summary
         return outcome
     }
 
