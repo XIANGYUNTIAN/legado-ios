@@ -732,7 +732,11 @@ struct BookReaderView: View {
             throw RuleError.unsupportedMode("书籍 URL 无效：\(bookUrlStr)")
         }
         // 阅读链路同样合并书源 header（UA / Referer / Cookie），与搜索路径一致
-        let headers = sourceHeaders(source)
+        var headers = sourceHeaders(source)
+        // 章节目录页常校验 Referer（缺则用书源根兜底），否则返回 404 / 空页
+        if headers["Referer"] == nil && headers["referer"] == nil {
+            headers["Referer"] = bookURL.absoluteString
+        }
         let html = try await NetworkService.shared.fetchText(from: bookURL, headers: headers)
         let extracted = try extractToc(html: html, rules: rules, base: bookURL, sourceBase: source.bookSourceURL, source: source)
         if extracted.isEmpty { throw RuleError.emptyResult }
@@ -789,7 +793,11 @@ struct BookReaderView: View {
         engine.setBaseUrl(source.bookSourceUrl)
         engine.setChapter(title: chapter.title, nextUrl: chapters[safe: index + 1]?.url)
         let contentRule = source.ruleContent?.content ?? ""
-        let headers = sourceHeaders(source)
+        var headers = sourceHeaders(source)
+        // 正文页防盗链普遍校验 Referer（缺则按书籍详情页兜底），否则 HTTP 404
+        if headers["Referer"] == nil && headers["referer"] == nil, let ref = bookURL?.absoluteString {
+            headers["Referer"] = ref
+        }
 
         // 404 时的候选基准（依次重试）：当前 URL → 书源根 → 书籍详情页
         let retryBases: [URL?] = [source.bookSourceURL, bookURL]

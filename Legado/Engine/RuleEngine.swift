@@ -584,7 +584,12 @@ final class RuleEngine {
     }
 
     /// searchUrl 的 JS 求值（AnalyzeUrl 场景）：额外绑定 key / page，
-    /// result 初值为剥离 JS 标记后的规则串（`<js>URL;result;</js>` 书源依赖）
+    /// result 初值为剥离 JS 标记后的规则串（`<js>URL;result;</js>` 书源依赖）。
+    ///
+    /// 关键语义：legado 的 searchUrl JS 通常以「末尾赋值 `result=url;`」而非 `return`
+    /// 来产出最终 URL。若用 `(function(){ … })()` 包裹，函数体不会隐式返回末尾赋值，
+    /// 导致 result 永远为空 → 全源报「链接格式不正确」。因此此处**不包函数体**，
+    /// 直接在全局作用域求值，并优先读回 `result` 绑定（与 legado 一致）。
     private func evalSearchUrlJS(_ js: String, keyword: String, page: Int, initialResult: String) throws -> Any? {
         #if canImport(JavaScriptCore)
         guard let context = jsContext else {
@@ -594,7 +599,19 @@ final class RuleEngine {
         context.setObject(NSNumber(value: page), forKeyedSubscript: "page" as NSString)
         context.setObject(keyword, forKeyedSubscript: "searchKey" as NSString)
         setupJSContext(context, content: "", result: initialResult)
-        return try evaluateJSInContext(context, js: js)
+        let value = context.evaluateScript(js)
+        if let exception = context.exception {
+            context.exception = nil
+            throw RuleError.jsError(exception.toString())
+        }
+        // 优先返回 `result` 绑定（legado AnalyzeUrl 语义）；否则退回脚本完成值
+        if let resultBinding = context.objectForKeyedSubscript("result"),
+           !resultBinding.isUndefined, !resultBinding.isNull,
+           let text = resultBinding.toString(), !text.isEmpty {
+            return text
+        }
+        guard let value, !value.isUndefined, !value.isNull else { return nil }
+        return value.toString() ?? ""
         #else
         throw RuleError.unsupportedMode("js")
         #endif
@@ -602,6 +619,21 @@ final class RuleEngine {
 
     /// 公共 JS 上下文绑定（对应 legado evalJS 的 bindings）
     #if canImport(JavaScriptCore)
+    /// legado 书源 searchUrl / bookList 里大量调用的全局函数与对象，需在求值前注入：
+    /// - getsurl()  → 书源基准 URL（八叉书库等 searchUrl 用）
+    /// - gethd()    → 书源 header 对象（同上）
+    /// - webView()  → 已桥接到 java.webView（素书卷过冷却）
+    /// - Packages  → Java 包 shim（58小说网用 Packages.java.net.URLDecoder）
+    private static let contextHelpers = """
+    function getsurl(){ try{ return source.bookSourceUrl; }catch(e){ return ''; } }
+    function gethd(){ try{ var h=source.header; if(!h) return {}; return JSON.parse(h); }catch(e){ return {}; } }
+    function webView(a,b,c){ try{ return java.webView(b, c); }catch(e){ return ''; } }
+    var Packages = { java: { net: { URLDecoder: { decode: function(s){ try{ return decodeURIComponent(s); }catch(e){ return s; } } } } } };
+    """
+
+    /// 是否已注入全局辅助函数与 jsLib（每个 JSContext 只注入一次）
+    private var didInjectHelpers = false
+
     private func setupJSContext(_ context: JSContext, content: String, result: Any?) {
         context.setObject(content, forKeyedSubscript: "src" as NSString)
         context.setObject(jsBridge.baseUrl, forKeyedSubscript: "baseUrl" as NSString)
@@ -615,6 +647,15 @@ final class RuleEngine {
             context.setObject(bookProxy, forKeyedSubscript: "book" as NSString)
         }
         context.setObject(jsBridge.cookieProxyForJS, forKeyedSubscript: "cookie" as NSString)
+
+        // 注入全局辅助函数 + 书源 jsLib（首次求值才注入，避免重复）
+        if !didInjectHelpers {
+            context.evaluateScript(Self.contextHelpers)
+            if let jsLib = jsBridge.jsLib, !jsLib.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                context.evaluateScript(jsLib)
+            }
+            didInjectHelpers = true
+        }
 
         if let text = result as? String {
             context.setObject(text, forKeyedSubscript: "result" as NSString)

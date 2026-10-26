@@ -162,6 +162,8 @@ private final class ResultBox<T> {
     func toast(_ message: String)
     func longToast(_ message: String)
     func startBrowserAwait(_ url: String, _ title: String) -> String
+    // webView（legado java.webView(url, tag, js)：加载页面并设置 Cookie，常用于过冷却/验证）
+    func webView(_ url: String, _ tag: String, _ javaScript: String) -> String
     // 编码
     func base64Encode(_ text: String) -> String
     func base64Decode(_ text: String) -> String
@@ -191,8 +193,13 @@ private final class ResultBox<T> {
     weak var jsContext: JSContext?
 
     var source: BookSource? {
-        didSet { sourceProxy = source.map { JsSource(source: $0) } }
+        didSet {
+            sourceProxy = source.map { JsSource(source: $0) }
+            jsLib = source?.jsLib
+        }
     }
+    /// 书源级 jsLib（智能书库等书源在 searchUrl / bookList 里调用 jsLib 定义的函数，如 zzPost）
+    var jsLib: String?
     var book: Book? {
         didSet { bookProxy = book.map { JsBook(book: $0) } }
     }
@@ -452,6 +459,14 @@ private final class ResultBox<T> {
 
     func longToast(_ message: String) {
         toast(message)
+    }
+
+    /// 对应 legado `java.webView(url, tag, js)`：加载页面并设置 Cookie，
+    /// 常用于过冷却 / 验证。书源常见写法 `java.webView('', 真实页面, '"1"')`——
+    /// 第一个参数为空、第二个才是要加载的页面，故优先用 tag 作为目标地址。
+    func webView(_ url: String, _ tag: String, _ javaScript: String) -> String {
+        let target = url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? tag : url
+        return startBrowserAwait(target, tag)
     }
 
     /// 打开 WebView 等待用户完成操作（起点 Cookie 验证流），
