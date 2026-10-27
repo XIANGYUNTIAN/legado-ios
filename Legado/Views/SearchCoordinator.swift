@@ -76,7 +76,8 @@ enum SearchCoordinator {
                     searchTimeout: TimeInterval,
                     globalBudget: TimeInterval,
                     onProgress: (@Sendable (String) -> Void)? = nil,
-                    onStream: (@Sendable ([ExploredBook], [SourceSearchError]) -> Void)? = nil) async -> SearchOutcome {
+                    onStream: (@Sendable ([ExploredBook], [SourceSearchError]) -> Void)? = nil,
+                    hitTarget: Int = 20) async -> SearchOutcome {
         // 批量搜索期间抑制 WebView UI：书源 JS 的 java.webView（素书卷过冷却等）
         // 降级为直接抓取，不弹登录页打断用户；退出时恢复，保留手动 Cookie 验证流
         JsJavaBridge.suppressWebViewUI = true
@@ -88,6 +89,7 @@ enum SearchCoordinator {
         var completed = 0
         var noMatchCount = 0
         var enqueued = 0
+        var stopEnqueue = false
         let lock = NSLock()
 
         await withTaskGroup(of: [(ExploredBook, String?)].self) { group in
@@ -97,7 +99,11 @@ enum SearchCoordinator {
 
             for source in sources {
                 if Task.isCancelled { break }
-                // 全局预算到期：不再入队新源（在途请求仍受各自超时约束，尾部有界）
+                // 命中达标 / 全局预算到期：不再入队新源（在途请求自然收尾，尾部有界）。
+                // 600s 预算被失败源耗满是 0 命中的放大器：命中 hitTarget 本即停，
+                // 让结果在 1-3 分钟内落地，而非 10 分钟后才可能出结果。
+                lock.lock(); let shouldStop = stopEnqueue; lock.unlock()
+                if shouldStop { break }
                 if Date().timeIntervalSince(startTime) > globalBudget { break }
                 await semaphore.wait()
                 enqueued += 1
@@ -152,6 +158,10 @@ enum SearchCoordinator {
                     // 信号量释放（保持原 defer 语义：在所有 return 路径后执行）
                     let rel = semaphore
                     Task.detached { await rel.release() }
+                    // 命中达标：通知入队循环停止拉新源（任务回调内检测，避免入队侧轮询）
+                    if hitTarget > 0, curResults.count >= hitTarget {
+                        lock.lock(); stopEnqueue = true; lock.unlock()
+                    }
                     // 立即推进度 + 流式命中，UI 边搜边出
                     onProgress?("已完成 \(curCompleted)/\(total) 个书源 · \(String(format: "%.0fs", elapsed)) · 找到 \(curResults.count) 本")
                     onStream?(curResults, curErrors)
@@ -196,7 +206,10 @@ enum SearchCoordinator {
             summary += "\n失败样例：\n" + sampled.joined(separator: "\n")
         }
         if timedOut {
-            summary = "⏱ 已达 \(Int(globalBudget))s 全局预算，提前结束（完成 \(completed)/\(total)）\n" + summary
+            let reason = (hitTarget > 0 && outcome.results.count >= hitTarget)
+                ? "🎯 命中 \(hitTarget) 本达标，提前停止（完成 \(completed)/\(total)）"
+                : "⏱ 已达 \(Int(globalBudget))s 全局预算，提前结束（完成 \(completed)/\(total)）"
+            summary = reason + "\n" + summary
         }
         outcome.summary = summary
         return outcome
@@ -206,6 +219,7 @@ enum SearchCoordinator {
     private static func categorizeError(_ message: String) -> String {
         // 底层 NSURLError 英文错误码优先识别——此前它们全落"其他"，是观测盲区。
         // 错误文案形如 "-1005 host：The network connection was lost."，码号在最前。
+        if message.contains("CSS 选择器未匹配") || message.contains("XPath 未匹配") || message.contains("页面结构可能已改版") { return "规则不匹配" }
         if message.contains("-1004") { return "域名不存在(-1004)" }
         if message.contains("-1005") { return "连接中断(-1005)" }
         if message.contains("-1003") { return "无法连接(-1003)" }

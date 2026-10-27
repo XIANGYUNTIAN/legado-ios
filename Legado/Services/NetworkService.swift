@@ -108,6 +108,9 @@ final class NetworkService: ObservableObject {
     static let defaultTimeout: TimeInterval = 25
 
     private let session: URLSession
+    /// 备用会话：同配置、全新连接池。主会话连接池里的连接被服务端重置后
+    ///（-1200 TLS error / -1005 connection lost）重试切换，规避坏连接复用。
+    private var backupSession: URLSession? = nil
 
     init() {
         let config = URLSessionConfiguration.default
@@ -139,6 +142,7 @@ final class NetworkService: ObservableObject {
         ]
         // 信任所有证书（自签 / 过期 / 链不全的中文书源站点）
         session = URLSession(configuration: config, delegate: TrustAllDelegate(), delegateQueue: nil)
+        self.backupSession = URLSession(configuration: config, delegate: TrustAllDelegate(), delegateQueue: nil)
     }
 
     // MARK: - 证书信任委托
@@ -229,8 +233,11 @@ final class NetworkService: ObservableObject {
         // 偶发掉连接，多轮重试可显著减少「全部失败」。
         for attempt in 0..<3 {
             do {
+                // 第 2、3 次重试切备用会话：全新连接池，不复用被服务端标记失效的连接
+                let useBackup = attempt >= 1
                 return try await attemptRequest(url: url, method: method, body: body,
-                                                headers: headers, timeout: timeout)
+                                                headers: headers, timeout: timeout,
+                                                useBackupSession: useBackup)
             } catch let error as NetworkError {
                 guard Self.isTransient(error) else { throw error }
                 lastError = error
@@ -251,7 +258,8 @@ final class NetworkService: ObservableObject {
                                 method: String,
                                 body: Data?,
                                 headers: [String: String]?,
-                                timeout: TimeInterval?) async throws -> (Data, HTTPURLResponse) {
+                                timeout: TimeInterval?,
+                                useBackupSession: Bool = false) async throws -> (Data, HTTPURLResponse) {
         var request = URLRequest(url: url)
         request.httpMethod = method.uppercased()
         request.timeoutInterval = timeout ?? Self.defaultTimeout
@@ -279,7 +287,8 @@ final class NetworkService: ObservableObject {
         }
 
         do {
-            let (data, response) = try await session.data(for: request)
+            let activeSession = (useBackupSession && backupSession != nil) ? backupSession! : session
+            let (data, response) = try await activeSession.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 throw NetworkError.network("非 HTTP 响应")
             }
