@@ -75,7 +75,8 @@ enum SearchCoordinator {
                     sources: [BookSource],
                     searchTimeout: TimeInterval,
                     globalBudget: TimeInterval,
-                    onProgress: (@Sendable (String) -> Void)? = nil) async -> SearchOutcome {
+                    onProgress: (@Sendable (String) -> Void)? = nil,
+                    onStream: (@Sendable ([ExploredBook], [SourceSearchError]) -> Void)? = nil) async -> SearchOutcome {
         // 批量搜索期间抑制 WebView UI：书源 JS 的 java.webView（素书卷过冷却等）
         // 降级为直接抓取，不弹登录页打断用户；退出时恢复，保留手动 Cookie 验证流
         JsJavaBridge.suppressWebViewUI = true
@@ -142,6 +143,9 @@ enum SearchCoordinator {
                 lock.unlock()
                 let elapsed = Date().timeIntervalSince(startTime)
                 onProgress?("已完成 \(completed)/\(total) 个书源 · \(String(format: "%.0fs", elapsed)) · 找到 \(outcome.results.count) 本")
+                // 流式增量：每完成一批就把当前命中/失败推给视图，结果实时可见，
+                // 不再要等 200+s 全跑完才一次性刷新（此前命中永远"最后一刻"才出现）。
+                onStream?(outcome.results, outcome.errors)
             }
         }
 
@@ -165,8 +169,16 @@ enum SearchCoordinator {
                 .map { "\($0.key)×\($0.value)" }
                 .joined(separator: "  ")
             summary += "\n失败分布：\(bucketLine)"
-            let samples = outcome.errors.prefix(3).map { "· \($0.name)：\($0.message)" }
-            summary += "\n失败样例：\n" + samples.joined(separator: "\n")
+            // 每类取 1 条代表样例（按类计数降序，最多 6 类），
+            // 此前 prefix(3) 恰好全是 403/超时类，"其他"类原始错误从未露面，
+            // 无法坐实 385 条"其他"到底是死域名/区域封锁还是协议差异。
+            var sampled: [String] = []
+            for (cat, _) in buckets.sorted(by: { $0.value > $1.value }).prefix(6) {
+                if let err = outcome.errors.first(where: { categorizeError($0.message) == cat }) {
+                    sampled.append("· \(cat)：\(err.name)：\(err.message)")
+                }
+            }
+            summary += "\n失败样例：\n" + sampled.joined(separator: "\n")
         }
         if timedOut {
             summary = "⏱ 已达 \(Int(globalBudget))s 全局预算，提前结束（完成 \(completed)/\(total)）\n" + summary
@@ -177,6 +189,16 @@ enum SearchCoordinator {
 
     /// 失败原因归类（按关键词粗分），用于摘要里的分桶计数。
     private static func categorizeError(_ message: String) -> String {
+        // 底层 NSURLError 英文错误码优先识别——此前它们全落"其他"，是观测盲区。
+        // 错误文案形如 "-1005 host：The network connection was lost."，码号在最前。
+        if message.contains("-1004") { return "域名不存在(-1004)" }
+        if message.contains("-1005") { return "连接中断(-1005)" }
+        if message.contains("-1003") { return "无法连接(-1003)" }
+        if message.contains("-1009") { return "无网络(-1009)" }
+        if message.contains("-1011") { return "连接超时(-1011)" }
+        if message.contains("-1001") { return "服务器无响应(-1001)" }
+        if message.contains("-21") && message.lowercased().contains("certificate") { return "证书(-21xx)" }
+        if message.lowercased().contains("timed out") { return "请求超时" }
         if message.contains("超时") { return "请求超时" }
         if message.contains("404") { return "HTTP404" }
         if message.contains("403") { return "HTTP403" }

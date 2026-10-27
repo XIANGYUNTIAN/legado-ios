@@ -286,13 +286,21 @@ struct BookSearchView: View {
 
         let sink = progressSink
         searchTask = Task.detached(priority: .userInitiated) {
+            // onStream：每完成一批就把当前命中/失败推上屏，结果实时可见，
+            // 不再等 200+s 全跑完才一次性刷新（此前命中永远"最后一刻"才出现）。
             let outcome = await SearchCoordinator.run(
                 keyword: keywordCopy,
                 mode: currentMode,
                 sources: sources,
                 searchTimeout: searchTimeout,
                 globalBudget: globalBudget,
-                onProgress: { text in DispatchQueue.main.async { sink.text = text } }
+                onProgress: { text in DispatchQueue.main.async { sink.text = text } },
+                onStream: { books, errors in
+                    DispatchQueue.main.async {
+                        results = books
+                        sourceErrors = errors
+                    }
+                }
             )
             await MainActor.run {
                 results = outcome.results
