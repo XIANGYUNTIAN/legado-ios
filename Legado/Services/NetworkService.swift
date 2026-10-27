@@ -113,7 +113,10 @@ final class NetworkService: ObservableObject {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = Self.defaultTimeout
         config.timeoutIntervalForResource = Self.defaultTimeout
-        config.waitsForConnectivity = true
+        // 前台搜索/阅读：设备本就有网（Safari 能开即证），waitsForConnectivity 会让
+        // URLSession 等系统连通性监控就绪才发请求，监控延迟时反而挂起到资源超时。
+        // 关闭它，行为对齐 Safari——有网即发、无网快失败，避免"App 全超时/空响应"。
+        config.waitsForConnectivity = false
         config.httpAdditionalHeaders = [
             "User-Agent": Self.iPhoneUA,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -269,7 +272,12 @@ final class NetworkService: ObservableObject {
                 throw NetworkError.badStatus(http.statusCode)
             }
             if data.isEmpty {
-                throw NetworkError.emptyResponse
+                let enc = response.value(forHTTPHeaderField: "Content-Encoding") ?? "-"
+                let ctype = response.value(forHTTPHeaderField: "Content-Type") ?? "-"
+                // 带响应元信息抛出，便于区分"真·空响应"与"被 gzip 包裹的空/压缩体"
+                throw NSError(domain: "Network", code: -6,
+                              userInfo: [NSLocalizedDescriptionKey:
+                                "服务器返回内容为空（HTTP \(response.statusCode)，Content-Type: \(ctype)，Content-Encoding: \(enc)）"])
             }
             return (Self.maybeDecompress(data, response: http), http)
         } catch let error as NetworkError {
@@ -352,6 +360,23 @@ final class NetworkService: ObservableObject {
         }
         if let text = String(data: data, encoding: .utf16BigEndian) {
             return Self.stripBOM(text)
+        }
+        // 兜底：部分中文站点忽略 Accept-Encoding: identity 仍返回 gzip 原文，URLSession
+        // 不会自动解；上面按文本解码必败。识别 gzip 魔数（0x1f 0x8b）先 inflate 再解码，
+        // 覆盖"其他 ×2679"里大量的 解码失败/空响应 误判（实为压缩原文）。
+        if data.count > 2,
+           data[data.startIndex] == 0x1f,
+           data[data.index(after: data.startIndex)] == 0x8b,
+           let inflated = try? inflateRaw(data) {
+            if let text = String(data: inflated, encoding: .utf8) {
+                return Self.stripBOM(text)
+            }
+            let gb = CFStringConvertEncodingToNSStringEncoding(
+                CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)
+            )
+            if let text = String(data: inflated, encoding: String.Encoding(rawValue: gb)) {
+                return Self.stripBOM(text)
+            }
         }
         throw NetworkError.encodingFailed
     }

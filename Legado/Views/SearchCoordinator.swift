@@ -184,9 +184,11 @@ enum SearchCoordinator {
         if message.contains("JS 规则执行失败") { return "JS规则失败" }
         if message.contains("bookList 解析为空") { return "bookList空" }
         if message.contains("name 字段提取全部为空") { return "name提取空" }
-        if message.contains("响应解码失败") { return "解码失败" }
+        // 空响应 / 解码失败 显式拆出，便于确认 v30 的 gzip 兜底与 waitsForConnectivity 修复是否见效
+        if message.contains("返回内容为空") { return "空响应" }
+        if message.contains("无法解码") || message.contains("响应解码失败") { return "解码失败" }
         if message.contains("网络") { return "网络错误" }
-        return "其他"
+        return "其他(含原始错误)"
     }
 
     // MARK: - searchUrl 三阶段流水线（对齐 legado AnalyzeUrl）
@@ -241,7 +243,18 @@ enum SearchCoordinator {
         engine.setBaseUrl(source.bookSourceUrl)
         engine.setChapter(title: nil, nextUrl: nil)
 
-        let jsEvaluated = try analyzeSearchUrlJS(rawSearchURL, engine: engine, keyword: keyword)
+        // JS 求值（@js/<js> searchUrl 桥网络）必须脱离 Swift 协作线程池执行：
+        // 桥内 runSyncNetwork 用信号量同步等网络，会阻塞当前线程；若阻塞协作池线程，
+        // 而网络续体（Task.detached）又需协作池线程才能续跑，12 路并发下池被饿死、
+        // 请求整体挂起——这是"Safari 能开、App 全超时/空响应"的根因之一。
+        // 改在全局并发队列上同步求值：阻塞的是全局队列线程（可安全阻塞、不会饿死池），
+        // 协作池保持空闲，桥网络续体得以续跑，信号量正常唤醒。
+        let jsEvaluated: String = try await withCheckedContinuation { (cont: CheckedContinuation<String, Error>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do { cont.resume(returning: try analyzeSearchUrlJS(rawSearchURL, engine: engine, keyword: keyword)) }
+                catch { cont.resume(throwing: error) }
+            }
+        }
         let urlStr = replaceKeyPage(jsEvaluated, keyword: keyword, page: 1)
         let request = parseSearchRequest(raw: urlStr)
 
@@ -331,9 +344,16 @@ enum SearchCoordinator {
             html = try await NetworkService.shared.fetchText(from: finalURL, headers: mergedHeaders, timeout: timeout)
         }
 
-        let extracted = try extractSearchResults(
-            html: html, rules: rules, source: source, base: finalURL, engine: engine
-        )
+        // 抽取（bookList/name 等规则，含 <js> 桥网络）同样脱离协作线程池，避免阻塞。
+        // 整个抽取在全局队列上同步跑，嵌套的桥网络信号量等待也只阻塞该全局队列线程，
+        // 协作池线程不被占用，网络续体可正常续跑——彻底消除并发搜索的池饿死死锁。
+        let extracted: [ExploredBook] = try await withCheckedContinuation { (cont: CheckedContinuation<[ExploredBook], Error>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do { cont.resume(returning: try extractSearchResults(
+                    html: html, rules: rules, source: source, base: finalURL, engine: engine)) }
+                catch { cont.resume(throwing: error) }
+            }
+        }
         if Task.isCancelled { return [] }
         let sourceName = source.bookSourceName.isEmpty ? source.bookSourceUrl : source.bookSourceName
         return extracted
