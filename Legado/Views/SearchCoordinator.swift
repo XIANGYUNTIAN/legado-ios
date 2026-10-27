@@ -249,7 +249,7 @@ enum SearchCoordinator {
         // 请求整体挂起——这是"Safari 能开、App 全超时/空响应"的根因之一。
         // 改在全局并发队列上同步求值：阻塞的是全局队列线程（可安全阻塞、不会饿死池），
         // 协作池保持空闲，桥网络续体得以续跑，信号量正常唤醒。
-        let jsEvaluated: String = try await withCheckedContinuation { (cont: CheckedContinuation<String, Error>) in
+        let jsEvaluated: String = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 do { cont.resume(returning: try analyzeSearchUrlJS(rawSearchURL, engine: engine, keyword: keyword)) }
                 catch { cont.resume(throwing: error) }
@@ -347,7 +347,7 @@ enum SearchCoordinator {
         // 抽取（bookList/name 等规则，含 <js> 桥网络）同样脱离协作线程池，避免阻塞。
         // 整个抽取在全局队列上同步跑，嵌套的桥网络信号量等待也只阻塞该全局队列线程，
         // 协作池线程不被占用，网络续体可正常续跑——彻底消除并发搜索的池饿死死锁。
-        let extracted: [ExploredBook] = try await withCheckedContinuation { (cont: CheckedContinuation<[ExploredBook], Error>) in
+        let extracted: [ExploredBook] = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[ExploredBook], Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 do { cont.resume(returning: try extractSearchResults(
                     html: html, rules: rules, source: source, base: finalURL, engine: engine)) }
