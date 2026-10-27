@@ -117,12 +117,25 @@ final class NetworkService: ObservableObject {
         // URLSession 等系统连通性监控就绪才发请求，监控延迟时反而挂起到资源超时。
         // 关闭它，行为对齐 Safari——有网即发、无网快失败，避免"App 全超时/空响应"。
         config.waitsForConnectivity = false
+        // 对齐 Safari 的真实请求头指纹。中文书源站点的 WAF（云盾 / 加速乐类）会拦截
+        // 「Accept-Encoding: identity」或缺 Sec-Fetch-* 的客户端（判为爬虫）→ 403 / 中途 reset(-1005)；
+        // 而放行真浏览器。这正是「Safari 能开、App 全失败」的分水岭证据指向的根因。
         config.httpAdditionalHeaders = [
             "User-Agent": Self.iPhoneUA,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            // 关键：不接受压缩编码，避免 br/gzip 原文直接进入文本解码
-            "Accept-Encoding": "identity",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*",
+            "Accept-Language": "zh-CN,zh-Hans;q=0.9,en;q=0.8",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Sec-Ch-Ua": "\"Chromium\";v=\"108\", \"\";v=\"99\"",
+            "Sec-Ch-Ua-Mobile": "?1",
+            "Sec-Ch-Ua-Platform": "\"iOS\"",
+            // 不再强制 identity：让 URLSession 自带 gzip,deflate 协商（系统不代解 br、
+            // 默认也不广播 br，故安全），服务端返回的 gzip/deflate 由系统自动解压；
+            // maybeDecompress 的 gzip 魔数兜底仍保留。identity 反而逼服务端返回压缩原文，
+            // 是上一版大量「解码失败/空响应」的诱因。
         ]
         // 信任所有证书（自签 / 过期 / 链不全的中文书源站点）
         session = URLSession(configuration: config, delegate: TrustAllDelegate(), delegateQueue: nil)
@@ -243,7 +256,9 @@ final class NetworkService: ObservableObject {
         request.httpMethod = method.uppercased()
         request.timeoutInterval = timeout ?? Self.defaultTimeout
         request.setValue(Self.iPhoneUA, forHTTPHeaderField: "User-Agent")
-        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        // 不强制 identity：保留 URLSession 默认的 gzip/deflate 协商（服务端压缩返回时
+        // 系统自动解压），避免 identity 逼出压缩原文导致「解码失败/空响应」。
+        // WAF 也据此更不易把本 App 判为爬虫。调用方 headers 仍可用 Accept-Encoding 覆盖。
         if let body {
             request.httpBody = body
             // POST 搜索常见表单编码；调用方也可通过 headers 覆盖
