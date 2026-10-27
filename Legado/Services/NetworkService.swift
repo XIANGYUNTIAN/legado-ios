@@ -272,12 +272,12 @@ final class NetworkService: ObservableObject {
                 throw NetworkError.badStatus(http.statusCode)
             }
             if data.isEmpty {
-                let enc = response.value(forHTTPHeaderField: "Content-Encoding") ?? "-"
-                let ctype = response.value(forHTTPHeaderField: "Content-Type") ?? "-"
+                let enc = http.value(forHTTPHeaderField: "Content-Encoding") ?? "-"
+                let ctype = http.value(forHTTPHeaderField: "Content-Type") ?? "-"
                 // 带响应元信息抛出，便于区分"真·空响应"与"被 gzip 包裹的空/压缩体"
                 throw NSError(domain: "Network", code: -6,
                               userInfo: [NSLocalizedDescriptionKey:
-                                "服务器返回内容为空（HTTP \(response.statusCode)，Content-Type: \(ctype)，Content-Encoding: \(enc)）"])
+                                "服务器返回内容为空（HTTP \(http.statusCode)，Content-Type: \(ctype)，Content-Encoding: \(enc)）"])
             }
             return (Self.maybeDecompress(data, response: http), http)
         } catch let error as NetworkError {
