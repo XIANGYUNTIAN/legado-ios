@@ -106,46 +106,61 @@ enum SearchCoordinator {
                 onProgress?("已入队 \(enqueued)/\(total) 个书源 · 等待响应中…")
 
                 group.addTask {
-                    defer { Task.detached { await semaphore.release() } }
-                    guard !Task.isCancelled else { return [] }
+                    // 完成即聚合 + 流式上屏：把结果收集放进每个任务的完成回调，
+                    // 而非依赖末尾的 for-await 消费循环。此前 onStream 挂在 for-await，
+                    // 而 for-await 要等入队循环（12 并发满时 await 阻塞）全部跑完才开始，
+                    // 导致整个入队阶段（数百秒）onStream 一次未触发——即"长时间停在已入队"。
+                    let resultPair: [(ExploredBook, String?)]
                     do {
                         let books = try await performSingleSourceSearch(
                             source: source, keyword: keyword, mode: mode, timeout: searchTimeout
                         )
-                        return books.map { ($0, source.bookSourceName.isEmpty ? source.bookSourceUrl : source.bookSourceName) }
+                        resultPair = books.map { ($0, source.bookSourceName.isEmpty ? source.bookSourceUrl : source.bookSourceName) }
                     } catch {
-                        guard !Task.isCancelled else { return [] }
+                        guard !Task.isCancelled else {
+                            Task.detached { await semaphore.release() }
+                            return []
+                        }
                         let msg: String
                         if let ne = error as? NetworkError, case .cancelled = ne {
+                            Task.detached { await semaphore.release() }
                             return []
                         } else {
                             msg = error.localizedDescription
                         }
-                        return [(ExploredBook(name: "", author: "", intro: "", bookUrl: "", coverUrl: "", lastChapter: "", sourceId: source.bookSourceUrl, sourceName: sourceLabel(source)), msg)]
+                        resultPair = [(ExploredBook(name: "", author: "", intro: "", bookUrl: "", coverUrl: "", lastChapter: "", sourceId: source.bookSourceUrl, sourceName: sourceLabel(source)), msg)]
                     }
+                    // 聚合进 outcome（加锁，多任务并发写）
+                    lock.lock()
+                    for item in resultPair {
+                        if let msg = item.1 {
+                            outcome.errors.append(SourceSearchError(name: item.0.sourceName, message: msg))
+                        } else {
+                            let book = item.0
+                            let key = "\(book.name.lowercased())|\(book.author.lowercased())"
+                            if seen.contains(key) { continue }
+                            seen.insert(key)
+                            outcome.results.append(book)
+                        }
+                    }
+                    completed += 1
+                    let elapsed = Date().timeIntervalSince(startTime)
+                    let curResults = outcome.results
+                    let curErrors = outcome.errors
+                    let curCompleted = completed
+                    lock.unlock()
+                    // 信号量释放（保持原 defer 语义：在所有 return 路径后执行）
+                    let rel = semaphore
+                    Task.detached { await rel.release() }
+                    // 立即推进度 + 流式命中，UI 边搜边出
+                    onProgress?("已完成 \(curCompleted)/\(total) 个书源 · \(String(format: "%.0fs", elapsed)) · 找到 \(curResults.count) 本")
+                    onStream?(curResults, curErrors)
+                    return []
                 }
             }
 
-            for await pair in group {
-                for item in pair {
-                    if let msg = item.1 {
-                        outcome.errors.append(SourceSearchError(name: item.0.sourceName, message: msg))
-                    } else {
-                        let book = item.0
-                        let key = "\(book.name.lowercased())|\(book.author.lowercased())"
-                        if seen.contains(key) { continue }
-                        seen.insert(key)
-                        outcome.results.append(book)
-                    }
-                }
-                lock.lock()
-                completed += 1
-                lock.unlock()
-                let elapsed = Date().timeIntervalSince(startTime)
-                onProgress?("已完成 \(completed)/\(total) 个书源 · \(String(format: "%.0fs", elapsed)) · 找到 \(outcome.results.count) 本")
-                // 流式增量：每完成一批就把当前命中/失败推给视图，结果实时可见，
-                // 不再要等 200+s 全跑完才一次性刷新（此前命中永远"最后一刻"才出现）。
-                onStream?(outcome.results, outcome.errors)
+            for await _ in group {
+                // 结果已在每个任务完成回调里聚合 + 流式上屏，此处仅等待全部任务结束
             }
         }
 
@@ -198,6 +213,10 @@ enum SearchCoordinator {
         if message.contains("-1011") { return "连接超时(-1011)" }
         if message.contains("-1001") { return "服务器无响应(-1001)" }
         if message.contains("-21") && message.lowercased().contains("certificate") { return "证书(-21xx)" }
+        if message.contains("-1200") { return "TLS失败(-1200)" }
+        if message.contains("-1012") { return "响应无效(-1012)" }
+        if message.contains("-1019") { return "请求无效(-1019)" }
+        if message.lowercased().contains("tls") || message.lowercased().contains("certificate") || message.lowercased().contains("secure connection") { return "TLS/证书" }
         if message.lowercased().contains("timed out") { return "请求超时" }
         if message.contains("超时") { return "请求超时" }
         if message.contains("404") { return "HTTP404" }
