@@ -49,6 +49,8 @@ struct SourceSearchError: Identifiable {
 struct SearchOutcome {
     var results: [ExploredBook] = []
     var errors: [SourceSearchError] = []
+    /// 诊断探针：正常返回但 0 命中的源及其最终搜索 URL（供 Safari 人工验证定性）
+    var probeURLs: [String] = []
     var summary: String = ""
     var errorMessage: String?
     var progress: String?
@@ -118,10 +120,17 @@ enum SearchCoordinator {
                     // 导致整个入队阶段（数百秒）onStream 一次未触发——即"长时间停在已入队"。
                     let resultPair: [(ExploredBook, String?)]
                     do {
-                        let books = try await performSingleSourceSearch(
+                        let (books, probeURL) = try await performSingleSourceSearch(
                             source: source, keyword: keyword, mode: mode, timeout: searchTimeout
                         )
                         resultPair = books.map { ($0, source.bookSourceName.isEmpty ? source.bookSourceUrl : source.bookSourceName) }
+                        // 诊断探针：源正常返回但 0 命中 → 记录最终搜索 URL，
+                        // 供用户用 Safari 人工验证（区分关键词未生效 / 源无此书 / 规则未命中）
+                        if books.isEmpty {
+                            lock.lock()
+                            outcome.probeURLs.append("\(sourceLabel(source)): \(probeURL)")
+                            lock.unlock()
+                        }
                     } catch {
                         guard !Task.isCancelled else {
                             Task.detached { await semaphore.release() }
@@ -211,6 +220,11 @@ enum SearchCoordinator {
                 : "⏱ 已达 \(Int(globalBudget))s 全局预算，提前结束（完成 \(completed)/\(total)）"
             summary = reason + "\n" + summary
         }
+        // 探针 URL 段：正常返回但 0 命中的源，列出最终搜索 URL（Safari 可直接打开验证）
+        if !outcome.probeURLs.isEmpty {
+            let probeLine = outcome.probeURLs.prefix(10).map { "· \($0)" }.joined(separator: "\n")
+            summary += "\n⚠️ \(outcome.probeURLs.count) 个源正常返回但 0 命中（可用 Safari 打开下列 URL 验证搜索是否生效）：\n\(probeLine)"
+        }
         outcome.summary = summary
         return outcome
     }
@@ -287,7 +301,7 @@ enum SearchCoordinator {
     private static func performSingleSourceSearch(source: BookSource,
                                                  keyword: String,
                                                  mode: SearchMode,
-                                                 timeout: TimeInterval? = nil) async throws -> [ExploredBook] {
+                                                 timeout: TimeInterval? = nil) async throws -> ([ExploredBook], String) {
         let rawSearchURL = source.searchUrl ?? ""
         guard !rawSearchURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw NetworkError.invalidURL
@@ -409,9 +423,9 @@ enum SearchCoordinator {
                 catch { cont.resume(throwing: error) }
             }
         }
-        if Task.isCancelled { return [] }
+        if Task.isCancelled { return ([], finalURL.absoluteString) }
         let sourceName = source.bookSourceName.isEmpty ? source.bookSourceUrl : source.bookSourceName
-        return extracted
+        let hitBooks = extracted
             .filter { matches($0, keyword: keyword, mode: mode) }
             .map { book in
                 ExploredBook(
@@ -425,6 +439,8 @@ enum SearchCoordinator {
                     sourceName: sourceName
                 )
             }
+        // 探针 URL：最终搜索 URL（含关键词替换后的成品），供 0 命中时人工验证
+        return (hitBooks, finalURL.absoluteString)
     }
 
     /// 解析 legado 的 searchUrl：`url,{"method":"POST","body":"...","headers":{...}}`。
