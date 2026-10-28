@@ -460,19 +460,96 @@ final class HtmlRuleEngine {
     }
 
     /// 容器规则求值（整页）：返回元素列表（bookList / chapterList 用）。
-    /// 规则可为 `@css:` / `@@` 前缀或裸 legado 选择器链。
+    /// 规则可为 `@css:` / `@@` 前缀或裸 legado 选择器链，支持 && / || / %% 组合子。
     func elements(_ legadoRule: String, rootHTML: String) throws -> [Element] {
         let body = Self.stripCssPrefix(legadoRule)
         let document = try XPathEvaluator.parseHTML(rootHTML)
-        let translation = try LegadoCssTranslator.translate(body, forElements: true)
-        return try LegadoCssTranslator.elements(translation, root: document)
+        return try evaluateElementsChain(body, root: document)
     }
 
     /// 容器规则求值（元素内）：在指定元素的后代中按规则选元素。
     func elements(_ legadoRule: String, in element: Element) throws -> [Element] {
         let body = Self.stripCssPrefix(legadoRule)
-        let translation = try LegadoCssTranslator.translate(body, forElements: true)
-        return try LegadoCssTranslator.elements(translation, root: element)
+        return try evaluateElementsChain(body, root: element)
+    }
+
+    /// 容器规则组合子求值。
+    ///
+    /// 对齐 `RuleEngine.executeChain` 的 && / || / %% 语义（此前容器规则直接调
+    /// `LegadoCssTranslator.translate(forElements:)` 仅按 `@` 切分，组合子被当作非法
+    /// 选择器 → 抛错 → 返回 0 元素，是「热门小说恒为 0 命中」的根因）：
+    /// - 先按 `&&` 切分，各段「覆盖式」求值（与 legado `getElements` 的 & 段清空覆盖一致）；
+    /// - 每段内按 `||` 切分，取首个返回非空元素的备选；
+    /// - 备选内若含 `%%`（字段 zip 用，容器极少出现）：元素列表无 zip 语义，取各子段元素并集，避免误判 0 命中。
+    ///
+    /// 已剥离 `@css:` / `@@` 前缀的 body 传入。单段（无组合子）路径与旧实现完全等价。
+    private func evaluateElementsChain(_ rule: String, root: Element) throws -> [Element] {
+        let trimmed = rule.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        var result: [Element] = []
+        var lastError: Error?
+
+        for andPart in RuleSplitter.splitBalanced(trimmed, by: "&&") {
+            let andTrim = andPart.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !andTrim.isEmpty else { continue }
+
+            var partResult: [Element] = []
+            var partError: Error?
+
+            for orAlt in RuleSplitter.splitBalanced(andTrim, by: "||") {
+                let orTrim = orAlt.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !orTrim.isEmpty else { continue }
+
+                let mergeParts = RuleSplitter.splitBalanced(orTrim, by: "%%")
+                if mergeParts.count > 1 {
+                    // %% 在容器规则中极少出现：元素列表无 zip 语义，取各子段并集。
+                    var merged: [Element] = []
+                    var mergeError: Error?
+                    for mergePart in mergeParts {
+                        let mTrim = mergePart.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !mTrim.isEmpty else { continue }
+                        do {
+                            let sub = try LegadoCssTranslator.translate(mTrim, forElements: true)
+                            merged.append(contentsOf: try LegadoCssTranslator.elements(sub, root: root))
+                        } catch { mergeError = error }
+                    }
+                    if !merged.isEmpty {
+                        partResult = merged
+                        partError = nil
+                        break
+                    } else if let err = mergeError {
+                        partError = err
+                    }
+                    continue
+                }
+
+                do {
+                    let sub = try LegadoCssTranslator.translate(orTrim, forElements: true)
+                    let els = try LegadoCssTranslator.elements(sub, root: root)
+                    if !els.isEmpty {
+                        partResult = els
+                        partError = nil
+                        break
+                    }
+                } catch {
+                    partError = error
+                }
+            }
+
+            if partResult.isEmpty {
+                if let err = partError { lastError = err }
+                result = []
+            } else {
+                result = partResult
+                lastError = nil
+            }
+        }
+
+        if result.isEmpty, let err = lastError {
+            throw err
+        }
+        return result
     }
 
     /// 字段规则求值（以 root 为上下文）：选择器链 + 抽取器。

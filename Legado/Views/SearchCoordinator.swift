@@ -273,10 +273,23 @@ enum SearchCoordinator {
         return try engine.evaluateSearchUrl(trimmed, keyword: keyword, page: 1)
     }
 
+    /// 剥离 legado 的静态分页标记 `<,page/{{page}}/>`（及 `<,page/{{page}}>` 等变体）。
+    /// 该标记出现在部分书源 searchUrl 路径段中（如 `/<,page/{{page}}/>?s={{key}}`），
+    /// 属 legado 特有语法，iOS 未解析；残留的 `<`/`>` 会导致 URLSanitizer 拒绝、
+    /// 整源搜索报错归零。第一页搜索时该标记无实际参数贡献，直接移除即可生成合法 URL。
+    private static func stripLegadoPageMarker(_ urlString: String) -> String {
+        guard urlString.contains("<,page") else { return urlString }
+        guard let regex = try? NSRegularExpression(pattern: "<,page[^>]*>", options: []) else {
+            return urlString
+        }
+        let range = NSRange(urlString.startIndex..., in: urlString)
+        return regex.stringByReplacingMatches(in: urlString, options: [], range: range, withTemplate: "")
+    }
+
     /// 阶段二：占位符替换。`{{key}}` / `searchKey` → 编码后关键词；`{{page}}` / `searchPage` → 页码。
     private static func replaceKeyPage(_ urlString: String, keyword: String, page: Int = 1) -> String {
         let encoded = encodeSearchKey(keyword)
-        var output = urlString
+        var output = stripLegadoPageMarker(urlString)
             .replacingOccurrences(of: "{{searchKey}}", with: "{{key}}")
             .replacingOccurrences(of: "{{searchPage}}", with: "{{page}}")
         output = output.replacingOccurrences(of: "{{key}}", with: encoded)
