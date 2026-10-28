@@ -149,10 +149,25 @@ final class NetworkService: ObservableObject {
 
     /// 信任所有服务器证书。书源站点的 TLS 证书质量参差，关闭校验使导入 / 搜索
     /// / 阅读对自签、过期、证书链不全的站点可用（与 legado 一致）。
-    private class TrustAllDelegate: NSObject, URLSessionDelegate {
+    private class TrustAllDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
         func urlSession(_ session: URLSession,
                         didReceive challenge: URLAuthenticationChallenge,
                         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            trustAll(challenge, completionHandler)
+        }
+
+        // 数据任务（URLSessionDataTask）的服务器信任挑战可能走任务级方法而非会话级，
+        // 仅遵守 URLSessionDelegate 会让这部分挑战漏处理，表现为部分 HTTPS 源 -1200 证书失败。
+        // 显式遵守 URLSessionTaskDelegate 并复用同一信任逻辑，覆盖全部挑战入口。
+        func urlSession(_ session: URLSession,
+                        task: URLSessionTask,
+                        didReceive challenge: URLAuthenticationChallenge,
+                        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            trustAll(challenge, completionHandler)
+        }
+
+        private func trustAll(_ challenge: URLAuthenticationChallenge,
+                             _ completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
             guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
                   let serverTrust = challenge.protectionSpace.serverTrust else {
                 completionHandler(.performDefaultHandling, nil)

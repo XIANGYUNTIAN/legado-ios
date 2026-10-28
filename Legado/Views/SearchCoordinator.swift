@@ -133,12 +133,12 @@ enum SearchCoordinator {
                         }
                     } catch {
                         guard !Task.isCancelled else {
-                            Task.detached { await semaphore.release() }
+                            await semaphore.release()
                             return []
                         }
                         let msg: String
                         if let ne = error as? NetworkError, case .cancelled = ne {
-                            Task.detached { await semaphore.release() }
+                            await semaphore.release()
                             return []
                         } else {
                             msg = error.localizedDescription
@@ -164,9 +164,9 @@ enum SearchCoordinator {
                     let curErrors = outcome.errors
                     let curCompleted = completed
                     lock.unlock()
-                    // 信号量释放（保持原 defer 语义：在所有 return 路径后执行）
-                    let rel = semaphore
-                    Task.detached { await rel.release() }
+                    // 信号量释放：直接在当前任务上下文释放，避免 Task.detached 抢占协作池线程
+                    // 导致主循环 await semaphore.wait() 收不到释放信号、吞吐雪崩（原 NetworkService 注释自承的饿死死穴）。
+                    await semaphore.release()
                     // 命中达标：通知入队循环停止拉新源（任务回调内检测，避免入队侧轮询）
                     if hitTarget > 0, curResults.count >= hitTarget {
                         lock.lock(); stopEnqueue = true; lock.unlock()
