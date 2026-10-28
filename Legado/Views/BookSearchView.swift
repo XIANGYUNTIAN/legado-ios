@@ -295,6 +295,7 @@ struct BookSearchView: View {
                 searchTimeout: searchTimeout,
                 globalBudget: globalBudget,
                 onProgress: { text in DispatchQueue.main.async { sink.text = text } },
+                hitTarget: 50,
                 onStream: { books, errors in
                     DispatchQueue.main.async {
                         results = books

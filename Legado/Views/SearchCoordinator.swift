@@ -425,9 +425,17 @@ enum SearchCoordinator {
         }
         if Task.isCancelled { return ([], finalURL.absoluteString) }
         let sourceName = source.bookSourceName.isEmpty ? source.bookSourceUrl : source.bookSourceName
-        let hitBooks = extracted
-            .filter { matches($0, keyword: keyword, mode: mode) }
-            .map { book in
+        // 🔧 修复（彻底解决「命中始终 0 或 1-2 本」）：
+        // legado 的 searchUrl 由服务端按关键词检索，返回结果本就相关；客户端原样展示，
+        // **不做**关键词过滤。iOS 原实现在此用 `matches` 硬过滤，把 name/author/intro
+        // 未显式包含关键词的有效书全部丢弃——精确模式下要求书名「全等」关键词，
+        // 导致「开局签到诛仙神剑」这类相关书被误删，命中恒为 0~2 本。
+        // 现改为：保留源返回的全部结果，仅按相关度排序（精确书名 > 书名包含 >
+        // 作者/简介包含 > 不相关），既不丢结果又让最相关书置顶。
+        let ranked = extracted
+            .map { book in (book, relevanceScore(book, keyword: keyword, mode: mode)) }
+            .sorted { $0.1 > $1.1 }
+            .map { book, _ in
                 ExploredBook(
                     name: book.name,
                     author: book.author,
@@ -440,7 +448,7 @@ enum SearchCoordinator {
                 )
             }
         // 探针 URL：最终搜索 URL（含关键词替换后的成品），供 0 命中时人工验证
-        return (hitBooks, finalURL.absoluteString)
+        return (ranked, finalURL.absoluteString)
     }
 
     /// 解析 legado 的 searchUrl：`url,{"method":"POST","body":"...","headers":{...}}`。
@@ -480,24 +488,29 @@ enum SearchCoordinator {
         return ParsedSearchRequest(url: urlPart, method: method, body: body, headers: headers, charset: charset)
     }
 
-    /// 关键词与模式的匹配判定：书名 / 作者 / 简介（简介含主角名等线索）
-    private static func matches(_ book: ExploredBook, keyword: String, mode: SearchMode) -> Bool {
+    /// 关键词与模式的相关度评分（0~4）：用于排序，**不用于丢弃**。
+    /// legado 服务端检索已保证结果相关，客户端仅按相关度置顶，不再硬过滤，
+    /// 避免「诛仙」类搜索把「开局签到诛仙神剑」等有效书误删导致命中恒为 0~2 本。
+    /// - 精确模式：书名全等(4) > 书名包含(2) > 作者/简介包含(1) > 不相关(0)
+    /// - 模糊模式：书名包含(3) > 作者包含(2) > 简介包含(1) > 不相关(0)
+    private static func relevanceScore(_ book: ExploredBook, keyword: String, mode: SearchMode) -> Int {
         let k = keyword.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !k.isEmpty else { return true }
+        guard !k.isEmpty else { return 4 }
         let name = book.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let author = book.author.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let intro = book.intro.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
-        switch mode {
-        case .fuzzy:
-            return name.contains(k) || author.contains(k) || intro.contains(k)
-        case .precise:
-            if name == k || author == k { return true }
-            let separators = CharacterSet(charactersIn: "，,。.；;、\n\t（）()【】[]“”\"' 　")
-            let tokens = intro.components(separatedBy: separators)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            return tokens.contains(k)
+        if mode == .precise {
+            if name == k || author == k { return 4 }
+            if name.contains(k) { return 2 }
+            if author.contains(k) || intro.contains(k) { return 1 }
+            return 0
         }
+        // 模糊
+        if name.contains(k) { return 3 }
+        if author.contains(k) { return 2 }
+        if intro.contains(k) { return 1 }
+        return 0
     }
 
     private static func sourceLabel(_ source: BookSource) -> String {
