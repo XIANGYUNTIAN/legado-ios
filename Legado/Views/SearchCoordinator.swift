@@ -425,14 +425,15 @@ enum SearchCoordinator {
         }
         if Task.isCancelled { return ([], finalURL.absoluteString) }
         let sourceName = source.bookSourceName.isEmpty ? source.bookSourceUrl : source.bookSourceName
-        // 🔧 修复（彻底解决「命中始终 0 或 1-2 本」）：
-        // legado 的 searchUrl 由服务端按关键词检索，返回结果本就相关；客户端原样展示，
-        // **不做**关键词过滤。iOS 原实现在此用 `matches` 硬过滤，把 name/author/intro
-        // 未显式包含关键词的有效书全部丢弃——精确模式下要求书名「全等」关键词，
-        // 导致「开局签到诛仙神剑」这类相关书被误删，命中恒为 0~2 本。
-        // 现改为：保留源返回的全部结果，仅按相关度排序（精确书名 > 书名包含 >
-        // 作者/简介包含 > 不相关），既不丢结果又让最相关书置顶。
-        let ranked = extracted
+        // 🔧 修复（彻底解决「命中恒为 0~2 本」）：
+        // 原 precise 过滤要求「书名全等关键词」才保留，把《诛仙（全本）》《诛仙前传》
+        // 《诛仙Ⅰ》等合法变体一律丢弃，仅命中恰好名为「诛仙」的本子 → 0~2 本。
+        // 现改为：精确模式保留「书名全等 / 书名以关键词开头」的结果（覆盖上述变体），
+        // 同时仍剔除「开局签到诛仙神剑」这类关键词仅作书名片段的无关书（书名既不等全
+        // 也不以前缀开头）；模糊模式保留书名/作者/简介包含关键词的结果。
+        // 过滤后的结果按相关度排序，让最匹配的书置顶。
+        let kept = extracted.filter { shouldKeep($0, keyword: keyword, mode: mode) }
+        let ranked = kept
             .map { book in (book, relevanceScore(book, keyword: keyword, mode: mode)) }
             .sorted { $0.1 > $1.1 }
             .map { book, _ in
@@ -488,9 +489,40 @@ enum SearchCoordinator {
         return ParsedSearchRequest(url: urlPart, method: method, body: body, headers: headers, charset: charset)
     }
 
-    /// 关键词与模式的相关度评分（0~4）：用于排序，**不用于丢弃**。
-    /// legado 服务端检索已保证结果相关，客户端仅按相关度置顶，不再硬过滤，
-    /// 避免「诛仙」类搜索把「开局签到诛仙神剑」等有效书误删导致命中恒为 0~2 本。
+    /// 关键词与模式的匹配判定（用于「保留」结果，即结果级过滤）：
+    /// - 精确模式：书名全等关键词，或书名以关键词开头（覆盖《诛仙（全本）》《诛仙前传》
+    ///   《诛仙Ⅰ》等合法变体）；作者全等亦保留（按作者精确检索）。
+    ///   以此剔除「开局签到诛仙神剑」这类关键词仅作书名片段的无关书
+    ///   （书名既不等全、也不以前缀开头）。
+    /// - 模糊模式：书名 / 作者 / 简介包含关键词即保留（宽匹配，对应原模糊语义）。
+    private static func shouldKeep(_ book: ExploredBook, keyword: String, mode: SearchMode) -> Bool {
+        let k = normalize(keyword)
+        guard !k.isEmpty else { return true }
+        let name = normalize(book.name)
+        let author = normalize(book.author)
+        let intro = normalize(book.intro)
+
+        if mode == .precise {
+            if name == k || name.hasPrefix(k) || author == k { return true }
+            return false
+        }
+        // 模糊
+        return name.contains(k) || author.contains(k) || intro.contains(k)
+    }
+
+    /// 归一化书名 / 作者 / 简介：去书名号《》、去首尾与内部多余空白、转小写，
+    /// 使「诛仙 」「《诛仙》」「诛仙（全本）」等形态统一比对，避免空白/书名号导致漏匹配。
+    private static func normalize(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "《", with: "")
+            .replacingOccurrences(of: "》", with: "")
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            .lowercased()
+    }
+
+    /// 关键词与模式的相关度评分（0~4）：仅用于排序，不用于丢弃（过滤由 `shouldKeep` 负责）。
     /// - 精确模式：书名全等(4) > 书名包含(2) > 作者/简介包含(1) > 不相关(0)
     /// - 模糊模式：书名包含(3) > 作者包含(2) > 简介包含(1) > 不相关(0)
     private static func relevanceScore(_ book: ExploredBook, keyword: String, mode: SearchMode) -> Int {

@@ -7,8 +7,9 @@ final class SearchProgressSink: ObservableObject {
     @Published var text: String? = nil
 }
 
-/// 搜索模式：模糊 = 关键词作为子串命中书名/作者/简介；精确 = 书名/作者完全相等，
-/// 或简介中作为独立片段命中（支持按主角名等精确检索）。
+/// 搜索模式：模糊 = 关键词作为子串命中书名/作者/简介；精确 = 书名全等关键词或书名
+/// 以关键词开头（覆盖《诛仙（全本）》《诛仙前传》等合法变体），或作者全等。据此剔除
+/// 「开局签到诛仙神剑」这类关键词仅作书名片段的无关书，同时保留真正的热门书命中。
 enum SearchMode: String, CaseIterable {
     case fuzzy
     case precise
