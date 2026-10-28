@@ -371,7 +371,7 @@ enum SearchCoordinator {
         // —— gbk/gb2312/gb18030 健壮解码：Swift 原生不支持 gbk，必须走 GB18030 ——
         // 这是「正常返回但 0 命中」类 gbk 书源（如烟锁重楼/eyushuwu）的根因：响应是 gbk 字节，
         // 若按 utf-8 解码会变成乱码，中文 class 名与文本全失效，选择器全部失配 → 0 命中。
-        let gb18030Encoding = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(kCFStringEncodingGB_18030_2000)))
+        let gb18030Encoding = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(0x80000632)))
         // 兜底：searchUrl 可能以 JSON 选项声明 charset（如 eyushuwu 的 { "charset":"gbk",... }），
         // 若 parseSearchRequest 未解析出，则从此处补提取，避免 gbk 源走默认 utf-8 解码乱码。
         var fallbackCharset: String?
@@ -383,7 +383,7 @@ enum SearchCoordinator {
                 fallbackCharset = (opt["charset"] as? String)
             }
         }
-        let effectiveCharset = (!request.charset.isEmpty ? request.charset : fallbackCharset)?.lowercased()
+        let effectiveCharset = (request.charset?.isEmpty == false ? request.charset : fallbackCharset)?.lowercased()
 
         /// gbk 家族一律用 GB18030 解码（Swift 原生支持，可解 gbk/gb2312/gb18030）；
         /// 其余仍走原有 decodeText，再回落 utf-8。即使 decodeText 有缺陷，gbk 兜底也已生效。
