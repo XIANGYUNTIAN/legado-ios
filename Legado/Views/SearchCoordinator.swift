@@ -368,6 +368,34 @@ enum SearchCoordinator {
             mergedHeaders["Referer"] = base.absoluteString
         }
 
+        // —— gbk/gb2312/gb18030 健壮解码：Swift 原生不支持 gbk，必须走 GB18030 ——
+        // 这是「正常返回但 0 命中」类 gbk 书源（如烟锁重楼/eyushuwu）的根因：响应是 gbk 字节，
+        // 若按 utf-8 解码会变成乱码，中文 class 名与文本全失效，选择器全部失配 → 0 命中。
+        let gb18030Encoding = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(kCFStringEncodingGB_18030_2000)))
+        // 兜底：searchUrl 可能以 JSON 选项声明 charset（如 eyushuwu 的 { "charset":"gbk",... }），
+        // 若 parseSearchRequest 未解析出，则从此处补提取，避免 gbk 源走默认 utf-8 解码乱码。
+        var fallbackCharset: String?
+        if let start = rawSearchURL.firstIndex(of: "{"),
+           let end = rawSearchURL.lastIndex(of: "}") {
+            let sub = String(rawSearchURL[start...end])
+            if let d = sub.data(using: .utf8),
+               let opt = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+                fallbackCharset = (opt["charset"] as? String)
+            }
+        }
+        let effectiveCharset = (!request.charset.isEmpty ? request.charset : fallbackCharset)?.lowercased()
+
+        /// gbk 家族一律用 GB18030 解码（Swift 原生支持，可解 gbk/gb2312/gb18030）；
+        /// 其余仍走原有 decodeText，再回落 utf-8。即使 decodeText 有缺陷，gbk 兜底也已生效。
+        func decodeBody(_ data: Data, charset: String?) -> String {
+            let declared = (charset?.isEmpty == false ? charset! : nil)?.lowercased() ?? effectiveCharset
+            if let d = declared, d.contains("gb") {
+                if let s = String(data: data, encoding: gb18030Encoding), !s.isEmpty { return s }
+            }
+            if let c = charset, let s = try? NetworkService.decodeText(data, charset: c), !s.isEmpty { return s }
+            return String(data: data, encoding: .utf8) ?? ""
+        }
+
         let html: String
         if request.method.uppercased() == "POST", let bodyTemplate = request.body {
             var finalBody = bodyTemplate
@@ -375,38 +403,36 @@ enum SearchCoordinator {
             finalBody = finalBody.replacingOccurrences(of: "searchKey", with: encoded)
             finalBody = finalBody.replacingOccurrences(of: "{{searchPage}}", with: "1")
             finalBody = finalBody.replacingOccurrences(of: "searchPage", with: "1")
-            let bodyData: Data
-            if let charset = request.charset,
-               let encoding = NetworkService.encoding(named: charset) {
-                bodyData = finalBody.data(using: encoding) ?? Data()
-            } else {
-                bodyData = finalBody.data(using: .utf8) ?? Data()
+            let useGB = (effectiveCharset?.contains("gb") ?? false)
+            let bodyData = finalBody.data(using: useGB ? gb18030Encoding : .utf8) ?? Data()
+            let (data, response) = try await NetworkService.shared.fetchDataWithBody(
+                from: finalURL, method: "POST", body: bodyData, headers: mergedHeaders, timeout: timeout
+            )
+            let decoded = decodeBody(data, charset: request.charset)
+            guard !decoded.isEmpty else {
+                throw NSError(domain: "Search", code: -3,
+                              userInfo: [NSLocalizedDescriptionKey: "响应解码失败（charset=\(request.charset ?? effectiveCharset ?? "")）"])
             }
-            if let charset = request.charset {
-                let (data, response) = try await NetworkService.shared.fetchDataWithBody(
-                    from: finalURL, method: "POST", body: bodyData, headers: mergedHeaders, timeout: timeout
-                )
-                guard let decoded = try? NetworkService.decodeText(
-                    data, charset: charset.isEmpty ? response.textEncodingName : charset
-                ), !decoded.isEmpty else {
-                    throw NSError(domain: "Search", code: -3,
-                                  userInfo: [NSLocalizedDescriptionKey: "响应解码失败（charset=\(charset)）"])
-                }
-                html = decoded
-            } else {
-                html = try await NetworkService.shared.fetchTextWithBody(
-                    from: finalURL, method: "POST", body: bodyData, headers: mergedHeaders, timeout: timeout
-                )
-            }
+            html = decoded
         } else if let charset = request.charset, !charset.isEmpty {
             let (data, response) = try await NetworkService.shared.fetchDataWithResponse(
                 from: finalURL, headers: mergedHeaders, timeout: timeout
             )
-            guard let decoded = try? NetworkService.decodeText(
-                data, charset: charset.isEmpty ? response.textEncodingName : charset
-            ), !decoded.isEmpty else {
+            let decoded = decodeBody(data, charset: charset)
+            guard !decoded.isEmpty else {
                 throw NSError(domain: "Search", code: -3,
                               userInfo: [NSLocalizedDescriptionKey: "响应解码失败（charset=\(charset)）"])
+            }
+            html = decoded
+        } else if let ec = effectiveCharset, ec.contains("gb") {
+            // 兜底：parseSearchRequest 未解析 charset，但 searchUrl JSON 选项声明了 gbk
+            let (data, response) = try await NetworkService.shared.fetchDataWithResponse(
+                from: finalURL, headers: mergedHeaders, timeout: timeout
+            )
+            let decoded = decodeBody(data, charset: ec)
+            guard !decoded.isEmpty else {
+                throw NSError(domain: "Search", code: -3,
+                              userInfo: [NSLocalizedDescriptionKey: "响应解码失败（charset=\(ec)）"])
             }
             html = decoded
         } else {
