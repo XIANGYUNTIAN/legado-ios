@@ -31,6 +31,7 @@ enum BookListAnalyzer {
             return []
         }
         let lower = trimmed.lowercased()
+        let isJsonBody = Self.isJsonBody(html)
 
         // ① JS：求值结果按值类型转换（起点 bookList 的 <js> 返回元素 outerHtml 数组）
         if lower.hasPrefix("@js:") || lower.hasPrefix("<js>") {
@@ -51,7 +52,11 @@ enum BookListAnalyzer {
         }
 
         // ② CSS（默认模式 / @css: / @@）：元素列表
-        if !LegadoCssTranslator.looksLikeNonCss(trimmed) {
+        //    JSON 响应下的裸字段名（如 `data`）须跳过 CSS 分支落到 ③ JSON 分支，
+        //    否则被当 CSS 选择器去 JSON 文本里选 → 永远选空 → 0 命中。
+        //    （v41 在 ③ 补的裸名修复因 ② 先拦截而从未触达，故此处补守卫）
+        if !LegadoCssTranslator.looksLikeNonCss(trimmed),
+           !(isJsonBody && Self.looksLikeJsonField(trimmed)) {
             do {
                 let elements = try HtmlRuleEngine.shared.elements(trimmed, rootHTML: html)
                 if elements.isEmpty {
@@ -68,7 +73,6 @@ enum BookListAnalyzer {
         //    对齐 legado：JSON 书源的 bookList 常写裸字段名（如 `data`），等价于 $.data。
         //    当响应体为 JSON 时，裸字段名应走 JSON 分支，而非被 looksLikeNonCss 误判为 CSS
         //    （把 `data` 当 CSS 标签选择器去 JSON 文本里选 → 永远选空 → 0 命中）。
-        let isJsonBody = Self.isJsonBody(html)
         if lower.hasPrefix("@json:") || trimmed.hasPrefix("$.") || trimmed.hasPrefix("$[")
            || (isJsonBody && Self.looksLikeJsonField(trimmed)) {
             let jsonRule = Self.ensureJsonPath(trimmed)
