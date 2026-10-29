@@ -65,9 +65,15 @@ enum BookListAnalyzer {
         }
 
         // ③ JSON：结构化值 → 数组成员逐项
-        if lower.hasPrefix("@json:") || trimmed.hasPrefix("$.") || trimmed.hasPrefix("$[") {
+        //    对齐 legado：JSON 书源的 bookList 常写裸字段名（如 `data`），等价于 $.data。
+        //    当响应体为 JSON 时，裸字段名应走 JSON 分支，而非被 looksLikeNonCss 误判为 CSS
+        //    （把 `data` 当 CSS 标签选择器去 JSON 文本里选 → 永远选空 → 0 命中）。
+        let isJsonBody = Self.isJsonBody(html)
+        if lower.hasPrefix("@json:") || trimmed.hasPrefix("$.") || trimmed.hasPrefix("$[")
+           || (isJsonBody && Self.looksLikeJsonField(trimmed)) {
+            let jsonRule = Self.ensureJsonPath(trimmed)
             do {
-                let value = try engine.evaluate(trimmed, content: html)
+                let value = try engine.evaluate(jsonRule, content: html)
                 let items = itemsFromValue(value)
                 if items.isEmpty {
                     ruleError = "JSONPath 未匹配到数据（响应可能不是 JSON 或结构已变）"
@@ -132,7 +138,10 @@ enum BookListAnalyzer {
             return (try? engine.getString(rule, content: groups.first ?? "")) ?? ""
         case .json(let value):
             let content = jsonText(value)
-            return (try? engine.getString(rule, content: content, input: value)) ?? ""
+            // JSON item 的字段规则常写裸字段名（如 `title`），等价 $.title；
+            // 否则 detectMode 会误判为 .plain 字面量，取不到 dict["title"] 字段值。
+            let jsonRule = Self.ensureJsonPath(rule)
+            return (try? engine.getString(jsonRule, content: content, input: value)) ?? ""
         }
     }
 
@@ -148,6 +157,30 @@ enum BookListAnalyzer {
 
     /// 求值结果 → 元素列表。数组字符串中含 HTML 片段时解析为元素
     /// （legado 的 java.getElement 返回 Elements，iOS 桥返回 outerHtml 数组）。
+    /// 响应体是否为 JSON（去空白后以 { 或 [ 开头；HTML 以 < 开头）
+    private static func isJsonBody(_ html: String) -> Bool {
+        let t = html.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.hasPrefix("{") || t.hasPrefix("[")
+    }
+
+    /// 是否为「裸 JSON 字段名 / JSONPath 简写」：纯标识符（可含下划线），
+    /// 不含 CSS 选择器特征字符；用于 JSON 响应下区分「字段名 data」与「CSS 选择器 .v-list-item」。
+    private static func looksLikeJsonField(_ rule: String) -> Bool {
+        let t = rule.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, let first = t.first, !first.isNumber else { return false }
+        let cssFeatures = CharacterSet(charactersIn: ".#>#+,[]()@/ ")
+        return t.rangeOfCharacter(from: cssFeatures) == nil
+    }
+
+    /// 把裸 JSON 字段名补成 JSONPath（data → $.data）；已声明前缀 / 含 CSS 特征 / 含 ## 的规则原样返回。
+    private static func ensureJsonPath(_ rule: String) -> String {
+        let t = rule.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.hasPrefix("$") || t.hasPrefix("@") || t.hasPrefix("/") || t.hasPrefix(":") { return t }
+        if t.contains("##") { return t }
+        if Self.looksLikeJsonField(t) { return "$.\(t)" }
+        return t
+    }
+
     private static func itemsFromValue(_ value: Any?) -> [RuleItem] {
         guard let value else { return [] }
         if let array = value as? [Any] {
