@@ -177,7 +177,8 @@ final class RuleEngine {
 
     /// 整串切分：`<js>...</js>` 与 `@js:...`（对应 splitSourceRule，任意位置切分）
     private func splitSourceRule(_ rule: String) -> [RuleSegment] {
-        let pattern = "<js>([\\w\\W]*?)</js>|@js:([\\w\\W]*)"
+        // @js: 段改为非贪婪，止于 `,{`（选项后缀）或字符串末尾，避免把 `,{method,body}` 选项吞进 JS 段。
+        let pattern = "<js>([\\w\\W]*?)</js>|@js:([\\w\\W]*?)(?=,\\{|$)"
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
             return [RuleSegment(mode: .plain, text: rule)]
         }

@@ -152,7 +152,11 @@ enum SearchCoordinator {
                             outcome.errors.append(SourceSearchError(name: item.0.sourceName, message: msg))
                         } else {
                             let book = item.0
-                            let key = "\(book.name.lowercased())|\(book.author.lowercased())"
+                            // 去重键优先用详情链接（每本书唯一）；书名为空时仍按书名|作者去重，
+                            // 避免空书名把多本不同书误并为一本。
+                            let key = book.bookUrl.isEmpty
+                                ? "\(book.name.lowercased())|\(book.author.lowercased())"
+                                : book.bookUrl.lowercased()
                             if seen.contains(key) { continue }
                             seen.insert(key)
                             outcome.results.append(book)
@@ -534,31 +538,13 @@ enum SearchCoordinator {
     ///   以此剔除「开局签到诛仙神剑」这类关键词仅作书名片段的无关书
     ///   （书名既不等全、也不以前缀开头）。
     /// - 模糊模式：书名 / 作者 / 简介包含关键词即保留（宽匹配，对应原模糊语义）。
+    // legado 官方搜索不做关键词书名二次过滤：搜索页解析出的书即视为搜索结果直接返回。
+    // 原 name.contains(keyword) 后处理会把大量合法结果（标题未含完整关键词、或书名提取为空）
+    // 丢弃，是「搜索命中恒为 0~2 本」的主因。现仅丢弃「书名与详情链接皆为空」的无效条目。
     private static func shouldKeep(_ book: ExploredBook, keyword: String, mode: SearchMode) -> Bool {
-        let k = normalize(keyword)
-        guard !k.isEmpty else { return true }
-        let name = normalize(book.name)
-        let author = normalize(book.author)
-        let intro = normalize(book.intro)
-
-        if mode == .precise {
-            if name == k || name.hasPrefix(k) || author == k { return true }
-            return false
-        }
-        // 模糊
-        return name.contains(k) || author.contains(k) || intro.contains(k)
-    }
-
-    /// 归一化书名 / 作者 / 简介：去书名号《》、去首尾与内部多余空白、转小写，
-    /// 使「诛仙 」「《诛仙》」「诛仙（全本）」等形态统一比对，避免空白/书名号导致漏匹配。
-    private static func normalize(_ s: String) -> String {
-        s.trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "《", with: "")
-            .replacingOccurrences(of: "》", with: "")
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-            .lowercased()
+        let name = book.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let url = book.bookUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !name.isEmpty || !url.isEmpty
     }
 
     /// 关键词与模式的相关度评分（0~4）：仅用于排序，不用于丢弃（过滤由 `shouldKeep` 负责）。
@@ -642,8 +628,12 @@ enum SearchCoordinator {
         var result: [ExploredBook] = []
         for item in items {
             let name = BookListAnalyzer.field(rules.name, item: item, engine: engine)
-            guard !name.isEmpty else { continue }
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             let bookUrlRaw = BookListAnalyzer.field(rules.bookUrl, item: item, engine: engine)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // legado 不按书名为空丢弃搜索结果：书名提取为空但详情链接有效时仍可进书架/阅读，
+            // 应保留；仅当书名与详情链接皆为空才跳过（无效条目）。
+            guard !(name.isEmpty && bookUrlRaw.isEmpty) else { continue }
             // legado 基准：bookUrl 优先相对「搜索结果页（bookList 求值页）」解析，源根兜底。
             // 原顺序（先源根后搜索页）会让「相对搜索页目录」的详情 URL 解析到错误地址，
             // 进书架后目录/正文请求 404。
@@ -659,14 +649,8 @@ enum SearchCoordinator {
                 lastChapter: BookListAnalyzer.field(rules.lastChapter, item: item, engine: engine)
             ))
         }
-        if result.isEmpty {
-            // 静默空分支（此前被吞掉，无法区分 A 网络/规则不匹配 与 B 字段提取 bug）：
-            // bookList 已命中元素，但逐元素的 name 字段全部提取为空。显式抛出错误，
-            // 配合 e37a62b 的失败样例展示，下一轮可一眼定位是哪一类。
-            throw NSError(domain: "Search", code: -5,
-                          userInfo: [NSLocalizedDescriptionKey:
-                            "bookList 命中 \(items.count) 个元素，但 name 字段提取全部为空（name 规则：『\(rules.name ?? "")』）"])
-        }
+        // 不再因「name 全空」抛错：与 legado 官方搜索「返回搜索页解析出的全部书」语义一致，
+        // 书名提取为空但详情链接有效的书已在上循环保留；无有效条目时返回空数组（计为 0 命中，不判失败）。
         return result
     }
 
