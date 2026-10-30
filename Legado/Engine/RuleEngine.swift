@@ -402,7 +402,7 @@ final class RuleEngine {
         if rule.rangeOfCharacter(from: syntaxCharacters) != nil { return false }
         let lower = rule.lowercased()
         // 已知抽取器关键字 → 属性/文本抽取，非字面量
-        if LegadoCssTranslator.table[lower] != nil { return false }
+        if HtmlExtractor.table[lower] != nil { return false }
         // 纯属性名形态（仅 ASCII 字母数字连字符，不含中文）→ 视为 attr(name)，非字面量
         let attrAllowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
         if !rule.isEmpty, rule.rangeOfCharacter(from: attrAllowed.inverted) == nil { return false }
