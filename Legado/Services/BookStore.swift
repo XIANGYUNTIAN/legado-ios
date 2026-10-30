@@ -13,7 +13,7 @@ enum BookImportError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidURL: return "链接格式不正确（需 http(s) 链接）"
-        case .invalidFormat(let ext): return "不支持的格式：.\(ext)（仅 TXT / EPUB）"
+        case .invalidFormat(let ext): return "不支持的格式：.\(ext)（支持 TXT / EPUB / PDF / DOCX / MOBI / AZW3 / DOC）"
         case .badStatus(let code): return "服务器返回 HTTP \(code)"
         case .emptyContent: return "文件内容为空"
         case .encodingFailed: return "文本解码失败（非 UTF-8 / GB18030）"
@@ -126,10 +126,13 @@ final class BookStore: ObservableObject {
     private func inferExtension(url: URL, response: URLResponse) -> String {
         if let mime = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type")?.lowercased() {
             if mime.contains("epub") { return "epub" }
+            if mime.contains("pdf") { return "pdf" }
+            if mime.contains("docx") || mime.contains("wordprocessingml") { return "docx" }
+            if mime.contains("mobipocket") || mime.contains("x-mobipocket") { return "mobi" }
             if mime.contains("text") { return "txt" }
         }
         let ext = url.pathExtension.lowercased()
-        if ext == "txt" || ext == "epub" { return ext }
+        if ["txt", "epub", "pdf", "docx", "mobi", "azw3", "doc"].contains(ext) { return ext }
         return "txt"
     }
 
@@ -138,12 +141,17 @@ final class BookStore: ObservableObject {
         guard !data.isEmpty else { throw BookImportError.emptyContent }
 
         // 扩展名无法识别（无扩展名 / 云盘文件 UTI 异常）时按内容嗅探：
-        // PK 魔数 → EPUB；可解码为文本且无 NUL → TXT。
-        // 旧版直接以扩展名判定，导入无扩展名书籍必然失败。
+        // %PDF → PDF；PK 魔数 → EPUB / DOCX（进一步区分）；BOOK（PalmDB）→ MOBI；
+        // 可解码为文本且无 NUL → TXT。
+        let known = ["txt", "epub", "pdf", "docx", "mobi", "azw3", "doc"]
         var lower = ext.lowercased()
-        if lower != "txt" && lower != "epub" {
-            if Self.isZipData(data) {
-                lower = "epub"
+        if !known.contains(lower) {
+            if Self.isPdfData(data) {
+                lower = "pdf"
+            } else if Self.isZipData(data) {
+                lower = Self.zipLikelyDocx(data) ? "docx" : "epub"
+            } else if Self.isMobiData(data) {
+                lower = "mobi"
             } else if Self.looksLikeText(data) {
                 lower = "txt"
             } else {
@@ -151,7 +159,9 @@ final class BookStore: ObservableObject {
             }
         }
 
-        if lower == "txt" {
+        // 按格式做基本可解析性校验（深入解压/抽取在 LocalBookReader 完成）
+        switch lower {
+        case "txt":
             let decoded = String(data: data, encoding: .utf8)
                 ?? {
                     let gb = CFStringConvertEncodingToNSStringEncoding(
@@ -160,9 +170,16 @@ final class BookStore: ObservableObject {
                     return String(data: data, encoding: String.Encoding(rawValue: gb))
                 }()
             if decoded == nil { throw BookImportError.encodingFailed }
-        } else {
-            // EPUB 本质是 zip，校验本地 zip 魔数（PK\x03\x04）
-            guard Self.isZipData(data) else { throw BookImportError.invalidFormat(ext) }
+        case "pdf":
+            guard Self.isPdfData(data) else { throw BookImportError.invalidFormat("pdf") }
+        case "epub", "docx":
+            guard Self.isZipData(data) else { throw BookImportError.invalidFormat(lower) }
+        case "mobi", "azw3":
+            guard Self.isMobiData(data) else { throw BookImportError.invalidFormat(lower) }
+        case "doc":
+            break  // 二进制 OLE2，导入时放行，阅读时给出「另存为 docx/txt」提示
+        default:
+            break
         }
 
         let baseName = suggestedName.isEmpty ? "book" : suggestedName
@@ -175,7 +192,7 @@ final class BookStore: ObservableObject {
             id: UUID().uuidString,
             title: baseName,
             author: "未知",
-            format: lower == "txt" ? .txt : .epub,
+            format: BookFormat(rawValue: lower) ?? .txt,
             fileRelativePath: "Books/\(fileName)",
             remoteURL: remoteURL,
             addedAt: Date(),
@@ -210,9 +227,26 @@ final class BookStore: ObservableObject {
         persist()
     }
 
-    /// ZIP / EPUB 魔数判定（PK\x03\x04）
+    /// ZIP / EPUB / DOCX 魔数判定（PK\x03\x04）
     private static func isZipData(_ data: Data) -> Bool {
         data.count >= 4 && data[0] == 0x50 && data[1] == 0x4B && data[2] == 0x03 && data[3] == 0x04
+    }
+
+    /// PDF 魔数判定（%PDF-）
+    private static func isPdfData(_ data: Data) -> Bool {
+        data.count >= 5 && data[0] == 0x25 && data[1] == 0x50 && data[2] == 0x44 && data[3] == 0x46 && data[4] == 0x2D
+    }
+
+    /// PalmDB 魔数判定（偏移 60..64 为 "BOOK"，MOBI/AZW3 通用）
+    private static func isMobiData(_ data: Data) -> Bool {
+        data.count >= 64 && String(bytes: data[60..<64], encoding: .ascii) == "BOOK"
+    }
+
+    /// ZIP 容器内若含 word/document.xml → 判定为 DOCX（否则按 EPUB 处理）
+    private static func zipLikelyDocx(_ data: Data) -> Bool {
+        let probe = data.prefix(min(data.count, 2_000_000))
+        guard let marker = "word/document.xml".data(using: .utf8) else { return false }
+        return probe.range(of: marker) != nil
     }
 
     /// 文本嗅探：抽样前 4KB，含 NUL 字节视为二进制；UTF-8 / GB18030 可解码视为文本

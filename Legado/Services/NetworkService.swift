@@ -112,6 +112,13 @@ final class NetworkService: ObservableObject {
     ///（-1200 TLS error / -1005 connection lost）重试切换，规避坏连接复用。
     private var backupSession: URLSession? = nil
 
+    // MARK: - 在途任务注册（支持搜索停止时取消）
+    /// 记录当前所有在途 URLSessionDataTask，供 `cancelActiveRequests()` 统一取消，
+    /// 使已入队的搜索 Operation 在「停止」时立即收尾，而非各自等到 20s 超时。
+    private let taskLock = NSLock()
+    private var activeTasks: [Int: URLSessionDataTask] = [:]
+    private var taskCounter: Int = 0
+
     init() {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = Self.defaultTimeout
@@ -269,6 +276,10 @@ final class NetworkService: ObservableObject {
     }
 
     /// 单次实际请求（不含重试逻辑）。
+    ///
+    /// 改用 `URLSessionDataTask` + 完成回调，并在发出前把 task 注册进 `activeTasks`，
+    /// 以便 `cancelActiveRequests()` 能真正取消「在途」请求——此前用 `session.data(for:)`
+    /// 无法拿到 task 句柄，停止搜索只能等每个请求各自超时（最长 20s），表现为「点停止不马上停」。
     private func attemptRequest(url: URL,
                                 method: String,
                                 body: Data?,
@@ -301,41 +312,84 @@ final class NetworkService: ObservableObject {
             request.setValue(cookie, forHTTPHeaderField: "Cookie")
         }
 
-        do {
-            let activeSession = (useBackupSession && backupSession != nil) ? backupSession! : session
-            let (data, response) = try await activeSession.data(for: request)
-            guard let http = response as? HTTPURLResponse else {
-                throw NetworkError.network("非 HTTP 响应")
+        let activeSession = (useBackupSession && backupSession != nil) ? backupSession! : session
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<(Data, HTTPURLResponse), Error>) in
+            var id = 0  // 在闭包前声明，供完成回调按 id 注销；实际值在 resume 前写入
+            let task = activeSession.dataTask(with: request) { [self] data, response, error in
+                self.unregisterTask(id)
+                self.handleResponse(data: data, response: response, error: error, url: url, cont: cont)
             }
-            if !(200...299).contains(http.statusCode) {
-                throw NetworkError.badStatus(http.statusCode)
-            }
-            if data.isEmpty {
-                let enc = http.value(forHTTPHeaderField: "Content-Encoding") ?? "-"
-                let ctype = http.value(forHTTPHeaderField: "Content-Type") ?? "-"
-                // 带响应元信息抛出，便于区分"真·空响应"与"被 gzip 包裹的空/压缩体"
-                throw NSError(domain: "Network", code: -6,
-                              userInfo: [NSLocalizedDescriptionKey:
-                                "服务器返回内容为空（HTTP \(http.statusCode)，Content-Type: \(ctype)，Content-Encoding: \(enc)）"])
-            }
-            return (Self.maybeDecompress(data, response: http), http)
-        } catch let error as NetworkError {
-            throw error
-        } catch let urlError as URLError {
-            switch urlError.code {
-            case .timedOut:
-                throw NetworkError.timeout
-            case .cancelled:
-                throw NetworkError.cancelled
-            case .unsupportedURL:
-                throw NetworkError.invalidURL
-            default:
-                // 附上错误码与 host，便于定位「连接被丢弃」是服务器问题还是代码问题
-                throw NetworkError.network("\(urlError.code.rawValue) \(url.host ?? "")：\(urlError.localizedDescription)")
-            }
-        } catch {
-            throw NetworkError.network(error.localizedDescription)
+            id = registerTask(task)
+            task.resume()
         }
+    }
+
+    /// 把 URLSession 完成回调统一转换为 (Data, HTTPURLResponse) 或 NetworkError。
+    private func handleResponse(data: Data?, response: URLResponse?, error: Error?, url: URL,
+                                cont: CheckedContinuation<(Data, HTTPURLResponse), Error>) {
+        if let error {
+            if let urlError = error as? URLError {
+                switch urlError.code {
+                case .timedOut:
+                    cont.resume(throwing: NetworkError.timeout)
+                case .cancelled:
+                    cont.resume(throwing: NetworkError.cancelled)
+                case .unsupportedURL:
+                    cont.resume(throwing: NetworkError.invalidURL)
+                default:
+                    // 附上错误码与 host，便于定位「连接被丢弃」是服务器问题还是代码问题
+                    cont.resume(throwing: NetworkError.network("\(urlError.code.rawValue) \(url.host ?? "")：\(urlError.localizedDescription)"))
+                }
+            } else {
+                cont.resume(throwing: NetworkError.network(error.localizedDescription))
+            }
+            return
+        }
+        guard let http = response as? HTTPURLResponse else {
+            cont.resume(throwing: NetworkError.network("非 HTTP 响应"))
+            return
+        }
+        guard (200...299).contains(http.statusCode) else {
+            cont.resume(throwing: NetworkError.badStatus(http.statusCode))
+            return
+        }
+        guard let data, !data.isEmpty else {
+            let enc = http.value(forHTTPHeaderField: "Content-Encoding") ?? "-"
+            let ctype = http.value(forHTTPHeaderField: "Content-Type") ?? "-"
+            // 带响应元信息抛出，便于区分"真·空响应"与"被 gzip 包裹的空/压缩体"
+            cont.resume(throwing: NSError(domain: "Network", code: -6,
+                                         userInfo: [NSLocalizedDescriptionKey:
+                                            "服务器返回内容为空（HTTP \(http.statusCode)，Content-Type: \(ctype)，Content-Encoding: \(enc)）"]))
+            return
+        }
+        cont.resume(returning: (Self.maybeDecompress(data, response: http), http))
+    }
+
+    // MARK: - 在途任务注册 / 取消
+
+    private func registerTask(_ task: URLSessionDataTask) -> Int {
+        taskLock.lock()
+        taskCounter += 1
+        let id = taskCounter
+        activeTasks[id] = task
+        taskLock.unlock()
+        return id
+    }
+
+    private func unregisterTask(_ id: Int) {
+        taskLock.lock()
+        activeTasks.removeValue(forKey: id)
+        taskLock.unlock()
+    }
+
+    /// 取消全部在途请求（搜索停止时调用）。被取消的 task 会触发完成回调并抛出
+    /// `URLError.cancelled` → `NetworkError.cancelled`，使已入队的搜索 Operation 立即收尾。
+    func cancelActiveRequests() {
+        taskLock.lock()
+        let tasks = Array(activeTasks.values)
+        activeTasks.removeAll()
+        taskLock.unlock()
+        for t in tasks { t.cancel() }
     }
 
     /// 判定是否为值得重试的瞬时错误。

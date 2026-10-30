@@ -4,6 +4,11 @@ import Foundation
 enum BookFormat: String, Codable, CaseIterable {
     case txt
     case epub
+    case pdf
+    case docx
+    case mobi
+    case azw3
+    case doc
 }
 
 /// 书架书籍实体（对应 legado 的本地书籍 + 远程下载书籍）

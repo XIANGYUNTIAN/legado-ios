@@ -37,6 +37,24 @@ struct SearchOutcome {
 /// 不再阻塞 UI 线程，彻底消除「一搜就卡死」的主线程死锁。
 enum SearchCoordinator {
 
+    // MARK: - 可取消会话
+
+    /// 当前搜索的专用工作队列（run 开始时绑定，结束后清空）。
+    /// 停止搜索时通过它 `cancelAllOperations()` 取消已入队但尚未开始的 Operation，
+    /// 配合 `NetworkService.cancelActiveRequests()` 取消在途网络，实现「点停止马上停」。
+    private static let workerLock = NSLock()
+    private static var currentWorker: OperationQueue? = nil
+
+    /// 立即停止当前搜索：取消工作队列（未开始的 Operation 不再执行）+ 取消全部在途网络请求。
+    /// 已开始的 Operation 会随网络取消立即抛错收尾，`waitUntilAllOperationsAreFinished()` 迅速返回。
+    static func stopCurrent() {
+        workerLock.lock()
+        let worker = currentWorker
+        workerLock.unlock()
+        worker?.cancelAllOperations()
+        NetworkService.shared.cancelActiveRequests()
+    }
+
     /// 入口：遍历全部可搜索书源，按 ruleSearch 规则检索书籍。
     /// - Parameters:
     ///   - keyword: 已 trim 的关键词
@@ -72,9 +90,9 @@ enum SearchCoordinator {
         worker.maxConcurrentOperationCount = 32
         worker.qualityOfService = .userInitiated
         worker.name = "legado.search.worker"
-
-        // doneSem 用于等待全部已入队 Operation 完成（每个 Operation 结束前必定 signal 一次，不会死锁）
-        let doneSem = DispatchSemaphore(value: 0)
+        // 绑定为「当前搜索会话」，供 stopCurrent() 取消
+        workerLock.lock(); currentWorker = worker; workerLock.unlock()
+        defer { workerLock.lock(); currentWorker = nil; workerLock.unlock() }
 
         for source in sources {
             if Task.isCancelled { break }
@@ -87,7 +105,6 @@ enum SearchCoordinator {
             onProgress?("已入队 \(enqueued)/\(total) 个书源 · 等待响应中…")
 
             let op = BlockOperation {
-                defer { doneSem.signal() }
                 // 把 async 单源搜索桥接为同步，阻塞的是 Operation 线程（plentiful），
                 // 不占用稀缺的协作线程池；协作池仅承载内层网络续体，不再被饿死。
                 var resultPair: [(ExploredBook, String?)] = []
@@ -145,8 +162,10 @@ enum SearchCoordinator {
             worker.addOperation(op)
         }
 
-        // 等待全部已入队 Operation 完成（每个 Op 结束前 defer signal 一次，不会死锁）
-        for _ in 0..<enqueued { doneSem.wait() }
+        // 等待全部已入队 Operation 完成。停止搜索时 stopCurrent() 已
+        // cancelAllOperations() —— 未开始的 Operation 被标记取消、不再执行，
+        // 已开始的随在途网络取消立即收尾，此调用迅速返回（不会死锁）。
+        worker.waitUntilAllOperationsAreFinished()
 
         // 收拢并发聚合结果（agg 为引用类型容器，run 主体此处一次性拷入 var outcome）
         outcome.results = agg.results

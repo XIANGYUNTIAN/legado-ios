@@ -623,91 +623,9 @@ struct BookReaderView: View {
 
     // MARK: - 本地阅读器
 
-    /// 本地书籍章节提取（纯函数，不修改 @State）
+    /// 本地书籍章节提取：按格式分发给 LocalBookReader（txt / epub / pdf / docx / mobi / azw3）。
     private func fetchLocalChapters(at url: URL) async throws -> [ReaderChapter] {
-        if book.format == .epub {
-            let eps = try EPUBReader.shared.chapters(from: url)
-            return eps.enumerated().map { _, chapter in
-                ReaderChapter(title: chapter.title, text: chapter.text, url: nil)
-            }
-        }
-        let data = try Data(contentsOf: url)
-        let gb = CFStringConvertEncodingToNSStringEncoding(
-            CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)
-        )
-        let text = String(data: data, encoding: .utf8)
-            ?? String(data: data, encoding: String.Encoding(rawValue: gb))
-        return splitIntoChapters(text)
-    }
-
-    /// 按中文章节标题切分。
-    /// 标题需位于行首（允许前导空格/制表符），覆盖：第X章/回/节/卷/集/部/篇、
-    /// 序章/序言/楔子/番外、Chapter N 等常见格式；匹配不到时按固定字数兜底分段，
-    /// 保证超长单章也能连续翻页。
-    private func splitIntoChapters(_ rawText: String?) -> [ReaderChapter] {
-        guard let rawText, !rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return [ReaderChapter(title: book.displayTitle, text: "", url: nil)]
-        }
-        // 归一化：去 BOM、CRLF / CR → LF
-        var text = rawText
-        if text.hasPrefix("\u{FEFF}") { text.removeFirst() }
-        text = text.replacingOccurrences(of: "\r\n", with: "\n")
-                 .replacingOccurrences(of: "\r", with: "\n")
-
-        let pattern = #"(?m)^[ \t]*(?:第[0-9０-９零一二三四五六七八九十百千万两]+\s*[章回节卷集部篇][^\n]*|序[章幕言折][^\n]*|楔子[^\n]*|番外[篇卷]?[0-9零一二三四五六七八九十百千万]*[^\n]*|Chapter\s*[0-9]+[^\n]*)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return fallbackSegments(text)
-        }
-        let ns = text as NSString
-        let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
-        guard matches.count > 1 else {
-            // 无章节结构：超长文本按固定字数兜底分段，保证可翻页
-            return fallbackSegments(text)
-        }
-        var result: [ReaderChapter] = []
-        // 开头正文（第一章之前的内容）
-        let firstRange = matches[0].range
-        if firstRange.location > 0 {
-            let prefix = ns.substring(with: NSRange(location: 0, length: firstRange.location))
-            if !prefix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                result.append(ReaderChapter(title: "序言", text: prefix, url: nil))
-            }
-        }
-        for (i, match) in matches.enumerated() {
-            let start = match.range.location
-            let end = (i + 1 < matches.count) ? matches[i + 1].range.location : ns.length
-            guard end > start else { continue }
-            let body = ns.substring(with: NSRange(location: start, length: end - start))
-            let title = ns.substring(with: match.range)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            result.append(ReaderChapter(title: title.isEmpty ? "第\(i + 1)章" : title, text: body, url: nil))
-        }
-        return result
-    }
-
-    /// 无章节标记时的兜底：按 ~8000 字分段（尽量在换行处断开），标题为「第 N 段」
-    private func fallbackSegments(_ text: String) -> [ReaderChapter] {
-        let threshold = 8000
-        guard text.count > threshold else {
-            return [ReaderChapter(title: book.displayTitle, text: text, url: nil)]
-        }
-        var result: [ReaderChapter] = []
-        var start = text.startIndex
-        var seg = 1
-        while start < text.endIndex {
-            let hardEnd = text.index(start, offsetBy: threshold, limitedBy: text.endIndex) ?? text.endIndex
-            var cut = hardEnd
-            if cut < text.endIndex, let nl = text[start..<hardEnd].lastIndex(of: "\n") {
-                cut = text.index(after: nl)
-            }
-            let body = String(text[start..<cut])
-            if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                result.append(ReaderChapter(title: "第 \(seg) 段", text: body, url: nil))
-                seg += 1
-            }
-            start = cut
-        }
-        return result.isEmpty ? [ReaderChapter(title: book.displayTitle, text: text, url: nil)] : result
+        try await LocalBookReader.chapters(format: book.format, title: book.displayTitle, at: url)
     }
 
     // MARK: - 规则阅读器

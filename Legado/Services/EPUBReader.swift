@@ -1,5 +1,4 @@
 import Foundation
-import zlib
 import SwiftSoup
 
 // MARK: - 错误
@@ -45,18 +44,17 @@ final class EPUBReader {
 
     /// 从本地 EPUB 文件抽取章节正文列表
     func chapters(from epubURL: URL) throws -> [EPUBChapter] {
-        let data = try Data(contentsOf: epubURL)
-        let entries = try parseZip(data)
+        let archive = try ZipArchive.open(url: epubURL)
 
-        guard let container = entries["META-INF/container.xml"] else {
+        guard let containerEntry = archive.entry(named: "META-INF/container.xml") else {
             throw EPUBError.noContainerXML
         }
-        let containerXML = try readEntry(data, entry: container)
+        let containerXML = try archive.readString(containerEntry)
         let opfPath = try parseContainerXML(containerXML)
-        guard let opfEntry = entries[opfPath] else {
+        guard let opfEntry = archive.entry(named: opfPath) else {
             throw EPUBError.noOPF
         }
-        let opfXML = try readEntry(data, entry: opfEntry)
+        let opfXML = try archive.readString(opfEntry)
         let spine = try parseOPF(opfXML, opfBase: (opfPath as NSString).deletingPathExtension)
         guard !spine.isEmpty else { throw EPUBError.noOPF }
 
@@ -65,182 +63,12 @@ final class EPUBReader {
         var chapters: [EPUBChapter] = []
         for item in spine {
             let fullPath = opfDir.isEmpty ? item.href : (opfDir + "/" + item.href)
-            guard let entry = entries[fullPath] else { continue }
-            let html = try? readEntry(data, entry: entry)
-            let text = html.flatMap { try? extractText($0) } ?? ""
+            guard let entry = archive.entry(named: fullPath) else { continue }
+            let html = (try? archive.readString(entry)) ?? ""
+            let text = (try? extractText(html)) ?? ""
             chapters.append(EPUBChapter(href: fullPath, title: item.title, text: text))
         }
         return chapters
-    }
-
-    // MARK: - ZIP 解析
-
-    private struct ZipEntry {
-        var compressedSize: UInt32
-        var uncompressedSize: UInt32
-        var method: UInt16
-        var localHeaderOffset: UInt32
-    }
-
-    /// 扫描中央目录，返回 文件名 → ZipEntry
-    private func parseZip(_ data: Data) throws -> [String: ZipEntry] {
-        // 校验本地文件头魔数
-        guard data.count >= 22,
-              data[0] == 0x50, data[1] == 0x4B,
-              data[2] == 0x03, data[3] == 0x04 else {
-            throw EPUBError.notAZip
-        }
-
-        // 查找 EOCD（PK\x05\x06），从文件末尾向后扫描
-        var eocdOffset = -1
-        let searchStart = max(0, data.count - 65557)  // EOCD + 注释上限
-        for i in stride(from: data.count - 22, through: searchStart, by: -1) {
-            if i + 4 <= data.count,
-               data[i] == 0x50, data[i+1] == 0x4B,
-               data[i+2] == 0x05, data[i+3] == 0x06 {
-                eocdOffset = i
-                break
-            }
-        }
-        guard eocdOffset >= 0 else { throw EPUBError.notAZip }
-
-        let cdOffset = Int(le32(data, eocdOffset + 16))
-        let cdSize = Int(le32(data, eocdOffset + 12))
-        let totalEntries = Int(le16(data, eocdOffset + 10))
-
-        var entries: [String: ZipEntry] = [:]
-        var cursor = cdOffset
-        for _ in 0..<totalEntries {
-            guard cursor + 46 <= data.count else { break }
-            guard data[cursor] == 0x50, data[cursor+1] == 0x4B,
-                  data[cursor+2] == 0x01, data[cursor+3] == 0x02 else { break }
-            let method = le16(data, cursor + 10)
-            let compressedSize = le32(data, cursor + 20)
-            let uncompressedSize = le32(data, cursor + 24)
-            let nameLen = Int(le16(data, cursor + 28))
-            let extraLen = Int(le16(data, cursor + 30))
-            let commentLen = Int(le16(data, cursor + 32))
-            let localOffset = le32(data, cursor + 42)
-            let name = String(bytes: data[(cursor + 46)..<(cursor + 46 + nameLen)], encoding: .utf8) ?? ""
-            entries[name] = ZipEntry(
-                compressedSize: compressedSize,
-                uncompressedSize: uncompressedSize,
-                method: method,
-                localHeaderOffset: localOffset
-            )
-            cursor += 46 + nameLen + extraLen + commentLen
-        }
-        return entries
-    }
-
-    /// 读取单个条目的内容（解压）
-    private func readEntry(_ data: Data, entry: ZipEntry) throws -> String {
-        let localOffset = Int(entry.localHeaderOffset)
-        guard localOffset + 30 <= data.count,
-              data[localOffset] == 0x50, data[localOffset+1] == 0x4B,
-              data[localOffset+2] == 0x03, data[localOffset+3] == 0x04 else {
-            throw EPUBError.extractionFailed("本地文件头损坏")
-        }
-        let nameLen = Int(le16(data, localOffset + 26))
-        let extraLen = Int(le16(data, localOffset + 28))
-        let dataStart = localOffset + 30 + nameLen + extraLen
-        let end = min(dataStart + Int(entry.compressedSize), data.count)
-        guard dataStart <= end else { throw EPUBError.extractionFailed("条目数据越界") }
-        let raw = data[dataStart..<end]
-
-        let decompressed: Data
-        switch entry.method {
-        case 0:  // stored
-            decompressed = Data(raw)
-        case 8:  // deflate
-            decompressed = try inflateRaw(Data(raw))
-        default:
-            throw EPUBError.unsupportedCompression
-        }
-        return String(data: decompressed, encoding: .utf8) ?? ""
-    }
-
-    /// raw deflate → 包装 zlib 头后用系统 zlib 解压
-    private func inflateRaw(_ raw: Data) throws -> Data {
-        let candidates: [Data] = [
-            Data([0x78, 0x9c]) + raw,  // 默认压缩
-            Data([0x78, 0x01]) + raw,  // 无/低压缩
-            Data([0x78, 0xda]) + raw,  // 最佳压缩
-        ]
-        for candidate in candidates {
-            if let result = try? decompressZlib(candidate), !result.isEmpty {
-                return result
-            }
-        }
-        throw EPUBError.unsupportedCompression
-    }
-
-    /// 使用 zlib C API 解压（输入需带 zlib 头），输出缓冲区按需倍增
-    private func decompressZlib(_ data: Data) throws -> Data {
-        var zstream = z_stream()
-        defer { inflateEnd(&zstream) }
-
-        var out = Data()
-        var capacity = max(data.count * 10, 4096)
-        var produced = 0
-        var complete = false
-
-        try data.withUnsafeBytes { inBytes in
-            guard let inBase = inBytes.bindMemory(to: UInt8.self).baseAddress else {
-                throw EPUBError.unsupportedCompression
-            }
-            zstream.next_in = UnsafeMutablePointer<UInt8>(mutating: inBase)
-            zstream.avail_in = uInt(data.count)
-
-            // inflateInit2 是 C 宏，Swift 不可见，需调用底层 inflateInit2_
-            // 15 + 32：自动识别 zlib/gzip 头
-            let version = strdup("1.3")
-            defer { free(version) }
-            guard inflateInit2_(&zstream, 15 + 32, version,
-                                Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
-                throw EPUBError.unsupportedCompression
-            }
-
-            while !complete {
-                var chunk = Data(count: capacity)
-                let before = produced
-                try chunk.withUnsafeMutableBytes { outBytes in
-                    guard let outBase = outBytes.bindMemory(to: UInt8.self).baseAddress else {
-                        throw EPUBError.unsupportedCompression
-                    }
-                    zstream.next_out = UnsafeMutablePointer<UInt8>(mutating: outBase)
-                    zstream.avail_out = uInt(capacity)
-                    let result = inflate(&zstream, Z_NO_FLUSH)
-                    produced = Int(zstream.total_out)
-                    if result == Z_STREAM_END {
-                        complete = true
-                    } else if result != Z_OK {
-                        throw EPUBError.unsupportedCompression
-                    }
-                }
-                out.append(chunk.prefix(produced - before))
-                if !complete {
-                    // 输入耗尽且无新产出 → 数据不完整
-                    if zstream.avail_in == 0 && produced == before {
-                        throw EPUBError.unsupportedCompression
-                    }
-                    capacity *= 2
-                }
-            }
-        }
-
-        guard produced > 0 else { throw EPUBError.unsupportedCompression }
-        return out
-    }
-
-    // MARK: - 小端读取
-
-    private func le16(_ d: Data, _ o: Int) -> UInt16 {
-        UInt16(d[o]) | (UInt16(d[o + 1]) << 8)
-    }
-
-    private func le32(_ d: Data, _ o: Int) -> UInt32 {
-        UInt32(d[o]) | (UInt32(d[o + 1]) << 8) | (UInt32(d[o + 2]) << 16) | (UInt32(d[o + 3]) << 24)
     }
 
     // MARK: - container.xml / OPF 解析

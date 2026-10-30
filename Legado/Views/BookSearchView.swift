@@ -315,10 +315,13 @@ struct BookSearchView: View {
         }
     }
 
-    /// 随时停止：取消任务并复位状态
+    /// 随时停止：取消任务 + 取消在途网络与已入队 Operation，实现「点停止马上停」
     private func stopSearch() {
         searchTask?.cancel()
         searchTask = nil
+        // 立即终止搜索会话：cancelAllOperations 让未开始的源不再执行，
+        // cancelActiveRequests 让在途网络请求立即抛错收尾，无需等 20s 超时。
+        SearchCoordinator.stopCurrent()
         isSearching = false
         progressSink.text = nil
     }

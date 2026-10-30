@@ -17,7 +17,7 @@ struct AddBookByURLView: View {
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 14) {
-                Text("粘贴远程书籍链接（TXT / EPUB），应用将下载并导入书架。")
+                Text("粘贴远程书籍链接（TXT / EPUB / PDF / DOCX / MOBI / AZW3），应用将下载并导入书架。.doc 暂不支持。")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal)
