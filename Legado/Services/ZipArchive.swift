@@ -96,8 +96,8 @@ struct ZipArchive {
               data[localOffset+2] == 0x03, data[localOffset+3] == 0x04 else {
             throw ZipArchiveError.readFailed("本地文件头损坏：\(entry.name)")
         }
-        let nameLen = Int(le16(data, localOffset + 26))
-        let extraLen = Int(le16(data, localOffset + 28))
+        let nameLen = Int(ZipArchive.le16(data, localOffset + 26))
+        let extraLen = Int(ZipArchive.le32(data, localOffset + 28))
         let dataStart = localOffset + 30 + nameLen + extraLen
         let end = min(dataStart + Int(entry.compressedSize), data.count)
         guard dataStart <= end else { throw ZipArchiveError.readFailed("条目数据越界：\(entry.name)") }
