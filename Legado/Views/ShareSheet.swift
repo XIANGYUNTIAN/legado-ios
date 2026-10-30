@@ -11,7 +11,7 @@ struct ShareSheet: UIViewControllerRepresentable {
         // iPad 上 UIActivityViewController 必须给定 popover 来源，否则会崩溃（白屏）。
         if let popover = controller.popoverPresentationController {
             if let scene = UIApplication.shared.connectedScenes
-                .first(where: { $0.activationState == .foreground }) as? UIWindowScene,
+                .first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
                let window = scene.windows.first(where: { $0.isKeyWindow }) {
                 popover.sourceView = window
                 popover.sourceRect = CGRect(x: window.bounds.midX, y: window.bounds.midY, width: 0, height: 0)
