@@ -142,7 +142,11 @@ struct LocalBookReader {
         let count = doc.pageCount
         for i in 0..<count {
             guard let page = doc.page(at: i) else { continue }
-            let text = page.string ?? ""
+            // 优先用 page.string；为空时回退 attributedString（部分 PDF 用富文本编码正文）。
+            var text = page.string ?? ""
+            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                text = page.attributedString?.string ?? ""
+            }
             let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
             chapters.append(ReaderChapter(
                 title: "第 \(i + 1) 页",

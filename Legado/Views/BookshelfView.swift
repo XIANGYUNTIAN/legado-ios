@@ -1,37 +1,43 @@
 import SwiftUI
+import Foundation
 import UniformTypeIdentifiers
 
 struct BookshelfView: View {
     @EnvironmentObject private var bookStore: BookStore
 
+    // 阅读器呈现
+    @State private var selectedBook: Book? = nil
+    @State private var showReader = false
+
+    // 搜索 / URL 添加
     @State private var showURLSheet = false
     @State private var showSearch = false
+
+    // 提示
     @State private var message: String?
     @State private var messageIsError = false
     @State private var showMsg = false
 
-    // 批量选择模式
+    // 批量选择（导出 / 删除）
     @State private var isSelecting = false
     @State private var selection = Set<String>()   // 存 book.id
     @State private var showDeleteConfirm = false
+
     // TXT 导出
     @State private var exportURL: URL? = nil
     @State private var showExport = false
 
+    // 行内详情展开
+    @State private var expandedIDs: Set<String> = []
+
     var body: some View {
         List {
             ForEach(bookStore.books) { book in
-                if isSelecting {
-                    selectableRow(book)
-                } else {
-                    NavigationLink {
-                        BookDetailView(book: book)
-                    } label: {
-                        bookRow(book)
-                    }
-                }
+                bookRow(book)
             }
-            .onDelete(perform: bookStore.delete)
+            .onDelete { offsets in
+                bookStore.delete(at: offsets)
+            }
         }
         .navigationTitle("书架（\(bookStore.books.count)）")
         .toolbar {
@@ -39,73 +45,87 @@ struct BookshelfView: View {
                 if isSelecting {
                     Button("取消") { exitSelecting() }
                 } else {
-                    // 进入批量选择模式：此前只有 EditButton（系统单删），
-                    // 导致 isSelecting 永远为 false、批量勾选/全选/一键删 UI 完全无法进入。
-                    Button("选择") {
-                        selection = []
-                        isSelecting = true
-                    }
+                    EmptyView()
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
-                HStack(spacing: 16) {
+                HStack(spacing: 18) {
                     if isSelecting {
                         Button {
                             toggleSelectAll()
                         } label: {
                             Text(selection.count == bookStore.books.count ? "取消全选" : "全选")
                         }
-                        Button {
-                            exportSelected()
-                        } label: {
-                            Text("导出（\(selection.count)）")
-                        }
-                        .disabled(selection.isEmpty)
-                        Button {
-                            showDeleteConfirm = true
-                        } label: {
-                            Text("删除（\(selection.count)）")
-                                .foregroundStyle(.red)
-                        }
-                        .disabled(selection.isEmpty)
                     } else {
                         Button {
                             showSearch = true
                         } label: {
                             Image(systemName: "magnifyingglass")
                         }
-                    }
-                }
-            }
-            ToolbarItem(placement: .primaryAction) {
-                if isSelecting {
-                    EmptyView()
-                } else {
-                    Menu {
-                        Button {
-                            // 顶层 VC 直接呈现文档选择器：绕开 SwiftUI 呈现栈
-                            // （.fileImporter 由 Menu 触发时可能不呈现），且系统
-                            // asCopy 拷贝本地文件，无安全作用域/iCloud 依赖
-                            DocumentImporter.present(
-                                onPick: { url in handlePickedURL(url) },
-                                onCancel: { }
-                            )
+                        Menu {
+                            Button {
+                                DocumentImporter.present(
+                                    onPick: { url in handlePickedURL(url) },
+                                    onCancel: { }
+                                )
+                            } label: {
+                                Label("本地导入书籍（TXT/EPUB/PDF/DOCX/MOBI/AZW3）", systemImage: "square.and.arrow.down.on.square")
+                            }
+                            Button {
+                                showURLSheet = true
+                            } label: {
+                                Label("URL 添加书籍", systemImage: "link")
+                            }
                         } label: {
-                            Label("本地导入书籍（TXT/EPUB/PDF/DOCX/MOBI/AZW3）", systemImage: "square.and.arrow.down.on.square")
+                            Image(systemName: "plus")
                         }
                         Button {
-                            showURLSheet = true
+                            tapExport()
                         } label: {
-                            Label("URL 添加书籍", systemImage: "link")
+                            Image(systemName: "square.and.arrow.up")
                         }
-                    } label: {
-                        Image(systemName: "plus")
+                        Button {
+                            tapDelete()
+                        } label: {
+                            Image(systemName: "trash")
+                                .foregroundStyle(.red)
+                        }
                     }
                 }
             }
         }
-        // 本地导入已改为 DocumentImporter.present（顶层 VC + asCopy），
-        // 不再依赖 SwiftUI .fileImporter 与安全作用域 URL。
+        // 行内选择态底部条
+        .safeAreaInset(edge: .bottom) {
+            if isSelecting {
+                HStack {
+                    Text("已选 \(selection.count) 本")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        tapExport()
+                    } label: {
+                        Text("导出（\(selection.count)）")
+                    }
+                    .disabled(selection.isEmpty)
+                    Button {
+                        tapDelete()
+                    } label: {
+                        Text("删除（\(selection.count)）")
+                            .foregroundStyle(.red)
+                    }
+                    .disabled(selection.isEmpty)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(.regularMaterial)
+            }
+        }
+        .navigationDestination(isPresented: $showReader) {
+            if let book = selectedBook {
+                BookReaderView(book: book)
+            }
+        }
         .sheet(isPresented: $showURLSheet) {
             AddBookByURLView { msg, isErr in
                 message = msg
@@ -150,37 +170,97 @@ struct BookshelfView: View {
     // MARK: - 行视图
 
     private func bookRow(_ book: Book) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: book.format == .txt ? "doc.text.fill" : "book.closed.fill")
-                .foregroundStyle(.tint)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(book.title)
-                    .font(.body)
-                    .foregroundStyle(.primary)
-                Text(book.author)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                if isSelecting {
+                    Image(systemName: selection.contains(book.id) ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(selection.contains(book.id) ? Color.accentColor : Color.secondary)
+                        .font(.title3)
+                }
+                Image(systemName: book.format == .txt ? "doc.text.fill" : "book.closed.fill")
+                    .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(book.displayTitle)
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                    Text(book.author)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(book.format.rawValue.uppercased())
+                    .font(.caption2)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(.quaternary)
+                    .clipShape(Capsule())
+                // 展开/收起详情
+                Button {
+                    if expandedIDs.contains(book.id) { expandedIDs.remove(book.id) }
+                    else { expandedIDs.insert(book.id) }
+                } label: {
+                    Image(systemName: expandedIDs.contains(book.id) ? "chevron.up" : "chevron.down")
+                        .foregroundStyle(.secondary)
+                }
             }
-            Spacer()
-            Text(book.format.rawValue.uppercased())
-                .font(.caption2)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(.quaternary)
-                .clipShape(Capsule())
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if isSelecting {
+                    toggle(book)
+                } else {
+                    selectedBook = book
+                    showReader = true
+                }
+            }
+            // 行内展开的详情（点击行右侧箭头展开/收起，避免进入二级详情页）
+            if expandedIDs.contains(book.id) {
+                bookDetails(book)
+            }
         }
     }
 
-    private func selectableRow(_ book: Book) -> some View {
-        let selected = selection.contains(book.id)
-        return HStack(spacing: 12) {
-            Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                .foregroundStyle(selected ? Color.accentColor : Color.secondary)
-                .font(.title3)
-            bookRow(book)
+    /// 行内文件详情（点击行右侧箭头展开/收起，避免进入二级详情页）
+    private func bookDetails(_ book: Book) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Divider()
+            if let size = book.fileSize {
+                HStack {
+                    Text("大小").foregroundStyle(.secondary)
+                    Text(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
+                }
+                .font(.caption)
+            }
+            if let p = book.fileRelativePath {
+                HStack(alignment: .top) {
+                    Text("本地文件").foregroundStyle(.secondary)
+                    Text(p).textSelection(.enabled)
+                }
+                .font(.caption)
+            }
+            if let u = book.remoteURL {
+                HStack(alignment: .top) {
+                    Text("来源链接").foregroundStyle(.secondary)
+                    Text(u).textSelection(.enabled)
+                }
+                .font(.caption)
+            }
+            if book.supportsRuleReading {
+                Text("阅读方式：书源规则阅读")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            // 单本导出 TXT（有本地文件且非 .doc 时可导）
+            if bookStore.fileURL(for: book) != nil && book.format != .doc {
+                Button {
+                    exportSingle(book)
+                } label: {
+                    Label("导出 TXT", systemImage: "square.and.arrow.up")
+                        .font(.caption)
+                }
+            }
         }
-        .contentShape(Rectangle())
-        .onTapGesture { toggle(book) }
+        .padding(.leading, 34)
+        .padding(.vertical, 6)
     }
 
     // MARK: - 选择逻辑
@@ -202,6 +282,38 @@ struct BookshelfView: View {
     private func exitSelecting() {
         isSelecting = false
         selection = []
+    }
+
+    /// 顶部「导出」按钮：未在选择态→进入选择态；已在选择态→执行导出
+    private func tapExport() {
+        if isSelecting {
+            exportSelected()
+        } else {
+            guard !bookStore.books.isEmpty else {
+                showMessage("书架是空的", false)
+                return
+            }
+            selection = []
+            isSelecting = true
+        }
+    }
+
+    /// 顶部「删除」按钮：未在选择态→进入选择态；已在选择态→执行删除
+    private func tapDelete() {
+        if isSelecting {
+            guard !selection.isEmpty else {
+                showMessage("请先选择要删除的书籍", true)
+                return
+            }
+            showDeleteConfirm = true
+        } else {
+            guard !bookStore.books.isEmpty else {
+                showMessage("书架是空的", false)
+                return
+            }
+            selection = []
+            isSelecting = true
+        }
     }
 
     // MARK: - 导出 TXT
@@ -226,6 +338,26 @@ struct BookshelfView: View {
                     ? (localItems.first?.0.title ?? "book")
                     : "书架导出\(localItems.count)本"
                 let tmp = BookExporter.writeTxtFile(named: fileName, text: text)
+                await MainActor.run {
+                    exportURL = tmp
+                    showExport = true
+                }
+            } catch {
+                await MainActor.run { showMessage("导出失败：\(error.localizedDescription)", true) }
+            }
+        }
+    }
+
+    /// 单本导出（行内详情里的按钮）
+    private func exportSingle(_ book: Book) {
+        guard let url = bookStore.fileURL(for: book) else {
+            showMessage("该书没有本地文件，无法导出", true)
+            return
+        }
+        Task {
+            do {
+                let text = try await BookExporter.exportText(book: book, fileURL: url)
+                let tmp = BookExporter.writeTxtFile(named: book.title, text: text)
                 await MainActor.run {
                     exportURL = tmp
                     showExport = true
