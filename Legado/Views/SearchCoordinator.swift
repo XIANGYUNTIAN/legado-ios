@@ -545,12 +545,12 @@ enum SearchCoordinator {
     /// 相关性过滤：并发覆盖率恢复（Fix-C）后命中量暴涨，需按模式剔除无关书。
     /// - 精确模式：书名或作者须包含关键词（覆盖《诛仙（全本）》/《诛仙Ⅰ》等变体）；
     ///   书名与作者皆空、无法判断相关性时，仅保留「有详情链接」者以防误删。
-    /// - 模糊模式：书名 / 作者 / 简介任一包含关键词即保留（宽匹配，对应原模糊语义）。
+    /// - 模糊模式：legado 官方不做关键词二次过滤，全部保留（仅空条目已在上方丢弃）；
+    ///   用户原话「模糊可以、精确需限定」，故仅在精确模式做相关性收敛。
     /// 始终丢弃「书名与详情链接皆为空」的无效条目。
     private static func shouldKeep(_ book: ExploredBook, keyword: String, mode: SearchMode) -> Bool {
         let name = book.name.trimmingCharacters(in: .whitespacesAndNewlines)
         let author = book.author.trimmingCharacters(in: .whitespacesAndNewlines)
-        let intro = book.intro.trimmingCharacters(in: .whitespacesAndNewlines)
         let url = book.bookUrl.trimmingCharacters(in: .whitespacesAndNewlines)
         let k = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         // 书名与链接皆空 → 无效条目，始终丢弃
@@ -564,8 +564,8 @@ enum SearchCoordinator {
             if nameHit || authorHit { return true }
             return name.isEmpty && author.isEmpty && !url.isEmpty
         }
-        // 模糊：书名 / 作者 / 简介任一包含关键词
-        return nameHit || authorHit || intro.localizedCaseInsensitiveContains(k)
+        // 模糊：legado 官方不做二次过滤，全部保留（仅空条目已在上方丢弃）
+        return true
     }
 
     /// 关键词与模式的相关度评分（0~4）：仅用于排序，不用于丢弃（过滤由 `shouldKeep` 负责）。
