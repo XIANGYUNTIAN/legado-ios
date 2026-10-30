@@ -1,32 +1,5 @@
 import Foundation
 
-/// 并发搜索的简单信号量（actor 保证线程安全）。
-/// 限流同时请求数，避免弱网下连接池耗尽或触发站点反爬。
-private actor SearchSemaphore {
-    private var available: Int
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    init(value: Int) { available = max(1, value) }
-
-    func wait() async {
-        if available > 0 {
-            available -= 1
-            return
-        }
-        await withCheckedContinuation { cont in
-            waiters.append(cont)
-        }
-    }
-
-    func release() {
-        if let cont = waiters.first {
-            waiters.removeFirst()
-            cont.resume()
-        } else {
-            available += 1
-        }
-    }
-}
 
 /// searchUrl 解析结果：`url,{"method":...,"body":...,"headers":...,"charset":...}`。
 struct ParsedSearchRequest {
@@ -84,7 +57,7 @@ enum SearchCoordinator {
         // 降级为直接抓取，不弹登录页打断用户；退出时恢复，保留手动 Cookie 验证流
         JsJavaBridge.suppressWebViewUI = true
         defer { JsJavaBridge.suppressWebViewUI = false }
-        var outcome = SearchOutcome()
+        let outcome = SearchOutcome()
         let total = sources.count
         let startTime = Date()
         var seen = Set<String>()
@@ -94,111 +67,96 @@ enum SearchCoordinator {
         var stopEnqueue = false
         let lock = NSLock()
 
-        await withTaskGroup(of: [(ExploredBook, String?)].self) { group in
-            // 并发档位：JS 桥的网络方法会阻塞协作线程（信号量等待），
-            // 并发过高会耗尽协作线程池导致整体挂起——12 路是速度与稳定的平衡点
-            let semaphore = SearchSemaphore(value: 12)
+        // Fix-C：专用工作队列，把整段单源搜索（含同步 JS 求值与 JS 桥 semaphore.wait）
+        // 挪到 OperationQueue 自备线程，彻底脱离 Swift 协作线程池，
+        // 消除线程池饿死导致的覆盖率截断（此前 12 路并发 + 协作池阻塞 → 720 源仅个位数成功）。
+        let worker = OperationQueue()
+        worker.maxConcurrentOperationCount = 32
+        worker.qualityOfService = .userInitiated
+        worker.name = "legado.search.worker"
 
-            for source in sources {
-                if Task.isCancelled { break }
-                // 命中达标 / 全局预算到期：不再入队新源（在途请求自然收尾，尾部有界）。
-                // 600s 预算被失败源耗满是 0 命中的放大器：命中 hitTarget 本即停，
-                // 让结果在 1-3 分钟内落地，而非 10 分钟后才可能出结果。
-                lock.lock(); let shouldStop = stopEnqueue; lock.unlock()
-                if shouldStop { break }
-                if Date().timeIntervalSince(startTime) > globalBudget { break }
-                await semaphore.wait()
-                enqueued += 1
-                // 入队即回传：开始阶段首批并发源还在等待响应时，
-                // 用「已入队」计数给用户即时反馈，消除「长时间无进展」的假死观感
-                onProgress?("已入队 \(enqueued)/\(total) 个书源 · 等待响应中…")
+        // doneSem 用于等待全部已入队 Operation 完成（每个 Operation 结束前必定 signal 一次，不会死锁）
+        let doneSem = DispatchSemaphore(value: 0)
 
-                group.addTask {
-                    // 完成即聚合 + 流式上屏：把结果收集放进每个任务的完成回调，
-                    // 而非依赖末尾的 for-await 消费循环。此前 onStream 挂在 for-await，
-                    // 而 for-await 要等入队循环（12 并发满时 await 阻塞）全部跑完才开始，
-                    // 导致整个入队阶段（数百秒）onStream 一次未触发——即"长时间停在已入队"。
-                    let resultPair: [(ExploredBook, String?)]
-                    do {
-                        let (books, probeURL) = try await performSingleSourceSearch(
-                            source: source, keyword: keyword, mode: mode, timeout: searchTimeout
-                        )
-                        resultPair = books.map { ($0, source.bookSourceName.isEmpty ? source.bookSourceUrl : source.bookSourceName) }
-                        // 诊断探针：源正常返回但 0 命中 → 记录最终搜索 URL，
-                        // 供用户用 Safari 人工验证（区分关键词未生效 / 源无此书 / 规则未命中）
-                        if books.isEmpty {
-                            lock.lock()
-                            outcome.probeURLs.append("\(sourceLabel(source)): \(probeURL)")
-                            lock.unlock()
-                        }
-                    } catch {
-                        guard !Task.isCancelled else {
-                            await semaphore.release()
-                            return []
-                        }
-                        let msg: String
-                        if let ne = error as? NetworkError, case .cancelled = ne {
-                            await semaphore.release()
-                            return []
-                        } else {
-                            msg = error.localizedDescription
-                        }
-                        resultPair = [(ExploredBook(name: "", author: "", intro: "", bookUrl: "", coverUrl: "", lastChapter: "", sourceId: source.bookSourceUrl, sourceName: sourceLabel(source)), msg)]
+        for source in sources {
+            if Task.isCancelled { break }
+            // 命中达标 / 全局预算到期：不再入队新源（在途请求自然收尾，尾部有界）。
+            lock.lock(); let shouldStop = stopEnqueue; lock.unlock()
+            if shouldStop { break }
+            if Date().timeIntervalSince(startTime) > globalBudget { break }
+            enqueued += 1
+            // 入队即回传：用「已入队」计数给用户即时反馈，消除「长时间无进展」的假死观感
+            onProgress?("已入队 \(enqueued)/\(total) 个书源 · 等待响应中…")
+
+            let op = BlockOperation {
+                defer { doneSem.signal() }
+                // 把 async 单源搜索桥接为同步，阻塞的是 Operation 线程（plentiful），
+                // 不占用稀缺的协作线程池；协作池仅承载内层网络续体，不再被饿死。
+                let resultPair: [(ExploredBook, String?)]
+                do {
+                    let (books, probeURL) = try Self.runSourceSync(
+                        source: source, keyword: keyword, mode: mode, timeout: searchTimeout
+                    )
+                    resultPair = books.map { ($0, source.bookSourceName.isEmpty ? source.bookSourceUrl : source.bookSourceName) }
+                    // 诊断探针：源正常返回但 0 命中 → 记录最终搜索 URL
+                    if books.isEmpty {
+                        lock.lock()
+                        outcome.probeURLs.append("\(sourceLabel(source)): \(probeURL)")
+                        lock.unlock()
                     }
-                    // 聚合进 outcome（加锁，多任务并发写）
-                    lock.lock()
-                    for item in resultPair {
-                        if let msg = item.1 {
-                            outcome.errors.append(SourceSearchError(name: item.0.sourceName, message: msg))
-                        } else {
-                            let book = item.0
-                            // 去重键优先用详情链接（每本书唯一）；书名为空时仍按书名|作者去重，
-                            // 避免空书名把多本不同书误并为一本。
-                            let key = book.bookUrl.isEmpty
-                                ? "\(book.name.lowercased())|\(book.author.lowercased())"
-                                : book.bookUrl.lowercased()
-                            if seen.contains(key) { continue }
-                            seen.insert(key)
-                            outcome.results.append(book)
-                        }
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    let msg: String
+                    if let ne = error as? NetworkError, case .cancelled = ne {
+                        return
+                    } else {
+                        msg = error.localizedDescription
                     }
-                    completed += 1
-                    let elapsed = Date().timeIntervalSince(startTime)
-                    let curResults = outcome.results
-                    let curErrors = outcome.errors
-                    let curCompleted = completed
-                    lock.unlock()
-                    // 信号量释放：直接在当前任务上下文释放，避免 Task.detached 抢占协作池线程
-                    // 导致主循环 await semaphore.wait() 收不到释放信号、吞吐雪崩（原 NetworkService 注释自承的饿死死穴）。
-                    await semaphore.release()
-                    // 命中达标：通知入队循环停止拉新源（任务回调内检测，避免入队侧轮询）
-                    if hitTarget > 0, curResults.count >= hitTarget {
-                        lock.lock(); stopEnqueue = true; lock.unlock()
-                    }
-                    // 立即推进度 + 流式命中，UI 边搜边出
-                    onProgress?("已完成 \(curCompleted)/\(total) 个书源 · \(String(format: "%.0fs", elapsed)) · 找到 \(curResults.count) 本")
-                    onStream?(curResults, curErrors)
-                    return []
+                    resultPair = [(ExploredBook(name: "", author: "", intro: "", bookUrl: "", coverUrl: "", lastChapter: "", sourceId: source.bookSourceUrl, sourceName: sourceLabel(source)), msg)]
                 }
+                // 聚合进 outcome（加锁，多任务并发写）
+                lock.lock()
+                for item in resultPair {
+                    if let msg = item.1 {
+                        outcome.errors.append(SourceSearchError(name: item.0.sourceName, message: msg))
+                    } else {
+                        let book = item.0
+                        // 去重键优先用详情链接（每本书唯一）；书名为空时仍按书名|作者去重
+                        let key = book.bookUrl.isEmpty
+                            ? "\(book.name.lowercased())|\(book.author.lowercased())"
+                            : book.bookUrl.lowercased()
+                        if seen.contains(key) { continue }
+                        seen.insert(key)
+                        outcome.results.append(book)
+                    }
+                }
+                completed += 1
+                let elapsed = Date().timeIntervalSince(startTime)
+                let curResults = outcome.results
+                let curErrors = outcome.errors
+                let curCompleted = completed
+                lock.unlock()
+                // 命中达标：通知入队循环停止拉新源
+                if hitTarget > 0, curResults.count >= hitTarget {
+                    lock.lock(); stopEnqueue = true; lock.unlock()
+                }
+                // 立即推进度 + 流式命中，UI 边搜边出
+                onProgress?("已完成 \(curCompleted)/\(total) 个书源 · \(String(format: "%.0fs", elapsed)) · 找到 \(curResults.count) 本")
+                onStream?(curResults, curErrors)
             }
-
-            for await _ in group {
-                // 结果已在每个任务完成回调里聚合 + 流式上屏，此处仅等待全部任务结束
-            }
+            worker.addOperation(op)
         }
+
+        // 等待全部已入队 Operation 完成（每个 Op 结束前 defer signal 一次，不会死锁）
+        for _ in 0..<enqueued { doneSem.wait() }
 
         let timedOut = completed < total
         let failed = outcome.errors.count
         if outcome.results.isEmpty && failed == 0 {
             outcome.errorMessage = "全部书源均未搜索到「\(keyword)」"
         }
-        // 始终暴露命中/失败分布，避免超时分支吞掉诊断信息。此前"完成 X/Y"无法区分
-        // 网络失败与规则解析失败，是反复修不好的观测盲区；失败样例直接展示原因，
-        // 便于定位是 URL 构造 / 网络 / 规则解析哪一环（对应 P1-6 错误可见性）。
         var summary = "📊 命中 \(outcome.results.count) 本 · 失败 \(failed) 个"
         if failed > 0 {
-            // 失败分类计数：一眼区分「网络/死源」与「规则解析 bug」——前者需查网络，
-            // 后者（bookList解析为空 / name提取全空 / JS规则失败）才是引擎要修的地方。
             var buckets: [String: Int] = [:]
             for err in outcome.errors {
                 buckets[categorizeError(err.message), default: 0] += 1
@@ -207,9 +165,6 @@ enum SearchCoordinator {
                 .map { "\($0.key)×\($0.value)" }
                 .joined(separator: "  ")
             summary += "\n失败分布：\(bucketLine)"
-            // 每类取 1 条代表样例（按类计数降序，最多 6 类），
-            // 此前 prefix(3) 恰好全是 403/超时类，"其他"类原始错误从未露面，
-            // 无法坐实 385 条"其他"到底是死域名/区域封锁还是协议差异。
             var sampled: [String] = []
             for (cat, _) in buckets.sorted(by: { $0.value > $1.value }).prefix(6) {
                 if let err = outcome.errors.first(where: { categorizeError($0.message) == cat }) {
@@ -224,13 +179,40 @@ enum SearchCoordinator {
                 : "⏱ 已达 \(Int(globalBudget))s 全局预算，提前结束（完成 \(completed)/\(total)）"
             summary = reason + "\n" + summary
         }
-        // 探针 URL 段：正常返回但 0 命中的源，列出最终搜索 URL（Safari 可直接打开验证）
         if !outcome.probeURLs.isEmpty {
             let probeLine = outcome.probeURLs.prefix(10).map { "· \($0)" }.joined(separator: "\n")
             summary += "\n⚠️ \(outcome.probeURLs.count) 个源正常返回但 0 命中（可用 Safari 打开下列 URL 验证搜索是否生效）：\n\(probeLine)"
         }
         outcome.summary = summary
         return outcome
+    }
+
+    /// async→sync 桥：把单源搜索放到独立 Task 执行，当前 Operation 线程阻塞等待结果。
+    /// 阻塞发生在 OperationQueue 自备线程（plentiful），不占用协作线程池，避免饿死。
+    private static func runSourceSync(source: BookSource,
+                                      keyword: String,
+                                      mode: SearchMode,
+                                      timeout: TimeInterval) -> Result<([ExploredBook], String), Error> {
+        let box = SearchSyncBox()
+        let sem = DispatchSemaphore(value: 0)
+        Task.detached {
+            defer { sem.signal() }
+            do {
+                let r = try await Self.performSingleSourceSearch(source: source, keyword: keyword, mode: mode, timeout: timeout)
+                box.store(.success(r))
+            } catch {
+                box.store(.failure(error))
+            }
+        }
+        sem.wait()
+        return box.take() ?? .failure(NSError(domain: "legado.search", code: -1, userInfo: [NSLocalizedDescriptionKey: "未知错误"]))
+    }
+
+    private class SearchSyncBox: @unchecked Sendable {
+        private var stored: Result<([ExploredBook], String), Error>?
+        private let l = NSLock()
+        func store(_ v: Result<([ExploredBook], String), Error>) { l.lock(); stored = v; l.unlock() }
+        func take() -> Result<([ExploredBook], String), Error>? { l.lock(); let v = stored; l.unlock(); return v }
     }
 
     /// 失败原因归类（按关键词粗分），用于摘要里的分桶计数。
