@@ -57,15 +57,13 @@ enum SearchCoordinator {
         // 降级为直接抓取，不弹登录页打断用户；退出时恢复，保留手动 Cookie 验证流
         JsJavaBridge.suppressWebViewUI = true
         defer { JsJavaBridge.suppressWebViewUI = false }
-        let outcome = SearchOutcome()
+        var outcome = SearchOutcome()
         let total = sources.count
         let startTime = Date()
-        var seen = Set<String>()
-        var completed = 0
-        var noMatchCount = 0
+        // 共享可变聚合容器（引用类型，供 OperationQueue 自备线程并发写入；
+        // 不能让 BlockOperation 闭包直接改外部的 struct outcome——struct 会被值捕获，写入失效）
+        let agg = SearchAgg()
         var enqueued = 0
-        var stopEnqueue = false
-        let lock = NSLock()
 
         // Fix-C：专用工作队列，把整段单源搜索（含同步 JS 求值与 JS 桥 semaphore.wait）
         // 挪到 OperationQueue 自备线程，彻底脱离 Swift 协作线程池，
@@ -81,7 +79,7 @@ enum SearchCoordinator {
         for source in sources {
             if Task.isCancelled { break }
             // 命中达标 / 全局预算到期：不再入队新源（在途请求自然收尾，尾部有界）。
-            lock.lock(); let shouldStop = stopEnqueue; lock.unlock()
+            agg.lock.lock(); let shouldStop = agg.stopEnqueue; agg.lock.unlock()
             if shouldStop { break }
             if Date().timeIntervalSince(startTime) > globalBudget { break }
             enqueued += 1
@@ -92,17 +90,17 @@ enum SearchCoordinator {
                 defer { doneSem.signal() }
                 // 把 async 单源搜索桥接为同步，阻塞的是 Operation 线程（plentiful），
                 // 不占用稀缺的协作线程池；协作池仅承载内层网络续体，不再被饿死。
-                let resultPair: [(ExploredBook, String?)]
+                var resultPair: [(ExploredBook, String?)] = []
                 do {
                     let (books, probeURL) = try Self.runSourceSync(
                         source: source, keyword: keyword, mode: mode, timeout: searchTimeout
                     )
-                    resultPair = books.map { ($0, source.bookSourceName.isEmpty ? source.bookSourceUrl : source.bookSourceName) }
-                    // 诊断探针：源正常返回但 0 命中 → 记录最终搜索 URL
+                    // 正常：每项第二元素为 nil（非错误）；源正常返回但 0 命中 → 记录探针 URL
+                    resultPair = books.map { ($0, nil) }
                     if books.isEmpty {
-                        lock.lock()
-                        outcome.probeURLs.append("\(sourceLabel(source)): \(probeURL)")
-                        lock.unlock()
+                        agg.lock.lock()
+                        agg.probeURLs.append("\(sourceLabel(source)): \(probeURL)")
+                        agg.lock.unlock()
                     }
                 } catch {
                     guard !Task.isCancelled else { return }
@@ -114,31 +112,31 @@ enum SearchCoordinator {
                     }
                     resultPair = [(ExploredBook(name: "", author: "", intro: "", bookUrl: "", coverUrl: "", lastChapter: "", sourceId: source.bookSourceUrl, sourceName: sourceLabel(source)), msg)]
                 }
-                // 聚合进 outcome（加锁，多任务并发写）
-                lock.lock()
+                // 聚合进共享容器（引用类型 agg，加锁，多 Operation 并发写）
+                agg.lock.lock()
                 for item in resultPair {
                     if let msg = item.1 {
-                        outcome.errors.append(SourceSearchError(name: item.0.sourceName, message: msg))
+                        agg.errors.append(SourceSearchError(name: item.0.sourceName, message: msg))
                     } else {
                         let book = item.0
                         // 去重键优先用详情链接（每本书唯一）；书名为空时仍按书名|作者去重
                         let key = book.bookUrl.isEmpty
                             ? "\(book.name.lowercased())|\(book.author.lowercased())"
                             : book.bookUrl.lowercased()
-                        if seen.contains(key) { continue }
-                        seen.insert(key)
-                        outcome.results.append(book)
+                        if agg.seen.contains(key) { continue }
+                        agg.seen.insert(key)
+                        agg.results.append(book)
                     }
                 }
-                completed += 1
+                agg.completed += 1
                 let elapsed = Date().timeIntervalSince(startTime)
-                let curResults = outcome.results
-                let curErrors = outcome.errors
-                let curCompleted = completed
-                lock.unlock()
+                let curResults = agg.results
+                let curErrors = agg.errors
+                let curCompleted = agg.completed
+                agg.lock.unlock()
                 // 命中达标：通知入队循环停止拉新源
                 if hitTarget > 0, curResults.count >= hitTarget {
-                    lock.lock(); stopEnqueue = true; lock.unlock()
+                    agg.lock.lock(); agg.stopEnqueue = true; agg.lock.unlock()
                 }
                 // 立即推进度 + 流式命中，UI 边搜边出
                 onProgress?("已完成 \(curCompleted)/\(total) 个书源 · \(String(format: "%.0fs", elapsed)) · 找到 \(curResults.count) 本")
@@ -149,6 +147,12 @@ enum SearchCoordinator {
 
         // 等待全部已入队 Operation 完成（每个 Op 结束前 defer signal 一次，不会死锁）
         for _ in 0..<enqueued { doneSem.wait() }
+
+        // 收拢并发聚合结果（agg 为引用类型容器，run 主体此处一次性拷入 var outcome）
+        outcome.results = agg.results
+        outcome.errors = agg.errors
+        outcome.probeURLs = agg.probeURLs
+        let completed = agg.completed
 
         let timedOut = completed < total
         let failed = outcome.errors.count
@@ -187,32 +191,51 @@ enum SearchCoordinator {
         return outcome
     }
 
+    /// 并发聚合容器：引用类型，供 OperationQueue 自备线程安全地并发写入。
+    private class SearchAgg: @unchecked Sendable {
+        let lock = NSLock()
+        var results: [ExploredBook] = []
+        var errors: [SourceSearchError] = []
+        var probeURLs: [String] = []
+        var completed = 0
+        var stopEnqueue = false
+        var seen = Set<String>()
+    }
+
     /// async→sync 桥：把单源搜索放到独立 Task 执行，当前 Operation 线程阻塞等待结果。
     /// 阻塞发生在 OperationQueue 自备线程（plentiful），不占用协作线程池，避免饿死。
     private static func runSourceSync(source: BookSource,
                                       keyword: String,
                                       mode: SearchMode,
-                                      timeout: TimeInterval) -> Result<([ExploredBook], String), Error> {
+                                      timeout: TimeInterval) throws -> ([ExploredBook], String) {
         let box = SearchSyncBox()
         let sem = DispatchSemaphore(value: 0)
         Task.detached {
             defer { sem.signal() }
             do {
                 let r = try await Self.performSingleSourceSearch(source: source, keyword: keyword, mode: mode, timeout: timeout)
-                box.store(.success(r))
+                box.store(r)
             } catch {
-                box.store(.failure(error))
+                box.store(error)
             }
         }
         sem.wait()
-        return box.take() ?? .failure(NSError(domain: "legado.search", code: -1, userInfo: [NSLocalizedDescriptionKey: "未知错误"]))
+        return try box.take()
     }
 
     private class SearchSyncBox: @unchecked Sendable {
-        private var stored: Result<([ExploredBook], String), Error>?
+        private var stored: Result<([ExploredBook], String), any Error>?
         private let l = NSLock()
-        func store(_ v: Result<([ExploredBook], String), Error>) { l.lock(); stored = v; l.unlock() }
-        func take() -> Result<([ExploredBook], String), Error>? { l.lock(); let v = stored; l.unlock(); return v }
+        func store(_ v: ([ExploredBook], String)) { l.lock(); stored = .success(v); l.unlock() }
+        func store(_ e: any Error) { l.lock(); stored = .failure(e); l.unlock() }
+        func take() throws -> ([ExploredBook], String) {
+            l.lock(); let v = stored; l.unlock()
+            switch v {
+            case .success(let r): return r
+            case .failure(let e): throw e
+            case .none: throw NSError(domain: "legado.search", code: -1, userInfo: [NSLocalizedDescriptionKey: "未知错误"])
+            }
+        }
     }
 
     /// 失败原因归类（按关键词粗分），用于摘要里的分桶计数。
