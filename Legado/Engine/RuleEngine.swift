@@ -393,10 +393,20 @@ final class RuleEngine {
         rule.range(of: "\\$\\d{1,2}", options: .regularExpression) != nil
     }
 
-    /// 纯字面量判断：不含 CSS 语法字符时可作为模板字符串直出
+    /// 纯字面量判断：不含 CSS 语法字符、且不是已知抽取器关键字 / 纯属性名时，可作为模板字符串直出。
+    /// 修复：裸抽取器（如章节链接规则 "href"）此前被判为字面量原样返回，导致章节 URL 拼成
+    /// ".../href" 而 404；此处将已知抽取器关键字（text/html/href/src/title/alt/id/tag/class 等）
+    /// 与纯属性名形态路由回 CSS 路径，由 LegadoCssTranslator 识别为属性抽取器。
     private func isPlainLiteral(_ rule: String) -> Bool {
         let syntaxCharacters = CharacterSet(charactersIn: ".#@[]>:")
-        return rule.rangeOfCharacter(from: syntaxCharacters) == nil
+        if rule.rangeOfCharacter(from: syntaxCharacters) != nil { return false }
+        let lower = rule.lowercased()
+        // 已知抽取器关键字 → 属性/文本抽取，非字面量
+        if LegadoCssTranslator.table[lower] != nil { return false }
+        // 纯属性名形态（仅 ASCII 字母数字连字符，不含中文）→ 视为 attr(name)，非字面量
+        let attrAllowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+        if !rule.isEmpty, rule.rangeOfCharacter(from: attrAllowed.inverted) == nil { return false }
+        return true
     }
 
     // MARK: - CSS / XPath 模式（默认 CSS，legado 扩展语法经 LegadoCssTranslator 翻译）

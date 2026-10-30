@@ -542,14 +542,30 @@ enum SearchCoordinator {
     ///   《诛仙Ⅰ》等合法变体）；作者全等亦保留（按作者精确检索）。
     ///   以此剔除「开局签到诛仙神剑」这类关键词仅作书名片段的无关书
     ///   （书名既不等全、也不以前缀开头）。
-    /// - 模糊模式：书名 / 作者 / 简介包含关键词即保留（宽匹配，对应原模糊语义）。
-    // legado 官方搜索不做关键词书名二次过滤：搜索页解析出的书即视为搜索结果直接返回。
-    // 原 name.contains(keyword) 后处理会把大量合法结果（标题未含完整关键词、或书名提取为空）
-    // 丢弃，是「搜索命中恒为 0~2 本」的主因。现仅丢弃「书名与详情链接皆为空」的无效条目。
+    /// 相关性过滤：并发覆盖率恢复（Fix-C）后命中量暴涨，需按模式剔除无关书。
+    /// - 精确模式：书名或作者须包含关键词（覆盖《诛仙（全本）》/《诛仙Ⅰ》等变体）；
+    ///   书名与作者皆空、无法判断相关性时，仅保留「有详情链接」者以防误删。
+    /// - 模糊模式：书名 / 作者 / 简介任一包含关键词即保留（宽匹配，对应原模糊语义）。
+    /// 始终丢弃「书名与详情链接皆为空」的无效条目。
     private static func shouldKeep(_ book: ExploredBook, keyword: String, mode: SearchMode) -> Bool {
         let name = book.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let author = book.author.trimmingCharacters(in: .whitespacesAndNewlines)
+        let intro = book.intro.trimmingCharacters(in: .whitespacesAndNewlines)
         let url = book.bookUrl.trimmingCharacters(in: .whitespacesAndNewlines)
-        return !name.isEmpty || !url.isEmpty
+        let k = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 书名与链接皆空 → 无效条目，始终丢弃
+        guard !name.isEmpty || !url.isEmpty else { return false }
+        // 无关键词（理论上不会发生）→ 全部保留
+        if k.isEmpty { return true }
+        let nameHit = name.localizedCaseInsensitiveContains(k)
+        let authorHit = author.localizedCaseInsensitiveContains(k)
+        if mode == .precise {
+            // 精确：书名或作者须含关键词；两者皆空无法判断时仅保留有链接者
+            if nameHit || authorHit { return true }
+            return name.isEmpty && author.isEmpty && !url.isEmpty
+        }
+        // 模糊：书名 / 作者 / 简介任一包含关键词
+        return nameHit || authorHit || intro.localizedCaseInsensitiveContains(k)
     }
 
     /// 关键词与模式的相关度评分（0~4）：仅用于排序，不用于丢弃（过滤由 `shouldKeep` 负责）。
