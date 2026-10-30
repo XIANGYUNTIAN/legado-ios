@@ -8,3 +8,9 @@ Legado.xcodeproj
 Payload/
 *.ipa
 *.xcarchive
+
+# 大型测试固件 / 可重新生成的数据（不入仓）
+_repro/yck.json
+tools/_src/*.json
+tools/_src/bisect_out/
+_ci_dl/
