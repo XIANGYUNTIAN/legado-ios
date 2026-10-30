@@ -557,14 +557,51 @@ enum SearchCoordinator {
         guard !name.isEmpty || !url.isEmpty else { return false }
         // 无关键词（理论上不会发生）→ 全部保留
         if k.isEmpty { return true }
-        let nameHit = name.localizedCaseInsensitiveContains(k)
-        let authorHit = author.localizedCaseInsensitiveContains(k)
         if mode == .precise {
-            // 精确：书名或作者须含关键词；两者皆空无法判断时仅保留有链接者
-            if nameHit || authorHit { return true }
-            return name.isEmpty && author.isEmpty && !url.isEmpty
+            // 精确：书名须「严格」匹配关键词——去除装饰词/卷册标记/标点数字后，
+            // 主干须以关键词为主、不得夹带其他中文字（剔除「诛仙诀」「诛仙传」等无关书）。
+            // 书名空无法判断时保留（避免误删）。
+            if name.isEmpty { return true }
+            return strictMatchName(name, k)
         }
         // 模糊：legado 官方不做二次过滤，全部保留（仅空条目已在上方丢弃）
+        return true
+    }
+
+    /// 去全部空白（含词间空格/换行），用于精确匹配的归一化。
+    private static func stripWhitespace(_ s: String) -> String {
+        s.components(separatedBy: .whitespacesAndNewlines).joined()
+    }
+
+    /// 精确搜索严格匹配：书名去除装饰词 / 卷册标记 / 末尾序号 / 标点后，须以关键词为主干，
+    /// 残余不得含任何中文字（否则视为无关书，如「诛仙诀」「诛仙后传」）。
+    /// 仅匹配「书名 + 装饰」的合法变体（如「诛仙（全本）」「诛仙I」「诛仙 第一卷」）。
+    private static func strictMatchName(_ rawName: String, _ rawKeyword: String) -> Bool {
+        let k = stripWhitespace(rawKeyword)
+        guard !k.isEmpty else { return true }
+        var n = stripWhitespace(rawName)
+        guard !n.isEmpty else { return true } // 书名空无法判断 → 保留
+        // ① 去掉常见装饰词
+        let decorations = ["全本", "完本", "全集", "精校版", "精校", "修订版", "修订",
+                           "最新版", "最新", "正版", "简体", "完整版", "完整",
+                           "未删节", "无删节", "全集版", "版", "著", "作品"]
+        for d in decorations { n = n.replacingOccurrences(of: d, with: "") }
+        // ② 去掉卷/册/部/篇/集 + 序号（「第X卷」「卷X」「卷」结尾），以及上下册/第N部
+        n = n.replacingOccurrences(of: #"第[0-9一二三四五六七八九十百千零]+[卷册部篇章]"#, with: "", options: .regularExpression)
+        n = n.replacingOccurrences(of: #"[卷册部篇章][0-9一二三四五六七八九十百千零]+"#, with: "", options: .regularExpression)
+        n = n.replacingOccurrences(of: #"[卷册部篇章]$"#, with: "", options: .regularExpression)
+        n = n.replacingOccurrences(of: #"(上|下|上册|下册|上卷|下卷|第一部|第二部|第三部)"#, with: "", options: .regularExpression)
+        // ③ 去掉末尾罗马数字 / 圈码 / 数字
+        n = n.replacingOccurrences(of: #"[Ⅰ-Ⅻ①②③④⑤⑥⑦⑧⑨⑩0-9]+$"#, with: "", options: .regularExpression)
+        // 必须包含关键词
+        guard n.contains(k) else { return false }
+        // ④ 去掉关键词后，残余不得含中文字（仅允许标点/字母/空格等装饰）
+        let rest = n.replacingOccurrences(of: k, with: "")
+        for ch in rest {
+            if let v = ch.unicodeScalars.first?.value, (0x4E00...0x9FFF).contains(v) {
+                return false
+            }
+        }
         return true
     }
 
@@ -579,9 +616,8 @@ enum SearchCoordinator {
         let intro = book.intro.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
         if mode == .precise {
-            if name == k || author == k { return 4 }
-            if name.contains(k) { return 2 }
-            if author.contains(k) || intro.contains(k) { return 1 }
+            if name == k { return 4 }
+            if strictMatchName(name, k) { return 3 }
             return 0
         }
         // 模糊

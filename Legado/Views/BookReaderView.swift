@@ -838,7 +838,11 @@ struct BookReaderView: View {
                                  index: Int,
                                  title: String) async throws -> String {
         let html = try await NetworkService.shared.fetchText(from: url, headers: headers)
-        let text = (try? engine.getString(contentRule, content: html)) ?? ""
+        let raw = (try? engine.getString(contentRule, content: html)) ?? ""
+        // 内容清洗：部分书源（如 dbxsd）ruleContent 抽取到的是原始 HTML（含 <div> 开标签 /
+        // <script> 防爬脚本 / <p> 标签），须对齐 legado 标准「内容清洗」——去 script/style、
+        // 块标签转换行、去残余标签、解码实体，否则正文混入标签。
+        let text = Self.cleanChapterContent(raw)
         let finalText = text.isEmpty ? "（本章无内容）" : text
         await MainActor.run {
             if chapters.indices.contains(index) {
@@ -846,6 +850,62 @@ struct BookReaderView: View {
             }
         }
         return finalText
+    }
+
+    // MARK: - 内容清洗
+
+    /// 章节正文 HTML 清洗（对齐 legado BookContent.cleanContent）：
+    /// 1) 去除 <script>/<style> 块（含跨行）；2) 块级标签 / <br> 转换为换行；
+    /// 3) 去除残余标签；4) 解码常见 HTML 实体；5) 折叠多余空行。
+    /// 对纯文本（@text 抽取）幂等，对 HTML 抽取（@html / outerHTML）可修复标签污染。
+    private static func cleanChapterContent(_ raw: String) -> String {
+        guard !raw.isEmpty else { return raw }
+        var s = raw
+        // 1. 去 script / style 块（含跨行，忽略大小写）
+        s = s.replacingOccurrences(of: #"(?is)<script[\s\S]*?</script>"#, with: "", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"(?is)<style[\s\S]*?</style>"#, with: "", options: .regularExpression)
+        // 2. 块级闭合标签 / <br> → 换行
+        s = s.replacingOccurrences(of: #"(?i)</(p|div|h[1-6]|li|tr|blockquote|br)>|<br\s*/?>"#, with: "\n", options: .regularExpression)
+        // 2b. 块级开标签（带属性）→ 换行
+        s = s.replacingOccurrences(of: #"(?i)<(p|div|h[1-6]|li|tr|blockquote)[^>]*>"#, with: "\n", options: .regularExpression)
+        // 3. 去除残余标签
+        s = s.replacingOccurrences(of: #"<[^>]*>"#, with: "", options: .regularExpression)
+        // 4. 解码实体
+        s = decodeHtmlEntities(s)
+        // 5. 折叠多余空行并去首尾空白
+        s = s.replacingOccurrences(of: #"\n[ \t]*\n[ \t]*\n+"#, with: "\n\n", options: .regularExpression)
+        s = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        return s
+    }
+
+    /// 解码常见 HTML 实体（命名 + 十进制/十六进制数字实体）。
+    private static func decodeHtmlEntities(_ s: String) -> String {
+        var r = s
+        let map: [String: String] = [
+            "&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": "\"",
+            "&apos;": "'", "&hellip;": "…", "&ldquo;": "“", "&rdquo;": "”",
+            "&lsquo;": "‘", "&rsquo;": "’", "&mdash;": "—", "&ndash;": "–",
+            "&middot;": "·", "&bull;": "•", "&copy;": "©", "&reg;": "®"
+        ]
+        for (k, v) in map { r = r.replacingOccurrences(of: k, with: v) }
+        if let regex = try? NSRegularExpression(pattern: #"&#(x?[0-9a-fA-F]+);"#) {
+            let ns = r as NSString
+            let matches = regex.matches(in: r, range: NSRange(location: 0, length: ns.length))
+            for m in matches.reversed() {
+                let ent = ns.substring(with: m.range)
+                let codeStr = String(ent.dropFirst(2).dropLast()).lowercased()
+                var code: UInt32 = 0
+                if codeStr.hasPrefix("x") {
+                    code = UInt32(String(codeStr.dropFirst()), radix: 16) ?? 0
+                } else {
+                    code = UInt32(codeStr) ?? 0
+                }
+                if let scalar = UnicodeScalar(code) {
+                    r = (r as NSString).replacingCharacters(in: m.range, with: String(scalar))
+                }
+            }
+        }
+        return r
     }
 
     // MARK: - 目录提取
