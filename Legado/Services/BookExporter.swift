@@ -8,7 +8,7 @@ struct BookExporter {
     /// 单本书导出文本（异步：内部经 LocalBookReader 解析章节）。
     static func exportText(book: Book, fileURL: URL) async throws -> String {
         let chapters = try await LocalBookReader.chapters(format: book.format, title: book.title, at: fileURL)
-        return Self.compose(title: book.title, author: book.author, chapters: chapters)
+        return Self.composeChapters(title: book.title, author: book.author, chapters: chapters)
     }
 
     /// 多本书合并导出（书名之间用分隔线隔开），用于书架「批量导出」。
@@ -16,13 +16,18 @@ struct BookExporter {
         var blocks: [String] = []
         for (book, url) in items {
             let chapters = try await LocalBookReader.chapters(format: book.format, title: book.title, at: url)
-            blocks.append(Self.compose(title: book.title, author: book.author, chapters: chapters))
+            blocks.append(Self.composeChapters(title: book.title, author: book.author, chapters: chapters))
         }
         return blocks.joined(separator: "\n\n" + String(repeating: "=", count: 40) + "\n\n")
     }
 
+    /// 把章节合并为带书名的纯文本（公开入口，供阅读器按范围下载复用）。
+    static func compose(title: String, author: String, chapters: [ReaderChapter]) -> String {
+        Self.composeChapters(title: title, author: author, chapters: chapters)
+    }
+
     /// 把章节合并为带书名的纯文本。
-    private static func compose(title: String, author: String, chapters: [ReaderChapter]) -> String {
+    private static func composeChapters(title: String, author: String, chapters: [ReaderChapter]) -> String {
         var out = title.isEmpty ? "未命名" : title
         if !author.isEmpty, author != "未知" {
             out += "\n作者：\(author)"

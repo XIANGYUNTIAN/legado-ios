@@ -129,6 +129,26 @@ struct BookReaderView: View {
     /// 为 (0,0,0) 时表示当前未启用（iOS 17 回退到 contentRect/viewportHeight）。
     @State private var lastScrollGeo: ScrollGeometryValue = .zero
 
+    // MARK: - 翻页（左右翻页模式）
+
+    /// 左右翻页模式下的页面窗口：pagedChapters[0] 对应的全局章节下标
+    @State private var pagedChapters: [ReaderChapter] = []
+    @State private var pagedGlobalStart: Int = 0
+    /// 当前页在 pagedChapters 中的局部下标（TabView selection）
+    @State private var pageIndex: Int = 0
+
+    // MARK: - 下载（在线 TXT 导出）
+
+    @State private var showDownload = false
+    @State private var showDownloadShare = false
+    @State private var downloadURL: URL? = nil
+    @State private var downloadProgress: (done: Int, total: Int) = (0, 0)
+    @State private var isDownloading = false
+    @State private var downloadMessage: String? = nil
+    @State private var dlStart: Int = 0
+    @State private var dlEnd: Int = 0
+    @State private var dlAll: Bool = true
+
     /// 扫描版 PDF：整本文档句柄（仅 PDF 书籍在加载时打开一次），用于惰性渲染扫描页为图片。
     #if canImport(PDFKit)
     @State private var pdfDocument: PDFDocument? = nil
@@ -156,10 +176,16 @@ struct BookReaderView: View {
                     readerContent
                 }
             }
-            .background(settings.theme.background)
+            .background(settings.effectiveBackground)
             .safeAreaInset(edge: .bottom) { readerToolbar }
             .sheet(isPresented: $showChapterList) { chapterListSheet }
             .sheet(isPresented: $showSettings) { settingsSheet }
+            .sheet(isPresented: $showDownload) { downloadSheet }
+            .sheet(isPresented: $showDownloadShare) {
+                if let url = downloadURL {
+                    ShareSheet(items: [url])
+                }
+            }
             .navigationTitle(currentChapter?.title ?? book.displayTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar(.hidden, for: .tabBar)
@@ -170,12 +196,29 @@ struct BookReaderView: View {
                     load()
                 }
             }
+            .onChange(of: settings.pageMode) { _, mode in
+                if mode == .page {
+                    initPaged()
+                } else {
+                    // 切回滚动模式：以当前章节重建滚动窗口，避免 segments 过时
+                    switchTo(index: currentIndex)
+                }
+            }
         }
     }
 
     // MARK: - 正文渲染（分段连续 + 滚动几何预加载）
 
+    /// 阅读正文容器：按翻页模式在「连续滚动」与「左右翻页」之间切换
     private var readerContent: some View {
+        if settings.pageMode == .page {
+            AnyView(pagedContent)
+        } else {
+            AnyView(scrollContent)
+        }
+    }
+
+    private var scrollContent: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
@@ -188,8 +231,9 @@ struct BookReaderView: View {
                         VStack(alignment: .leading, spacing: 0) {
                             if settings.showChapterHeader {
                                 Text(segment.title)
-                                    .font(.system(size: settings.fontSize, design: settings.fontFamily.design))
-                                    .foregroundStyle(settings.theme.foreground)
+                                    .font(settings.textFont)
+                                    .tracking(CGFloat(settings.letterSpacing))
+                                    .foregroundStyle(settings.effectiveForeground)
                                     .multilineTextAlignment(.center)
                                     .frame(maxWidth: .infinity)
                                     .padding(.bottom, settings.lineSpacing * 2)
@@ -198,10 +242,11 @@ struct BookReaderView: View {
                                 pageImageView(chapterIndex: chapterIndex)
                             } else {
                                 Text(segment.text?.isEmpty == false ? segment.text! : "（本章无内容）")
-                                    .font(.system(size: settings.fontSize, design: settings.fontFamily.design))
+                                    .font(settings.textFont)
+                                    .tracking(CGFloat(settings.letterSpacing))
                                     .lineSpacing(settings.lineSpacing)
                                     .multilineTextAlignment(.leading)
-                                    .foregroundStyle(settings.theme.foreground)
+                                    .foregroundStyle(settings.effectiveForeground)
                                     .textSelection(.enabled)
                             }
                             // 本章末尾锚点：上一章前插后用于保持视口
@@ -279,6 +324,141 @@ struct BookReaderView: View {
         }
     }
 
+    // MARK: - 左右翻页模式（按章分页，长章内部纵向滚动）
+
+    /// 左右翻页容器：每个已加载章节为一页，TabView page 样式提供左右滑动翻页。
+    /// 翻页动画：滑动（默认）/ 无（禁用过渡）；仿真（卷页）在 SwiftUI 下暂以滑动呈现。
+    private var pagedContent: some View {
+        TabView(selection: $pageIndex) {
+            ForEach(Array(pagedChapters.enumerated()), id: \.element.id) { localIdx, segment in
+                pagedPage(segment: segment, localIdx: localIdx)
+                    .tag(localIdx)
+            }
+        }
+        .tabViewStyle(.page(indexDisplayMode: .never))
+        .background(settings.effectiveBackground)
+        .ignoresSafeArea(edges: .bottom)
+        .transaction { t in
+            // 「翻页动画 = 无」时关闭 TabView 的过渡动画
+            t.disablesAnimations = (settings.pageAnimation == .none)
+        }
+        .onChange(of: pageIndex) { _, newIdx in
+            handlePageChange(newIdx)
+        }
+    }
+
+    /// 单页内容：章节标题 + 正文，超出一屏时纵向滚动
+    @ViewBuilder
+    private func pagedPage(segment: ReaderChapter, localIdx: Int) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                if settings.showChapterHeader {
+                    Text(segment.title)
+                        .font(settings.textFont)
+                        .tracking(CGFloat(settings.letterSpacing))
+                        .foregroundStyle(settings.effectiveForeground)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                        .padding(.bottom, settings.lineSpacing * 2)
+                }
+                if segment.isImagePage {
+                    pageImageView(chapterIndex: pagedGlobalStart + localIdx)
+                } else {
+                    Text(segment.text?.isEmpty == false ? segment.text! : "（本章无内容）")
+                        .font(settings.textFont)
+                        .tracking(CGFloat(settings.letterSpacing))
+                        .lineSpacing(settings.lineSpacing)
+                        .multilineTextAlignment(.leading)
+                        .foregroundStyle(settings.effectiveForeground)
+                        .textSelection(.enabled)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
+            .padding(.bottom, 80)
+        }
+        .background(settings.effectiveBackground)
+    }
+
+    /// 翻页切换：到首页预载上一章、到末页预载下一章（双向缓冲，保证可继续左右滑动）；中间页仅更新进度。
+    private func handlePageChange(_ newIdx: Int) {
+        guard !pagedChapters.isEmpty else { return }
+        let count = pagedChapters.count
+
+        // 到达首页且仍有上一章：预载上一章到队首，并把视觉页右移一位保持不跳变（无缝向后翻页）
+        if newIdx == 0, pagedGlobalStart > 0 {
+            let globalPrev = pagedGlobalStart - 1
+            Task {
+                let text = await ensureChapterText(globalPrev)
+                await MainActor.run {
+                    guard pagedGlobalStart - 1 == globalPrev,
+                          pagedChapters.first?.id == chapters[pagedGlobalStart].id else { return }
+                    let ch = chapters[globalPrev]
+                    pagedChapters.insert(ReaderChapter(
+                        title: ch.title, text: text, url: ch.url, isImagePage: ch.isImagePage
+                    ), at: 0)
+                    pagedGlobalStart = globalPrev
+                    pageIndex += 1
+                }
+            }
+            return
+        }
+
+        // 到达末页且仍有后续章节：预载下一章到队尾（无缝向前翻页）
+        if newIdx >= count - 1 {
+            let globalNext = pagedGlobalStart + count
+            if globalNext < chapters.count {
+                Task {
+                    let text = await ensureChapterText(globalNext)
+                    await MainActor.run {
+                        if pagedGlobalStart + pagedChapters.count == globalNext {
+                            let ch = chapters[globalNext]
+                            pagedChapters.append(ReaderChapter(
+                                title: ch.title, text: text, url: ch.url, isImagePage: ch.isImagePage
+                            ))
+                        }
+                    }
+                }
+            }
+            currentIndex = pagedGlobalStart + pageIndex
+            bookStore.updateProgress(bookID: book.id, chapterIndex: currentIndex)
+            return
+        }
+
+        // 中间页：仅更新当前章节进度
+        currentIndex = pagedGlobalStart + newIdx
+        bookStore.updateProgress(bookID: book.id, chapterIndex: currentIndex)
+    }
+
+    /// 初始化左右翻页窗口：以当前章节为首页
+    private func initPaged() {
+        let idx = currentIndex
+        guard chapters.indices.contains(idx) else { return }
+        let ch = chapters[idx]
+        pagedChapters = [ReaderChapter(title: ch.title, text: ch.text, url: ch.url, isImagePage: ch.isImagePage)]
+        pagedGlobalStart = idx
+        pageIndex = 0
+        if ch.text == nil, !ch.isImagePage {
+            Task {
+                let t = await ensureChapterText(idx)
+                await MainActor.run {
+                    if pagedChapters.indices.contains(0), pagedGlobalStart == idx {
+                        pagedChapters[0].text = t
+                    }
+                }
+            }
+        }
+    }
+
+    /// 确保指定全局章节已取到正文（缓存优先，否则抓取），返回正文文本
+    private func ensureChapterText(_ globalIndex: Int) async -> String {
+        guard chapters.indices.contains(globalIndex) else { return "" }
+        let chapter = chapters[globalIndex]
+        if let text = chapter.text, !text.isEmpty { return text }
+        guard chapter.isImagePage == false else { return "" }
+        return await fetchContentText(for: globalIndex)
+    }
+
     private var currentChapter: ReaderChapter? {
         chapters[safe: currentIndex]
     }
@@ -288,13 +468,14 @@ struct BookReaderView: View {
     private var readerToolbar: some View {
         HStack(spacing: 4) {
             Button {
-                switchTo(index: currentIndex - 1)
+                if settings.pageMode == .page { goToChapter(currentIndex - 1) }
+                else { switchTo(index: currentIndex - 1) }
             } label: {
                 Image(systemName: "chevron.up")
                     .frame(width: 44, height: 44)
             }
             .disabled(currentIndex <= 0)
-            .foregroundStyle(settings.theme.foreground)
+            .foregroundStyle(settings.effectiveForeground)
 
             Button {
                 showChapterList = true
@@ -304,16 +485,17 @@ struct BookReaderView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
             }
-            .foregroundStyle(settings.theme.foreground)
+            .foregroundStyle(settings.effectiveForeground)
 
             Button {
-                switchTo(index: currentIndex + 1)
+                if settings.pageMode == .page { goToChapter(currentIndex + 1) }
+                else { switchTo(index: currentIndex + 1) }
             } label: {
                 Image(systemName: "chevron.down")
                     .frame(width: 44, height: 44)
             }
             .disabled(chapters.isEmpty || currentIndex >= chapters.count - 1)
-            .foregroundStyle(settings.theme.foreground)
+            .foregroundStyle(settings.effectiveForeground)
 
             Spacer(minLength: 8)
 
@@ -323,7 +505,15 @@ struct BookReaderView: View {
                 Image(systemName: "a.circle")
                     .frame(width: 44, height: 44)
             }
-            .foregroundStyle(settings.theme.foreground)
+            .foregroundStyle(settings.effectiveForeground)
+
+            Button {
+                showDownload = true
+            } label: {
+                Image(systemName: "square.and.arrow.down")
+                    .frame(width: 44, height: 44)
+            }
+            .foregroundStyle(settings.effectiveForeground)
         }
         .font(.caption)
         .padding(.horizontal, 12)
@@ -339,12 +529,12 @@ struct BookReaderView: View {
             List(chapters.indices, id: \.self) { index in
                 let chapter = chapters[index]
                 Button {
-                    switchTo(index: index)
+                    goToChapter(index)
                     showChapterList = false
                 } label: {
                     HStack {
                         Text(chapter.title)
-                            .foregroundStyle(currentIndex == index ? settings.theme.foreground : .primary)
+                            .foregroundStyle(currentIndex == index ? settings.effectiveForeground : .primary)
                         Spacer()
                         if currentIndex == index {
                             Image(systemName: "checkmark")
@@ -368,21 +558,31 @@ struct BookReaderView: View {
     private var settingsSheet: some View {
         NavigationStack {
             Form {
-                Section("主题") {
-                    ForEach(ReaderSettings.Theme.allCases, id: \.self) { theme in
-                        Button {
-                            settings.apply(theme)
-                        } label: {
-                            HStack {
-                                Text(theme.rawValue)
-                                Spacer()
-                                if settings.theme == theme {
-                                    Image(systemName: "checkmark")
-                                        .foregroundStyle(.tint)
+                Section("背景") {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 12) {
+                            ForEach(ReaderSettings.Theme.allCases, id: \.self) { theme in
+                                Button {
+                                    settings.theme = theme
+                                    settings.save()
+                                } label: {
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .fill(theme.background)
+                                        .frame(width: 44, height: 60)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 6)
+                                                .stroke(settings.theme == theme ? Color.accentColor : Color.clear, lineWidth: 2)
+                                        )
                                 }
                             }
                         }
+                        .padding(.vertical, 4)
                     }
+                }
+
+                Section {
+                    Toggle("夜间模式", isOn: $settings.isNight)
+                        .onChange(of: settings.isNight) { _, _ in settings.save() }
                 }
 
                 Section("字体") {
@@ -401,16 +601,46 @@ struct BookReaderView: View {
                             }
                         }
                     }
+                    TextField("自定义字体名（留空用上方预设）", text: $settings.customFontName)
+                        .onChange(of: settings.customFontName) { _, _ in settings.save() }
                 }
 
                 Section("字号：\(Int(settings.fontSize))pt") {
-                    Slider(value: $settings.fontSize, in: 12...28, step: 1)
+                    Slider(value: $settings.fontSize, in: 12...40, step: 1)
                         .tint(.accentColor)
+                        .onChange(of: settings.fontSize) { _, _ in settings.save() }
+                }
+
+                Section("字间距：\(String(format: "%.1f", settings.letterSpacing))pt") {
+                    Slider(value: $settings.letterSpacing, in: -1...6, step: 0.5)
+                        .tint(.accentColor)
+                        .onChange(of: settings.letterSpacing) { _, _ in settings.save() }
                 }
 
                 Section("行距：\(Int(settings.lineSpacing))pt") {
                     Slider(value: $settings.lineSpacing, in: 0...24, step: 1)
                         .tint(.accentColor)
+                        .onChange(of: settings.lineSpacing) { _, _ in settings.save() }
+                }
+
+                Section("翻页模式") {
+                    Picker("翻页模式", selection: $settings.pageMode) {
+                        ForEach(ReaderSettings.PageMode.allCases, id: \.self) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: settings.pageMode) { _, _ in settings.save() }
+                }
+
+                Section("翻页动画") {
+                    Picker("翻页动画", selection: $settings.pageAnimation) {
+                        ForEach(ReaderSettings.PageAnimation.allCases, id: \.self) { anim in
+                            Text(anim.rawValue).tag(anim)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: settings.pageAnimation) { _, _ in settings.save() }
                 }
             }
             .navigationTitle("阅读设置")
@@ -423,7 +653,139 @@ struct BookReaderView: View {
         }
     }
 
+    // MARK: - 下载（在线 TXT 导出）
+
+    private var downloadSheet: some View {
+        NavigationStack {
+            Form {
+                Section("下载范围") {
+                    Toggle("全本下载", isOn: $dlAll)
+                    if !dlAll {
+                        Stepper(value: $dlStart, in: 0...(max(dlEnd, 0))) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("起始章：第 \(dlStart + 1) 章")
+                                    .font(.subheadline)
+                                Text(chapters[safe: dlStart]?.title ?? "")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        Stepper(value: $dlEnd, in: dlStart...(max(chapters.count - 1, 0))) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("结束章：第 \(dlEnd + 1) 章")
+                                    .font(.subheadline)
+                                Text(chapters[safe: dlEnd]?.title ?? "")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+                }
+
+                Section("说明") {
+                    Text("共 \(chapters.count) 章。本地书籍直接合并缓存文本；在线书籍将逐章抓取正文后合并为 TXT。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if isDownloading {
+                    Section {
+                        HStack {
+                            ProgressView()
+                            Text("已下载 \(downloadProgress.done) / \(downloadProgress.total)")
+                        }
+                    }
+                }
+
+                Section {
+                    Button {
+                        let s = dlAll ? 0 : dlStart
+                        let e = dlAll ? max(chapters.count - 1, 0) : dlEnd
+                        startDownload(start: s, end: e)
+                    } label: {
+                        Text(isDownloading ? "下载中…" : "开始下载 TXT")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .disabled(chapters.isEmpty || isDownloading)
+                }
+            }
+            .navigationTitle("下载 TXT")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("取消") { showDownload = false }
+                }
+            }
+            .onAppear {
+                dlStart = 0
+                dlEnd = max(chapters.count - 1, 0)
+                dlAll = true
+            }
+        }
+    }
+
+    /// 按章节范围合并导出 TXT（本地书走缓存文本、在线书逐章抓取），完成后调起分享面板
+    private func startDownload(start: Int, end: Int) {
+        guard chapters.indices.contains(start), chapters.indices.contains(end), start <= end else { return }
+        isDownloading = true
+        downloadProgress = (0, end - start + 1)
+        Task {
+            var collected: [ReaderChapter] = []
+            for i in start...end {
+                let ch = chapters[i]
+                let text = await ensureChapterText(i)
+                await MainActor.run {
+                    collected.append(ReaderChapter(title: ch.title, text: text, url: ch.url, isImagePage: ch.isImagePage))
+                    downloadProgress.done += 1
+                }
+            }
+            let text = BookExporter.compose(title: book.displayTitle, author: book.author, chapters: collected)
+            let tmp = BookExporter.writeTxtFile(named: book.title, text: text)
+            await MainActor.run {
+                downloadURL = tmp
+                isDownloading = false
+                showDownload = false
+                showDownloadShare = true
+            }
+        }
+    }
+
     // MARK: - 章节切换与连续加载
+
+    /// 统一跳章入口：滚动模式走 switchTo；左右翻页模式重建分页窗口（载入目标章 + 下一章，便于向前滑动）。
+    private func goToChapter(_ index: Int) {
+        guard chapters.indices.contains(index) else { return }
+        if settings.pageMode == .page {
+            var window: [ReaderChapter] = []
+            let ch = chapters[index]
+            window.append(ReaderChapter(title: ch.title, text: ch.text, url: ch.url, isImagePage: ch.isImagePage))
+            if index + 1 < chapters.count {
+                let nx = chapters[index + 1]
+                window.append(ReaderChapter(title: nx.title, text: nx.text, url: nx.url, isImagePage: nx.isImagePage))
+            }
+            pagedChapters = window
+            pagedGlobalStart = index
+            pageIndex = 0
+            currentIndex = index
+            bookStore.updateProgress(bookID: book.id, chapterIndex: index)
+            // 抓取缺失正文（网络章节）
+            for (local, c) in window.enumerated() where c.text == nil && !c.isImagePage {
+                let gi = index + local
+                Task {
+                    let t = await ensureChapterText(gi)
+                    await MainActor.run {
+                        if pagedGlobalStart == index, pagedChapters.indices.contains(local) {
+                            pagedChapters[local].text = t
+                        }
+                    }
+                }
+            }
+        } else {
+            switchTo(index: index)
+        }
+    }
 
     /// 显式切章（目录 / 上下一章按钮）：重置为单段并回到顶部
     private func switchTo(index: Int) {
@@ -708,6 +1070,7 @@ struct BookReaderView: View {
                     furthestTopOffset = 0
                     suppressTopSentinel = false
                     rearmSentinels()
+                    if settings.pageMode == .page { initPaged() }
                 }
                 // 网络章节需单独抓取正文
                 if book.supportsRuleReading, restored?.text == nil {

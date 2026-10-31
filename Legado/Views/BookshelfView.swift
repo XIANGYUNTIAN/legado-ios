@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 
 struct BookshelfView: View {
     @EnvironmentObject private var bookStore: BookStore
+    @EnvironmentObject private var shelfSettings: BookshelfSettings
 
     // 阅读器呈现
     @State private var selectedBook: Book? = nil
@@ -31,12 +32,11 @@ struct BookshelfView: View {
     @State private var expandedIDs: Set<String> = []
 
     var body: some View {
-        List {
-            ForEach(bookStore.books) { book in
-                bookRow(book)
-            }
-            .onDelete { offsets in
-                bookStore.delete(at: offsets)
+        Group {
+            if shelfSettings.layout == .grid {
+                gridShelf
+            } else {
+                listShelf
             }
         }
         .navigationTitle("书架（\(bookStore.books.count)）")
@@ -78,6 +78,26 @@ struct BookshelfView: View {
                             }
                         } label: {
                             Image(systemName: "plus")
+                        }
+                        Button {
+                            shelfSettings.layout = (shelfSettings.layout == .grid) ? .list : .grid
+                            shelfSettings.save()
+                        } label: {
+                            Image(systemName: shelfSettings.layout == .grid ? "list.bullet" : "square.grid.2x2")
+                        }
+                        if shelfSettings.layout == .grid {
+                            Menu {
+                                ForEach(BookshelfSettings.gridColumnOptions, id: \.self) { n in
+                                    Button {
+                                        shelfSettings.gridColumns = n
+                                        shelfSettings.save()
+                                    } label: {
+                                        Label("\(n) 列", systemImage: shelfSettings.gridColumns == n ? "checkmark" : "")
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "slider.horizontal.3")
+                            }
                         }
                         Button {
                             tapExport()
@@ -214,6 +234,77 @@ struct BookshelfView: View {
             // 行内展开的详情（点击行右侧箭头展开/收起，避免进入二级详情页）
             if expandedIDs.contains(book.id) {
                 bookDetails(book)
+            }
+        }
+    }
+
+    // MARK: - 列表 / 网格渲染
+
+    private var listShelf: some View {
+        List {
+            ForEach(bookStore.books) { book in
+                bookRow(book)
+            }
+            .onDelete { offsets in
+                bookStore.delete(at: offsets)
+            }
+        }
+    }
+
+    private var gridShelf: some View {
+        ScrollView {
+            LazyVGrid(columns: gridColumns, spacing: 16) {
+                ForEach(bookStore.books) { book in
+                    gridCell(book)
+                }
+            }
+            .padding(16)
+        }
+    }
+
+    private var gridColumns: [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: 12), count: shelfSettings.gridColumns)
+    }
+
+    /// 网格封面尺寸：列数越多封面越小（保持 1:1.4 书籍比例）
+    private func gridCoverSize(columns: Int) -> CGSize {
+        let w: CGFloat = columns >= 5 ? 56 : columns == 4 ? 72 : columns == 3 ? 92 : 120
+        return CGSize(width: w, height: w * 1.4)
+    }
+
+    private func gridCell(_ book: Book) -> some View {
+        VStack(alignment: .center, spacing: 6) {
+            if isSelecting {
+                Image(systemName: selection.contains(book.id) ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selection.contains(book.id) ? Color.accentColor : Color.secondary)
+                    .font(.title3)
+            }
+            BookCoverView(book: book, size: gridCoverSize(columns: shelfSettings.gridColumns))
+            Text(book.displayTitle)
+                .font(.caption)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.primary)
+            Text(book.author)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity)
+        .background(
+            isSelecting && selection.contains(book.id)
+                ? Color.accentColor.opacity(0.12)
+                : Color.clear
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isSelecting {
+                toggle(book)
+            } else {
+                selectedBook = book
+                showReader = true
             }
         }
     }
