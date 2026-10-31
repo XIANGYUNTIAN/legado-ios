@@ -14,6 +14,10 @@ import UIKit
 ///
 /// 注意：UIPageViewController 的 transitionStyle 只能在 init 时设定，故调用方应以
 /// `.id(settings.pageAnimation)` 包裹本组件，动画切换时强制重建。
+///
+/// 布局尺寸：不要在 make/update 里读 `vc.view.bounds`（未完成布局、尺寸不可靠），
+/// 分页尺寸统一由 `PaginatedPageController.viewDidLayoutSubviews` 回调的真实 bounds 驱动，
+/// 保证「分页尺寸 == 渲染尺寸」，避免改字体/日夜间/沉浸切换后下半空白或跳回章初始。
 struct PagedReaderView: UIViewControllerRepresentable {
     @ObservedObject var settings: ReaderSettings
     var chapters: [ReaderChapter]
@@ -111,9 +115,12 @@ struct PagedReaderView: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> UIPageViewController {
         let style: UIPageViewController.TransitionStyle =
             settings.pageAnimation == .curl ? .pageCurl : .scroll
-        let vc = UIPageViewController(transitionStyle: style,
-                                      navigationOrientation: .horizontal,
-                                      options: nil)
+        // 用 PaginatedPageController：分页尺寸不在此处读 vc.view.bounds（未完成布局、不可靠），
+        // 统一由 viewDidLayoutSubviews 回调的真实 bounds 驱动（见 handleBoundsChange）。
+        // 此处的 configure 仅作首帧兜底，布局完成后立即被真实尺寸纠正。
+        let vc = PaginatedPageController(transitionStyle: style,
+                                         navigationOrientation: .horizontal,
+                                         options: nil)
         vc.dataSource = context.coordinator
         vc.delegate = context.coordinator
         vc.view.backgroundColor = UIColor(settings.effectiveBackground)
@@ -196,7 +203,34 @@ struct PagedReaderView: UIViewControllerRepresentable {
             self.lastReflowToken = parent.reflowToken
         }
 
-        func attach(pvc: UIPageViewController) { self.pvc = pvc }
+        func attach(pvc: UIPageViewController) {
+            self.pvc = pvc
+            // 布局完成 → 真实 bounds 回调 → 重新分页（保证分页尺寸 == 渲染尺寸）。
+            // 延后到下一 runloop：viewDidLayoutSubviews 期间 setViewControllers 可能触发再布局，
+            // 异步化避免布局中重入；尺寸相同（同一次布局多次回调）时 handleBoundsChange 自去重。
+            if let pc = pvc as? PaginatedPageController {
+                pc.onBoundsChange = { [weak self] size in
+                    DispatchQueue.main.async { self?.handleBoundsChange(size) }
+                }
+            }
+        }
+
+        /// 真实布局尺寸变化（含首次布局完成）→ 重新分页并保持字符 offset。
+        /// 这是「分页尺寸 == 渲染尺寸」的权威来源：改字号/字距/行距/背景/日夜间、
+        /// 设置面板开合、沉浸 chrome 显隐（改变 safe area）都会走到这里，页面即时自适应，
+        /// 不再出现下半空白或跳回章初始。
+        private func handleBoundsChange(_ size: CGSize) {
+            let content = parent.contentSize(of: size)
+            guard content.width > 1, content.height > 1 else { return }
+            // 尺寸未变（同一次布局多次回调 / 面板动画中间帧）→ 跳过，避免反复重排
+            if content == parent.paginator.pageSize { return }
+            let off = currentOffset()
+            parent.paginator.pageSize = content
+            parent.paginator.attributes = parent.buildAttributes()
+            parent.paginator.invalidate()
+            vcCache.removeAll()
+            relayoutCurrentPage(to: off)
+        }
 
         func configure(pageSize: CGSize) {
             parent.paginator.pageSize = pageSize
@@ -422,5 +456,31 @@ struct PagedReaderView: UIViewControllerRepresentable {
             }
             return nil
         }
+    }
+}
+
+/// 感知**真实布局尺寸**的页控制器。
+///
+/// 背景：在 makeUIViewController / updateUIViewController 里读 `vc.view.bounds` 并不可靠——
+/// 新页控制器的 view 尚未完成布局（常为默认或缩小的尺寸，设置面板打开时更小），
+/// 导致 `configure` 用**过小的 pageSize** 分页 → 每页只放得下几行；
+/// 而渲染（CoreTextPageView.draw）用的是布局完成后的**真实 bounds**（更高）→
+/// 顶部几行 + 下半大片空白（「改字体后页面不自适应，下半空白，退出重进才正常」根因）。
+///
+/// 本控制器在 `viewDidLayoutSubviews`（布局完成、尺寸真实）后回调真实 bounds，
+/// 驱动 Coordinator 重新分页并保持字符 offset——保证「分页尺寸 == 渲染尺寸」恒成立，
+/// 改字号/字距/行距/背景/日夜间及沉浸切换（改变 safe area）后页面即时自适应，
+/// 不再出现下半空白或跳回章初始。
+final class PaginatedPageController: UIPageViewController {
+    /// 布局完成后回调真实 bounds（仅尺寸变化时触发，已去重）
+    var onBoundsChange: ((CGSize) -> Void)?
+    private var lastReported: CGSize = .zero
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        let s = view.bounds.size
+        guard s.width > 1, s.height > 1, s != lastReported else { return }
+        lastReported = s
+        onBoundsChange?(s)
     }
 }

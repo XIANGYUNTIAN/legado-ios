@@ -14,3 +14,4 @@ _repro/yck.json
 tools/_src/*.json
 tools/_src/bisect_out/
 _ci_dl/
+_repro/
