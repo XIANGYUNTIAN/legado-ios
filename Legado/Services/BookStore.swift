@@ -274,4 +274,12 @@ final class BookStore: ObservableObject {
         books[i].lastReadAt = Date()
         persist()
     }
+
+    /// 回填封面远程地址（封面服务抓到网络封面后调用），便于下次直接复用、离线缓存
+    func setCoverURL(bookID: String, url: String) {
+        guard let i = books.firstIndex(where: { $0.id == bookID }) else { return }
+        guard books[i].coverRemoteURL != url else { return }
+        books[i].coverRemoteURL = url
+        persist()
+    }
 }

@@ -148,14 +148,18 @@ struct LocalBookReader {
                 text = page.attributedString?.string ?? ""
             }
             let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            // 无文本页（扫描版 / 纯矢量页）：标记为图片页，由阅读器惰性渲染为图片，
+            // 不再填充「本页无文本」占位文案（那样用户什么都看不到）。
+            let isImage = t.isEmpty
             chapters.append(ReaderChapter(
                 title: "第 \(i + 1) 页",
-                text: t.isEmpty ? "（本页无文本，可能为扫描图片）" : t,
-                url: nil
+                text: isImage ? nil : t,
+                url: nil,
+                isImagePage: isImage
             ))
         }
         if chapters.isEmpty {
-            throw LocalBookError.parseFailed("PDF 未提取到任何文本（可能为扫描版，请使用 OCR 工具转文字）")
+            throw LocalBookError.parseFailed("PDF 未提取到任何内容")
         }
         return chapters
         #else

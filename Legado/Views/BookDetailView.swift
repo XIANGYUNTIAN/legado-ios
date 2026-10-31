@@ -18,6 +18,13 @@ struct BookDetailView: View {
 
     var body: some View {
         List {
+            Section {
+                HStack {
+                    Spacer()
+                    BookCoverView(book: book, size: CGSize(width: 120, height: 168))
+                    Spacer()
+                }
+            }
             LabeledContent("书名", value: book.title)
             LabeledContent("作者", value: book.author)
             LabeledContent("格式", value: book.format.rawValue.uppercased())

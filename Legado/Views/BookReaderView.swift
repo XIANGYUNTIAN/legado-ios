@@ -1,4 +1,8 @@
 import SwiftUI
+import UIKit
+#if canImport(PDFKit)
+import PDFKit
+#endif
 
 // MARK: - 章节模型
 
@@ -66,6 +70,8 @@ struct ReaderChapter: Identifiable {
     var text: String?      // 本地章节正文（网络章节为 nil，按需抓取）
     var url: String?       // 网络章节 URL
     var isVolume: Bool = false  // 是否为卷标题（ruleToc.isVolume）
+    var image: UIImage? = nil      // 扫描版 PDF 页渲染图（无文本页用图片展示）
+    var isImagePage: Bool = false  // 是否需以图片展示（扫描 / 矢量页，page.string 为空）
 }
 
 /// 数组安全下标：切章 / 异步回调里索引可能越界，避免崩溃
@@ -122,6 +128,13 @@ struct BookReaderView: View {
     /// 三元组在「滚动」与「内容增长」时都会变化，因此既能触发滑到底、也能触发短章连续填充。
     /// 为 (0,0,0) 时表示当前未启用（iOS 17 回退到 contentRect/viewportHeight）。
     @State private var lastScrollGeo: ScrollGeometryValue = .zero
+
+    /// 扫描版 PDF：整本文档句柄（仅 PDF 书籍在加载时打开一次），用于惰性渲染扫描页为图片。
+    #if canImport(PDFKit)
+    @State private var pdfDocument: PDFDocument? = nil
+    #endif
+    /// 扫描页渲染结果缓存：key = 章节下标（= PDF 页下标），随已加载窗口裁剪，控制内存。
+    @State private var pageImages: [Int: UIImage] = [:]
 
     /// 连续加载的章节段上限，防止超长阅读会话内存无限增长
     private let maxSegments = 25
@@ -181,12 +194,16 @@ struct BookReaderView: View {
                                     .frame(maxWidth: .infinity)
                                     .padding(.bottom, settings.lineSpacing * 2)
                             }
-                            Text(segment.text?.isEmpty == false ? segment.text! : "（本章无内容）")
-                                .font(.system(size: settings.fontSize, design: settings.fontFamily.design))
-                                .lineSpacing(settings.lineSpacing)
-                                .multilineTextAlignment(.leading)
-                                .foregroundStyle(settings.theme.foreground)
-                                .textSelection(.enabled)
+                            if segment.isImagePage {
+                                pageImageView(chapterIndex: chapterIndex)
+                            } else {
+                                Text(segment.text?.isEmpty == false ? segment.text! : "（本章无内容）")
+                                    .font(.system(size: settings.fontSize, design: settings.fontFamily.design))
+                                    .lineSpacing(settings.lineSpacing)
+                                    .multilineTextAlignment(.leading)
+                                    .foregroundStyle(settings.theme.foreground)
+                                    .textSelection(.enabled)
+                            }
                             // 本章末尾锚点：上一章前插后用于保持视口
                             Color.clear
                                 .frame(height: 1)
@@ -416,7 +433,11 @@ struct BookReaderView: View {
         firstLoadedIndex = index
         lastLoadedIndex = index
         if let text = chapter.text {
-            segments = [ReaderChapter(title: chapter.title, text: text, url: chapter.url)]
+            segments = [ReaderChapter(title: chapter.title, text: text, url: chapter.url, isImagePage: chapter.isImagePage)]
+            isLoadingMore = false
+        } else if chapter.isImagePage {
+            // 本地扫描 / 矢量页：图片由正文区按需渲染，不抓取文本
+            segments = [ReaderChapter(title: chapter.title, text: nil, url: chapter.url, isImagePage: true)]
             isLoadingMore = false
         } else {
             // 网络章节：先清空旧正文，按需抓取
@@ -494,6 +515,12 @@ struct BookReaderView: View {
         guard chapters.indices.contains(next), segments.count < maxSegments else { return }
         isLoadingMore = true
         let chapter = chapters[next]
+        if chapter.isImagePage {
+            // 扫描 / 矢量页：图片由正文区按需渲染，不抓取文本
+            appendSegment(chapter: chapter, text: nil, advanceProgress: advanceProgress)
+            isLoadingMore = false
+            return
+        }
         if let text = chapter.text {
             appendSegment(chapter: chapter, text: text, advanceProgress: advanceProgress)
             isLoadingMore = false
@@ -518,6 +545,12 @@ struct BookReaderView: View {
         guard chapters.indices.contains(prev), segments.count < maxSegments else { return }
         isLoadingMore = true
         let chapter = chapters[prev]
+        if chapter.isImagePage {
+            // 扫描 / 矢量页：图片由正文区按需渲染，不抓取文本
+            finishPrepend(chapter: chapter, text: nil, proxy: proxy)
+            isLoadingMore = false
+            return
+        }
         if let text = chapter.text {
             finishPrepend(chapter: chapter, text: text, proxy: proxy)
             isLoadingMore = false
@@ -534,25 +567,90 @@ struct BookReaderView: View {
         }
     }
 
-    private func appendSegment(chapter: ReaderChapter, text: String, advanceProgress: Bool = true) {
-        segments.append(ReaderChapter(title: chapter.title, text: text, url: chapter.url))
+    private func appendSegment(chapter: ReaderChapter, text: String?, advanceProgress: Bool = true) {
+        segments.append(ReaderChapter(title: chapter.title, text: text, url: chapter.url, image: nil, isImagePage: chapter.isImagePage))
         lastLoadedIndex += 1
+        trimPageCache()
         guard advanceProgress else { return }
         currentIndex = lastLoadedIndex
         bookStore.updateProgress(bookID: book.id, chapterIndex: lastLoadedIndex)
     }
 
-    private func finishPrepend(chapter: ReaderChapter, text: String, proxy: ScrollViewProxy) {
-        segments.insert(ReaderChapter(title: chapter.title, text: text, url: chapter.url), at: 0)
+    private func finishPrepend(chapter: ReaderChapter, text: String?, proxy: ScrollViewProxy) {
+        segments.insert(ReaderChapter(title: chapter.title, text: text, url: chapter.url, image: nil, isImagePage: chapter.isImagePage), at: 0)
         firstLoadedIndex -= 1
         currentIndex = firstLoadedIndex
         bookStore.updateProgress(bookID: book.id, chapterIndex: firstLoadedIndex)
+        trimPageCache()
         // 前插后内容顶端暂落在视口下方，抑制顶部预加载，直到用户再次向下
         // 滚动超过阈值后由 evaluatePreload 统一解除（覆盖 onScrollGeometryChange
         // 与 PreferenceKey 两条几何路径）。
         suppressTopSentinel = true
         // 视口保持：滚到新章节末尾，使原有阅读位置基本不变
         proxy.scrollTo("segEnd-\(firstLoadedIndex)", anchor: .bottom)
+    }
+
+    /// 裁剪扫描页图片缓存：只保留当前已加载窗口 [firstLoadedIndex, lastLoadedIndex]
+    /// 内的页，控制内存（避免整本扫描 PDF 全量解码进内存）。
+    private func trimPageCache() {
+        let lo = firstLoadedIndex
+        let hi = lastLoadedIndex
+        for key in pageImages.keys where key < lo || key > hi {
+            pageImages.removeValue(forKey: key)
+        }
+    }
+
+    // MARK: - 扫描页渲染
+
+    /// 惰性渲染某一 PDF 页为 UIImage（带尺寸上限，@2x/@3x 屏自动高清）。
+    /// 仅在正文的图片页进入视口时调用，渲染结果进入 pageImages 缓存。
+    #if canImport(PDFKit)
+    private func renderPageImage(for index: Int) -> UIImage? {
+        guard let doc = pdfDocument, let page = doc.page(at: index) else { return nil }
+        let bounds = page.bounds(for: .mediaBox)
+        guard bounds.width > 0, bounds.height > 0 else { return nil }
+        let maxDim: CGFloat = 1400
+        let scale = min(1.0, maxDim / max(bounds.width, bounds.height))
+        let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { _ in
+            UIColor.white.setFill()
+            guard let ctx = UIGraphicsGetCurrentContext() else { return }
+            ctx.fill(CGRect(origin: .zero, size: size))
+            ctx.translateBy(x: 0, y: size.height)
+            ctx.scaleBy(x: scale, y: -scale)
+            page.draw(with: .mediaBox, in: ctx)
+        }
+    }
+    #endif
+
+    /// 确保指定章节（扫描页）的图片已渲染并进入缓存；缺失才渲染。
+    private func ensurePageImage(index: Int) {
+        guard pageImages[index] == nil else { return }
+        #if canImport(PDFKit)
+        if let img = renderPageImage(for: index) {
+            pageImages[index] = img
+        }
+        #endif
+    }
+
+    /// 扫描 / 矢量页的图片视图：优先显示已渲染缓存；未渲染时按需渲染或给出降级提示。
+    @ViewBuilder
+    private func pageImageView(chapterIndex: Int) -> some View {
+        if let img = pageImages[chapterIndex] {
+            Image(uiImage: img)
+                .resizable()
+                .scaledToFit()
+                .frame(maxWidth: .infinity)
+        } else if pdfDocument != nil {
+            ProgressView("渲染扫描页…")
+                .frame(maxWidth: .infinity, minHeight: 200)
+                .onAppear { ensurePageImage(index: chapterIndex) }
+        } else {
+            Text("（本页为扫描图片，无法渲染）")
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 120)
+        }
     }
 
     /// 切章后短暂解除哨兵武装，避免刚切到新章就自动衔接邻章。
@@ -589,8 +687,17 @@ struct BookReaderView: View {
                     currentIndex = savedIndex
                     firstLoadedIndex = savedIndex
                     lastLoadedIndex = savedIndex
+                    #if canImport(PDFKit)
+                    if book.format == .pdf, let url = bookStore.fileURL(for: book) {
+                        pdfDocument = PDFDocument(url: url)
+                    }
+                    #endif
                     if let restored, let text = restored.text {
                         segments = [ReaderChapter(title: restored.title, text: text, url: restored.url)]
+                        isLoadingMore = false
+                    } else if let restored, restored.isImagePage {
+                        // 扫描 / 矢量页：图片由正文区按需渲染，不抓取文本
+                        segments = [ReaderChapter(title: restored.title, text: nil, url: restored.url, isImagePage: true)]
                         isLoadingMore = false
                     } else {
                         segments = []

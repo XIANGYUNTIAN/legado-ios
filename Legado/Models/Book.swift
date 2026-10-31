@@ -28,6 +28,8 @@ struct Book: Identifiable, Codable, Equatable {
     var fileSize: Int64?
     /// 书源名称快照（book.originName，JS 规则可用；加入书架时从书源复制）
     var originName: String?
+    /// 封面远程地址（可选）：由封面服务从网络抓取后回填，便于下次直接复用、离线缓存
+    var coverRemoteURL: String?
 
     /// 规则阅读专用：书籍所在书源的 bookSourceUrl（为空表示本地书籍）
     var sourceId: String?
@@ -48,10 +50,11 @@ struct Book: Identifiable, Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case id, title, author, format
-        case fileRelativePath, remoteURL, addedAt, fileSize
-        case sourceId, bookUrl, originName
-        case lastChapterIndex, lastReadAt
-    }
+    case fileRelativePath, remoteURL, addedAt, fileSize
+    case sourceId, bookUrl, originName
+    case coverRemoteURL
+    case lastChapterIndex, lastReadAt
+}
 
     /// 显式成员初始化器（自定义 init(from:) 后合成成员初始化器被抑制，需手动补回）
     init(id: String = UUID().uuidString,
@@ -65,6 +68,7 @@ struct Book: Identifiable, Codable, Equatable {
          sourceId: String? = nil,
          bookUrl: String? = nil,
          originName: String? = nil,
+         coverRemoteURL: String? = nil,
          lastChapterIndex: Int = 0,
          lastReadAt: Date? = nil) {
         self.id = id
@@ -78,6 +82,7 @@ struct Book: Identifiable, Codable, Equatable {
         self.sourceId = sourceId
         self.bookUrl = bookUrl
         self.originName = originName
+        self.coverRemoteURL = coverRemoteURL
         self.lastChapterIndex = lastChapterIndex
         self.lastReadAt = lastReadAt
     }
@@ -107,6 +112,7 @@ struct Book: Identifiable, Codable, Equatable {
         sourceId = try? c.decodeIfPresent(String.self, forKey: .sourceId)
         bookUrl = try? c.decodeIfPresent(String.self, forKey: .bookUrl)
         originName = try? c.decodeIfPresent(String.self, forKey: .originName)
+        coverRemoteURL = try? c.decodeIfPresent(String.self, forKey: .coverRemoteURL)
         lastChapterIndex = (try? c.decodeIfPresent(Int.self, forKey: .lastChapterIndex)) ?? 0
         lastReadAt = try? c.decodeIfPresent(Date.self, forKey: .lastReadAt)
     }

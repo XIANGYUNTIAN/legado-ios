@@ -177,8 +177,7 @@ struct BookshelfView: View {
                         .foregroundStyle(selection.contains(book.id) ? Color.accentColor : Color.secondary)
                         .font(.title3)
                 }
-                Image(systemName: book.format == .txt ? "doc.text.fill" : "book.closed.fill")
-                    .foregroundStyle(.tint)
+                BookCoverView(book: book)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(book.displayTitle)
                         .font(.body)
