@@ -91,6 +91,10 @@ final class ReaderSettings: ObservableObject {
     @Published var pageMode: PageMode = .scroll
     @Published var pageAnimation: PageAnimation = .slide
 
+    // MARK: - 沉浸式阅读（隐藏状态栏与工具栏）
+
+    @Published var isImmersive: Bool = false
+
     private let fileURL: URL
 
     init() {
@@ -140,6 +144,7 @@ final class ReaderSettings: ObservableObject {
         var showChapterHeader: Bool
         var pageMode: PageMode
         var pageAnimation: PageAnimation
+        var isImmersive: Bool
     }
 
     func load() {
@@ -158,6 +163,7 @@ final class ReaderSettings: ObservableObject {
         showChapterHeader = decoded.showChapterHeader
         pageMode = decoded.pageMode
         pageAnimation = decoded.pageAnimation
+        isImmersive = decoded.isImmersive
     }
 
     func save() {
@@ -166,7 +172,8 @@ final class ReaderSettings: ObservableObject {
             customFontName: customFontName, fontSize: fontSize,
             letterSpacing: letterSpacing, lineSpacing: lineSpacing,
             justified: justified, showChapterHeader: showChapterHeader,
-            pageMode: pageMode, pageAnimation: pageAnimation
+            pageMode: pageMode, pageAnimation: pageAnimation,
+            isImmersive: isImmersive
         )
         guard let data = try? JSONEncoder().encode(dataObj) else { return }
         try? data.write(to: fileURL, options: .atomic)
