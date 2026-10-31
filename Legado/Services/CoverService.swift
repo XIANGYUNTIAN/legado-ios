@@ -124,8 +124,7 @@ final class CoverService {
             let grad = CGGradient(colorsSpace: space,
                                  colors: [top.cgColor, bottom.cgColor] as CFArray,
                                  locations: &locations)!
-            ctx.drawLinearGradient(grad, start: .zero, end: CGPoint(x: 0, y: h),
-                                  startRadius: 0, endRadius: 0, options: [])
+            ctx.drawLinearGradient(grad, start: .zero, end: CGPoint(x: 0, y: h), options: [])
             // 标题（居中、自动换行）
             let para = NSMutableParagraphStyle()
             para.alignment = .center
