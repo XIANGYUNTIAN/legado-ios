@@ -78,13 +78,24 @@ struct PagedReaderView: UIViewControllerRepresentable {
         }
     }
 
-    /// 某章参与分页的全文（标题拼在正文前，章首页自然含标题）
-    func fullText(for chapter: ReaderChapter) -> String {
-        guard let t = chapter.text, !t.isEmpty else { return "" }
-        if settings.showChapterHeader && !chapter.title.isEmpty {
-            return chapter.title + "\n\n" + t
+    /// 某章参与分页的全文（标题拼在正文前，章首页自然含标题）。
+    /// 正文来源：网络章走 texts 缓存，本地章走 chapters[].text——分页与切片必须取**同一字符串**，
+    /// 否则页边界错位 → 内容跳变/重复（「翻页内容不连贯」根因之一）。
+    func pageText(_ chapterIndex: Int) -> String {
+        guard let ch = chapters[safe: chapterIndex] else { return "" }
+        var body: String
+        if let t = texts[chapterIndex], !t.isEmpty {
+            body = t
+        } else if let t = ch.text, !t.isEmpty {
+            body = t
+        } else {
+            body = ""
         }
-        return t
+        guard !body.isEmpty else { return "" }
+        if settings.showChapterHeader && !ch.title.isEmpty {
+            return ch.title + "\n\n" + body
+        }
+        return body
     }
 
     // MARK: - UIViewControllerRepresentable
@@ -162,19 +173,13 @@ struct PagedReaderView: UIViewControllerRepresentable {
             parent.paginator.invalidate()
         }
 
-        /// 当前章正文（网络章优先走 texts 缓存，本地章走 chapters[].text）
-        private func currentText(_ chapterIndex: Int) -> String? {
-            if let t = parent.texts[chapterIndex], !t.isEmpty { return t }
-            guard let ch = parent.chapters[safe: chapterIndex] else { return nil }
-            return ch.text
-        }
 
         /// 某章页数（图片章恒为 1 页；文本未就绪返回 0）
         private func pageCount(_ chapterIndex: Int) -> Int {
             guard parent.chapters.indices.contains(chapterIndex) else { return 0 }
             let ch = parent.chapters[chapterIndex]
             if ch.isImagePage { return 1 }
-            let ranges = parent.paginator.pages(chapterIndex: chapterIndex, text: currentText(chapterIndex))
+            let ranges = parent.paginator.pages(chapterIndex: chapterIndex, text: parent.pageText(chapterIndex))
             return ranges.isEmpty ? 0 : ranges.count
         }
 
@@ -183,7 +188,7 @@ struct PagedReaderView: UIViewControllerRepresentable {
             let chapter = selection
             guard parent.chapters.indices.contains(chapter) else { return (chapter, 0) }
             guard let offset else { return (chapter, 0) }
-            let ranges = parent.paginator.pages(chapterIndex: chapter, text: currentText(chapter))
+            let ranges = parent.paginator.pages(chapterIndex: chapter, text: parent.pageText(chapter))
             if ranges.isEmpty { return (chapter, 0) }
             return (chapter, ChapterPaginator.pageIndex(for: offset, in: ranges))
         }
@@ -211,9 +216,11 @@ struct PagedReaderView: UIViewControllerRepresentable {
             }
 
             // 文本页：按分页 range 取子串
-            let ranges = parent.paginator.pages(chapterIndex: chapterIndex, text: currentText(chapterIndex))
+            let ranges = parent.paginator.pages(chapterIndex: chapterIndex, text: parent.pageText(chapterIndex))
             if ranges.isEmpty {
-                // 正文未就绪：占位页（加载提示），并触发正文抓取；文本到达后由 applyIfNeeded 重定位。
+                // 正文未就绪：占位页（加载提示），并触发正文抓取。
+                // 不入 vcCache：文本就绪后 applyIfNeeded 非重排路径经 hasPageVC==false 重建为真实页，
+                // 否则占位页会永久卡在「正在加载正文…」。
                 Task { _ = await parent.onNeedsText(chapterIndex) }
                 let host = UIHostingController(
                     rootView: Text("正在加载正文…")
@@ -221,12 +228,11 @@ struct PagedReaderView: UIViewControllerRepresentable {
                         .foregroundStyle(Color.secondary)
                 )
                 host.view.backgroundColor = bg
-                vcCache[key] = host
                 return host
             }
             guard ranges.indices.contains(pageIndex) else { return nil }
             let range = ranges[pageIndex]
-            let full = parent.fullText(for: chapter)
+            let full = parent.pageText(chapterIndex)
             let ns = full as NSString
             let loc = min(max(range.location, 0), ns.length)
             let len = min(max(range.length, 0), ns.length - loc)
@@ -236,6 +242,8 @@ struct PagedReaderView: UIViewControllerRepresentable {
             pageView.contentInsets = PagedReaderView.pageInsets
             pageView.attrString = NSAttributedString(string: slice, attributes: parent.buildAttributes())
             pageView.backgroundColor = bg
+            // 关键：bounds 变化时重绘而非缩放，否则面板出现/尺寸收缩时旧文本被拉伸「变形」
+            pageView.contentMode = .redraw
 
             let vc = UIViewController()
             vc.view = pageView
@@ -253,25 +261,29 @@ struct PagedReaderView: UIViewControllerRepresentable {
         /// 文本刚到达（占位→真实）也在非重排路径检测刷新。
         func applyIfNeeded(pageSize: CGSize, fingerprint: String) {
             var needsRelayout = false
-            if pageSize != parent.paginator.pageSize {
-                parent.paginator.pageSize = pageSize
-                needsRelayout = true
-            }
+            if pageSize != parent.paginator.pageSize { needsRelayout = true }
             if fingerprint != lastFingerprint {
                 lastFingerprint = fingerprint
-                parent.paginator.attributes = parent.buildAttributes()
                 needsRelayout = true
             }
             if needsRelayout {
+                // 记录当前字符偏移（用**旧**分页，invalidate 前），重排后仍定位到同一内容
+                let off = currentOffset()
+                parent.paginator.pageSize = pageSize
+                parent.paginator.attributes = parent.buildAttributes()
                 parent.paginator.invalidate()
-                relayoutCurrentPage()
+                // 关键：清页控制器缓存，否则当前页/已访问页仍返回旧排版内容，
+                // 表现为「改字号仅在往后翻页后生效、当前页不变、面板收缩时页面变形」。
+                vcCache.removeAll()
+                relayoutCurrentPage(to: off)
                 return
             }
-            // 非重排：检查当前章文本是否刚就绪（占位 → 真实页）
-            let ranges = parent.paginator.pages(chapterIndex: currentChapter, text: currentText(currentChapter))
+            // 非重排：检查当前章文本是否刚就绪（占位 → 真实页）。
+            // 占位页不入缓存，故文本就绪后 hasPageVC 为 false → 重建为真实页。
+            let ranges = parent.paginator.pages(chapterIndex: currentChapter, text: parent.pageText(currentChapter))
             if ranges.isEmpty { return }
             if currentPage >= ranges.count {
-                relayoutCurrentPage()
+                relayoutCurrentPage(to: currentOffset())
             } else if !hasPageVC(currentChapter, currentPage) {
                 if let target = pageVC(chapterIndex: currentChapter, pageIndex: currentPage) {
                     pvc?.setViewControllers([target], direction: .forward, animated: false)
@@ -279,12 +291,11 @@ struct PagedReaderView: UIViewControllerRepresentable {
             }
         }
 
-        /// 重排当前页：记录当前字符 offset，重算分页后定位到含该 offset 的新页
-        private func relayoutCurrentPage() {
-            let off = currentOffset()
-            let ranges = parent.paginator.pages(chapterIndex: currentChapter, text: currentText(currentChapter))
+        /// 重排当前页：按给定字符 offset 重算分页，定位到含该 offset 的新页
+        private func relayoutCurrentPage(to offset: Int) {
+            let ranges = parent.paginator.pages(chapterIndex: currentChapter, text: parent.pageText(currentChapter))
             guard !ranges.isEmpty else { return }
-            let newPage = ChapterPaginator.pageIndex(for: off, in: ranges)
+            let newPage = ChapterPaginator.pageIndex(for: offset, in: ranges)
             if let target = pageVC(chapterIndex: currentChapter, pageIndex: newPage) {
                 currentPage = newPage
                 pvc?.setViewControllers([target], direction: .forward, animated: false)
@@ -292,7 +303,7 @@ struct PagedReaderView: UIViewControllerRepresentable {
         }
 
         private func currentOffset() -> Int {
-            let ranges = parent.paginator.pages(chapterIndex: currentChapter, text: currentText(currentChapter))
+            let ranges = parent.paginator.pages(chapterIndex: currentChapter, text: parent.pageText(currentChapter))
             guard ranges.indices.contains(currentPage) else { return 0 }
             return ranges[currentPage].location
         }
@@ -334,7 +345,7 @@ struct PagedReaderView: UIViewControllerRepresentable {
                   let (c, p) = identity(of: current) else { return }
             currentChapter = c
             currentPage = p
-            let ranges = parent.paginator.pages(chapterIndex: c, text: currentText(c))
+            let ranges = parent.paginator.pages(chapterIndex: c, text: parent.pageText(c))
             let offset = ranges.indices.contains(p) ? ranges[p].location : 0
             parent.selection = c
             parent.onPageChange(c, p, offset)
