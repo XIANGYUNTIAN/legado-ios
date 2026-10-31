@@ -131,8 +131,17 @@ struct BookReaderView: View {
 
     // MARK: - 翻页（左右翻页模式）
 
-    /// 分页模式直接用「全量章节数组 + currentIndex 全局下标」驱动 PagedReaderView，
-    /// 无需独立窗口状态（见 readerContent 的 PagedReaderView 分支）。
+    /// 页级分页器（Core Text 按屏分页）：跨设置变化共享缓存，随设置/尺寸实时重排
+    @State private var paginator = ChapterPaginator()
+    /// 网络章正文缓存（chapterIndex → text）。分页与页面渲染以此为准；
+    /// 本地章正文仍走 chapters[].text。文本到达后写入，驱动 PagedReaderView 重排定位。
+    @State private var chapterTexts: [Int: String] = [:]
+    /// 沉浸模式下的控制层显隐（单击中央切换）。注意：这是运行时状态，非持久化设置。
+    @State private var immersiveChromeVisible = false
+    /// 首次进入分页模式时的章内字符偏移（恢复退出前页面；nil → 章首页）
+    @State private var restorePageOffset: Int? = nil
+    /// 最近一次翻页完成时的章内页偏移，用于退出时保存页位置
+    @State private var lastPageOffset: Int = 0
 
     // MARK: - 下载（在线 TXT 导出）
 
@@ -170,48 +179,34 @@ struct BookReaderView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    // 设置面板以同层级浮层呈现（非 sheet），阅读内容仍在面板之后实时渲染，
-                    // 改动字号/背景/日夜间时正文立即联动——对齐 LEGADO 的实时预览交互。
-                    ZStack(alignment: .bottom) {
+                    // 正文区：按翻页模式渲染。沉浸模式下用 GeometryReader 包裹以获取尺寸，
+                    // 通过 SpatialTapGesture 识别「单击中央」切换控制层显隐（沉浸式交互）。
+                    GeometryReader { geo in
                         readerContent
-                        if showSettings {
-                            // 轻遮罩：点击关闭面板，但上方阅读区仍清晰可见（live preview）
-                            Color.black.opacity(0.06)
-                                .ignoresSafeArea()
-                                .onTapGesture { showSettings = false }
-                            ReaderSettingsPanel(settings: settings, onClose: { showSettings = false })
-                                .padding(.horizontal, 12)
-                                .padding(.bottom, 8)
-                        }
-                        if settings.isImmersive {
-                            // 沉浸模式下工具栏已隐藏，提供悬浮退出入口，避免无法退出
-                            VStack {
-                                HStack {
-                                    Spacer()
-                                    Button {
-                                        settings.isImmersive = false
-                                        settings.save()
-                                    } label: {
-                                        Image(systemName: "rectangle.inset.filled")
-                                            .font(.title3)
-                                            .padding(10)
-                                            .background(.ultraThinMaterial)
-                                            .clipShape(Circle())
+                            .simultaneousGesture(
+                                SpatialTapGesture().onEnded { value in
+                                    guard settings.isImmersive else { return }
+                                    let size = geo.size
+                                    if abs(value.location.x - size.width / 2) < size.width / 6 &&
+                                       abs(value.location.y - size.height / 2) < size.height / 3 {
+                                        immersiveChromeVisible.toggle()
                                     }
-                                    .foregroundStyle(settings.effectiveForeground)
-                                    .padding(.trailing, 12)
-                                    .padding(.top, 8)
                                 }
-                                Spacer()
-                            }
-                        }
+                            )
                     }
                 }
             }
             .background(settings.effectiveBackground)
             .safeAreaInset(edge: .bottom) {
-                // 沉浸式或设置面板打开时隐藏工具栏，保持画面干净
-                if !settings.isImmersive && !showSettings { readerToolbar }
+                // 设置面板打开时以底部 inset 承载（正文自动上移，面板不遮挡正文 → live preview 可见）；
+                // 否则显示阅读工具栏（沉浸时按 chrome 显隐）。
+                if showSettings {
+                    ReaderSettingsPanel(settings: settings, onClose: { showSettings = false })
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 8)
+                } else if chromeVisible {
+                    readerToolbar
+                }
             }
             .sheet(isPresented: $showChapterList) { chapterListSheet }
             .sheet(isPresented: $showDownload) { downloadSheet }
@@ -223,8 +218,8 @@ struct BookReaderView: View {
             .navigationTitle(currentChapter?.title ?? book.displayTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar(.hidden, for: .tabBar)
-            .toolbar(settings.isImmersive ? .hidden : .visible, for: .navigationBar)
-            .statusBarHidden(settings.isImmersive)
+            .toolbar(chromeVisible ? .visible : .hidden, for: .navigationBar)
+            .statusBarHidden(!chromeVisible)
             .onAppear {
                 // 避免 sheet dismiss 等原因导致重复加载、进度被重置
                 if !didLoad {
@@ -232,10 +227,13 @@ struct BookReaderView: View {
                     load()
                 }
             }
+            .onDisappear {
+                saveCurrentPagePosition()
+            }
             .onChange(of: settings.pageMode) { _, mode in
                 if mode == .page {
-                    // 进入分页模式：PagedReaderView 由 readerContent 按 currentIndex 初始化；
-                    // 预取当前章正文，避免首页短暂空白。
+                    // 进入分页模式：恢复退出前页位置（章内字符偏移），并预取当前章正文避免空白。
+                    restorePageOffset = PagePositionStore.shared.offset(bookId: book.id, chapter: currentIndex)
                     let idx = currentIndex
                     if chapters.indices.contains(idx), chapters[idx].text == nil, !chapters[idx].isImagePage {
                         Task { _ = await ensureChapterText(idx) }
@@ -261,9 +259,16 @@ struct BookReaderView: View {
             PagedReaderView(
                 settings: settings,
                 chapters: chapters,
+                texts: chapterTexts,
                 selection: $currentIndex,
+                paginator: paginator,
+                // 进入分页模式时 makeUIViewController 可能早于 onChange 执行，
+                // 故把页 offset 读取内联兜底（restorePageOffset 为 nil 时从存储实时查）
+                initialPageOffset: restorePageOffset ?? PagePositionStore.shared.offset(bookId: book.id, chapter: currentIndex),
                 onNeedsText: { idx in await ensureChapterText(idx) },
-                onPageChange: { idx in handlePagedPageChange(idx) },
+                onPageChange: { chapterIdx, pageIdx, offset in
+                    handlePagedPageChange(chapterIdx, pageIdx, offset)
+                },
                 pageImage: { gi in
                     // 扫描页：直接渲染为图片视图（hosted 分页视图无法感知 pageImages 变化，
                     // 故不走 pageImageView 的异步补渲染，改为同步 renderPageImage）
@@ -395,32 +400,54 @@ struct BookReaderView: View {
 
     // MARK: - 左右翻页模式（UIPageViewController：真卷页 / 滑动 / 无动画）
 
-    /// 翻页完成回调：同步进度并预取相邻章节正文，避免翻页时出现空白页。
-    /// （PagedReaderView 内部以全量章节数组 + 全局下标取页，天然支持前后双向翻页。）
-    private func handlePagedPageChange(_ idx: Int) {
-        guard chapters.indices.contains(idx) else { return }
-        currentIndex = idx
-        bookStore.updateProgress(bookID: book.id, chapterIndex: idx)
+    /// 翻页完成回调：同步进度、保存页位置（章 + 字符偏移），并预取相邻章节正文，避免翻页空白。
+    @MainActor
+    private func handlePagedPageChange(_ chapterIdx: Int, _ pageIdx: Int, _ offset: Int) {
+        guard chapters.indices.contains(chapterIdx) else { return }
+        currentIndex = chapterIdx
+        lastPageOffset = offset
+        bookStore.updateProgress(bookID: book.id, chapterIndex: chapterIdx)
+        // 页位置持久化：下次进入回到退出前页面
+        PagePositionStore.shared.save(bookId: book.id, chapter: chapterIdx, offset: offset)
         // 预取相邻两章正文（缓存命中即跳过，仅在缺失时抓取）
-        for j in [idx - 1, idx + 1] where chapters.indices.contains(j) {
+        for j in [chapterIdx - 1, chapterIdx + 1] where chapters.indices.contains(j) {
             let ch = chapters[j]
-            if ch.text == nil, !ch.isImagePage {
+            if ch.text == nil, !ch.isImagePage, chapterTexts[j] == nil {
                 Task { _ = await ensureChapterText(j) }
             }
         }
     }
 
-    /// 确保指定全局章节已取到正文（缓存优先，否则抓取），返回正文文本
+    /// 确保指定全局章节已取到正文（缓存优先，否则抓取），返回正文文本。
+    /// 结果统一写入 chapterTexts，供 PagedReaderView 分页与页面渲染取用。
+    @MainActor
     private func ensureChapterText(_ globalIndex: Int) async -> String {
         guard chapters.indices.contains(globalIndex) else { return "" }
         let chapter = chapters[globalIndex]
-        if let text = chapter.text, !text.isEmpty { return text }
+        if let text = chapter.text, !text.isEmpty {
+            if chapterTexts[globalIndex] != text { chapterTexts[globalIndex] = text }
+            return text
+        }
         guard chapter.isImagePage == false else { return "" }
-        return await fetchContentText(for: globalIndex)
+        let text = await fetchContentText(for: globalIndex)
+        if !text.isEmpty { chapterTexts[globalIndex] = text }
+        return text
     }
 
     private var currentChapter: ReaderChapter? {
         chapters[safe: currentIndex]
+    }
+
+    /// 控制层（导航栏 / 状态栏 / 底部工具栏）是否可见：
+    /// 非沉浸恒可见；沉浸时由「单击中央」切换（immersiveChromeVisible）。
+    private var chromeVisible: Bool {
+        !settings.isImmersive || immersiveChromeVisible
+    }
+
+    /// 退出阅读时保存页位置（章 + 当前页字符偏移），下次进入恢复到退出前页面
+    @MainActor
+    private func saveCurrentPagePosition() {
+        PagePositionStore.shared.save(bookId: book.id, chapter: currentIndex, offset: lastPageOffset)
     }
 
     // MARK: - 工具栏（上一章 / 下一章）
@@ -460,9 +487,10 @@ struct BookReaderView: View {
             Spacer(minLength: 8)
 
             Button {
-                // 沉浸式开关：隐藏/显示状态栏 + 导航栏 + 底部工具栏
+                // 沉浸式开关：进入沉浸默认全屏干净；退出沉浸恢复控制层可见
                 settings.isImmersive.toggle()
                 settings.save()
+                immersiveChromeVisible = false
             } label: {
                 Image(systemName: settings.isImmersive ? "rectangle.inset.filled" : "rectangle")
                     .frame(width: 44, height: 44)
@@ -637,7 +665,7 @@ struct BookReaderView: View {
             currentIndex = index
             bookStore.updateProgress(bookID: book.id, chapterIndex: index)
             let ch = chapters[index]
-            if ch.text == nil, !ch.isImagePage {
+            if ch.text == nil, !ch.isImagePage, chapterTexts[index] == nil {
                 Task { _ = await ensureChapterText(index) }
             }
         } else {
@@ -907,6 +935,8 @@ struct BookReaderView: View {
                     currentIndex = savedIndex
                     firstLoadedIndex = savedIndex
                     lastLoadedIndex = savedIndex
+                    // 恢复退出前页位置（章内字符偏移）；无记录则从章首页开始
+                    restorePageOffset = PagePositionStore.shared.offset(bookId: book.id, chapter: savedIndex)
                     #if canImport(PDFKit)
                     if book.format == .pdf, let url = bookStore.fileURL(for: book) {
                         pdfDocument = PDFDocument(url: url)
@@ -933,6 +963,8 @@ struct BookReaderView: View {
                 if book.supportsRuleReading, restored?.text == nil {
                     let text = await fetchContentText(for: savedIndex)
                     await MainActor.run {
+                        // 同步写入 chapterTexts，供分页模式复用（避免切分页时重复抓取）
+                        if !text.isEmpty { chapterTexts[savedIndex] = text }
                         if currentIndex == savedIndex, lastLoadedIndex == savedIndex {
                             segments = [ReaderChapter(title: restored?.title ?? "", text: text, url: restored?.url)]
                         }
