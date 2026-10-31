@@ -220,7 +220,7 @@ struct PagedReaderView: UIViewControllerRepresentable {
         /// 设置面板开合、沉浸 chrome 显隐（改变 safe area）都会走到这里，页面即时自适应，
         /// 不再出现下半空白或跳回章初始。
         private func handleBoundsChange(_ size: CGSize) {
-            let content = parent.contentSize(of: size)
+            let content = parent.contentSize(of: CGRect(origin: .zero, size: size))
             guard content.width > 1, content.height > 1 else { return }
             // 尺寸未变（同一次布局多次回调 / 面板动画中间帧）→ 跳过，避免反复重排
             if content == parent.paginator.pageSize { return }
