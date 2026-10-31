@@ -180,8 +180,9 @@ struct PagedReaderView: UIViewControllerRepresentable {
         private var vcCache: [String: UIViewController] = [:]
         private var lastFingerprint = ""
         private weak var pvc: UIPageViewController?
-        /// 排版重排令牌（与 parent.reflowToken 比对，变化即强制重排）
-        private var lastReflowToken = 0
+        /// 排版重排令牌（与 parent.reflowToken 比对，变化即强制重排）。
+        /// 注：非 private——外层 PagedReaderView.updateUIViewController 会比对它。
+        var lastReflowToken = 0
         /// 沉浸「单击中央」回调（由 updateUIViewController 随父视图刷新）
         var onImmersiveTap: (() -> Void)?
 
