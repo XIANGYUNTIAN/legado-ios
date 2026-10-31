@@ -243,6 +243,23 @@ struct BookReaderView: View {
                 }
                 reflowToken += 1
             }
+            // 沉浸「单击中央」切换控制层显隐（chromeVisible）会改变 safe area → 阅读区尺寸变化。
+            // 与排版设置一致，纳入 .id 全量重建并定位当前页——否则依赖 viewDidLayoutSubviews 的
+            // 尺寸回调（chrome 显隐动画下时序不可靠），页面内容不保持当前页。
+            .onChange(of: immersiveChromeVisible) { _, _ in
+                if settings.pageMode == .page {
+                    restorePageOffset = lastPageOffset
+                }
+                reflowToken += 1
+            }
+            // 开关沉浸模式（settings.isImmersive）同样改变 chrome 显隐 → 尺寸变化：
+            // 一并纳入 .id 重建（双保险），避免仅依赖 viewDidLayoutSubviews 时序。
+            .onChange(of: settings.isImmersive) { _, _ in
+                if settings.pageMode == .page {
+                    restorePageOffset = lastPageOffset
+                }
+                reflowToken += 1
+            }
             .onAppear {
                 // 避免 sheet dismiss 等原因导致重复加载、进度被重置
                 if !didLoad {

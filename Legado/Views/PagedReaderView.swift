@@ -324,19 +324,25 @@ struct PagedReaderView: UIViewControllerRepresentable {
 
         // MARK: 重排（设置 / 尺寸变化，保持字符 offset）
 
-        /// 应用设置与尺寸变化：指纹或尺寸变化 → 清缓存重排并回到当前内容位置。
+        /// 应用设置变化：指纹变化 → 清缓存重排并回到当前内容位置。
         /// 文本刚到达（占位→真实）也在非重排路径检测刷新。
+        ///
+        /// 重要：**不再用调用方传入的 pageSize 做尺寸重排**。尺寸变化的重排统一由
+        /// `handleBoundsChange`（`viewDidLayoutSubviews` 的真实布局尺寸）驱动——因为
+        /// `updateUIViewController` 里读 `vc.view.bounds` 时布局尚未完成，尺寸不可靠
+        /// （设置面板打开 / 沉浸 chrome 切换时更小），用它重新分页会得到错误 pageSize
+        /// → 页面内容错乱、不保持当前内容（「沉浸开关切换后页面跳变」根因）。
+        /// 仅当尚无可靠尺寸（pageSize == .zero）时兜底设置一次，随后被真实尺寸纠正。
         func applyIfNeeded(pageSize: CGSize, fingerprint: String) {
-            var needsRelayout = false
-            if pageSize != parent.paginator.pageSize { needsRelayout = true }
+            if parent.paginator.pageSize == .zero,
+               pageSize.width > 1, pageSize.height > 1 {
+                parent.paginator.pageSize = pageSize
+            }
             if fingerprint != lastFingerprint {
                 lastFingerprint = fingerprint
-                needsRelayout = true
-            }
-            if needsRelayout {
-                // 记录当前字符偏移（用**旧**分页，invalidate 前），重排后仍定位到同一内容
+                // 记录当前字符偏移（用**旧**分页，invalidate 前），重排后仍定位到同一内容。
+                // 尺寸用 paginator.pageSize（真实布局，由 handleBoundsChange 维护）。
                 let off = currentOffset()
-                parent.paginator.pageSize = pageSize
                 parent.paginator.attributes = parent.buildAttributes()
                 parent.paginator.invalidate()
                 // 关键：清页控制器缓存，否则当前页/已访问页仍返回旧排版内容，
@@ -372,9 +378,13 @@ struct PagedReaderView: UIViewControllerRepresentable {
         /// 强制重排（排版令牌变化时由 updateUIViewController 调用）：记录当前字符 offset →
         /// 更新分页参数 → 清分页缓存 + 页控制器缓存 → 按 offset 重新定位。
         /// 保证「改字号/字距/行距/背景/日夜间」在当前页立即生效，而非仅往后翻页才变。
+        ///
+        /// 尺寸用**可靠 pageSize**（handleBoundsChange 维护的真实布局尺寸）优先；
+        /// 传入的 pageSize 仅在尚无可靠尺寸时作首帧兜底（随后被真实尺寸纠正）。
         func forceRelayout(pageSize: CGSize) {
             let off = currentOffset()
-            parent.paginator.pageSize = pageSize
+            let size = parent.paginator.pageSize.width > 1 ? parent.paginator.pageSize : pageSize
+            parent.paginator.pageSize = size
             parent.paginator.attributes = parent.buildAttributes()
             parent.paginator.invalidate()
             vcCache.removeAll()
