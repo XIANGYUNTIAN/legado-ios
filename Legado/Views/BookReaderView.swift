@@ -168,6 +168,12 @@ struct BookReaderView: View {
     /// 连续加载的章节段上限，防止超长阅读会话内存无限增长
     private let maxSegments = 25
 
+    /// 排版相关设置指纹：任一排版/背景设置变化 → 指纹变化 → 触发 PagedReaderView 重建（实时联动）。
+    /// 仅纳入影响版面布局的设置，排除翻页模式/动画/沉浸（不重排，避免无谓重建）。
+    private var layoutFingerprint: String {
+        "\(settings.fontFamily.rawValue)|\(settings.customFontName)|\(settings.fontSize)|\(settings.letterSpacing)|\(settings.lineSpacing)|\(settings.justified)|\(settings.theme.rawValue)|\(settings.isNight)|\(settings.showChapterHeader)"
+    }
+
     var body: some View {
         NavigationStack {
             Group {
@@ -226,9 +232,15 @@ struct BookReaderView: View {
             .toolbar(.hidden, for: .tabBar)
             .toolbar(chromeVisible ? .visible : .hidden, for: .navigationBar)
             .statusBarHidden(!chromeVisible)
-            // 阅读设置任一变化 → 强制分页重排（不依赖 representable 的 update 时序，
-            // 那是「改字体仅往后翻页生效 / 当前页不变」的根因）。
-            .onReceive(settings.objectWillChange) { _ in
+            // 排版设置变化（字号/字距/行距/背景/日夜间/字体等）→ 记录当前页字符 offset →
+            // 自增重排令牌。令牌驱动 PagedReaderView 的 .id() **全量重建**（等价于「退出返回」的
+            // 全新 makeUIViewController），确保在当前页**立即**生效。
+            // 注：用 onChange(排版指纹) 而非 onReceive(objectWillChange) —— 后者在属性**改前**触发，
+            // 且对非排版设置（翻页模式/动画/沉浸）也误触发重建，故排除。
+            .onChange(of: layoutFingerprint) { _, _ in
+                if settings.pageMode == .page {
+                    restorePageOffset = lastPageOffset
+                }
                 reflowToken += 1
             }
             .onAppear {
@@ -245,6 +257,8 @@ struct BookReaderView: View {
                 if mode == .page {
                     // 进入分页模式：恢复退出前页位置（章内字符偏移），并预取当前章正文避免空白。
                     restorePageOffset = PagePositionStore.shared.offset(bookId: book.id, chapter: currentIndex)
+                    // 同步 lastPageOffset：PagedReaderView 重建（排版设置变化）时以此定位当前页
+                    lastPageOffset = restorePageOffset ?? 0
                     let idx = currentIndex
                     if chapters.indices.contains(idx), chapters[idx].text == nil, !chapters[idx].isImagePage {
                         Task { _ = await ensureChapterText(idx) }
@@ -300,8 +314,11 @@ struct BookReaderView: View {
                 onImmersiveTap: { immersiveChromeVisible.toggle() }
             )
             // UIPageViewController 的 transitionStyle 仅在 init 时生效：
-            // 动画切换时以 .id 强制重建，应用新的滑动/卷页样式。
-            .id(settings.pageAnimation)
+            // 排版设置变化（reflowToken）或动画切换（pageAnimation）时以 .id 强制重建。
+            // 关键：排版设置变化必须走**全量重建**（等价于「退出返回」的全新 makeUIViewController），
+            // 而非依赖 updateUIViewController 的重排时序——后者在设置面板打开时并不可靠，
+            // 表现为「改字号/字距/行距/背景/日夜间在当前页不实时联动，仅退出返回才变」。
+            .id("\(reflowToken)|\(settings.pageAnimation)")
         } else {
             scrollContent
         }
@@ -952,6 +969,8 @@ struct BookReaderView: View {
                     lastLoadedIndex = savedIndex
                     // 恢复退出前页位置（章内字符偏移）；无记录则从章首页开始
                     restorePageOffset = PagePositionStore.shared.offset(bookId: book.id, chapter: savedIndex)
+                    // 同步 lastPageOffset：PagedReaderView 重建（排版设置变化）时以此定位当前页
+                    lastPageOffset = restorePageOffset ?? 0
                     #if canImport(PDFKit)
                     if book.format == .pdf, let url = bookStore.fileURL(for: book) {
                         pdfDocument = PDFDocument(url: url)

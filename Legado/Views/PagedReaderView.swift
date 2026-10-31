@@ -31,8 +31,10 @@ struct PagedReaderView: UIViewControllerRepresentable {
     var onPageChange: @MainActor (Int, Int, Int) -> Void
     /// 扫描版 PDF 图片页渲染器（全局下标 → 图片视图）
     var pageImage: (Int) -> AnyView?
-    /// 排版重排令牌：外层在设置变化时自增，驱动本组件**强制**重排。
-    /// 不依赖 SwiftUI representable 的 updateUIViewController 时序——那是「改字体仅往后翻页生效」的根因。
+    /// 排版重排令牌：外层在排版设置变化时自增。外层以 `.id("\(reflowToken)|\(pageAnimation)")`
+    /// 包裹本组件——令牌变化即触发**全量重建**（新 makeUIViewController，等价于退出返回的即时版），
+    /// 保证改字号/字距/行距/背景/日夜间在当前页立即生效。
+    /// 本字段同时作为 updateUIViewController 内 forceRelayout 的兜底比对（重建后首帧不重复重排）。
     var reflowToken: Int = 0
     /// 沉浸模式「单击中央」回调。页面模式下用原生 UITapGestureRecognizer 触发，
     /// 避免被 UIPageViewController 的 pan/卷页手势吞掉（SwiftUI SpatialTapGesture 的失效根因）。
@@ -190,6 +192,8 @@ struct PagedReaderView: UIViewControllerRepresentable {
             self.parent = parent
             self.currentChapter = parent.selection
             self.currentPage = 0
+            // 以初始令牌为基准：重建（.id 变化）后首帧不触发多余 forceRelayout
+            self.lastReflowToken = parent.reflowToken
         }
 
         func attach(pvc: UIPageViewController) { self.pvc = pvc }
@@ -198,6 +202,8 @@ struct PagedReaderView: UIViewControllerRepresentable {
             parent.paginator.pageSize = pageSize
             parent.paginator.attributes = parent.buildAttributes()
             parent.paginator.invalidate()
+            // 以当前排版指纹为基准：重建后 applyIfNeeded 不误判为「排版已变化」而重复重排
+            lastFingerprint = parent.layoutFingerprint
         }
 
 
