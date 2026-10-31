@@ -31,6 +31,12 @@ struct PagedReaderView: UIViewControllerRepresentable {
     var onPageChange: @MainActor (Int, Int, Int) -> Void
     /// 扫描版 PDF 图片页渲染器（全局下标 → 图片视图）
     var pageImage: (Int) -> AnyView?
+    /// 排版重排令牌：外层在设置变化时自增，驱动本组件**强制**重排。
+    /// 不依赖 SwiftUI representable 的 updateUIViewController 时序——那是「改字体仅往后翻页生效」的根因。
+    var reflowToken: Int = 0
+    /// 沉浸模式「单击中央」回调。页面模式下用原生 UITapGestureRecognizer 触发，
+    /// 避免被 UIPageViewController 的 pan/卷页手势吞掉（SwiftUI SpatialTapGesture 的失效根因）。
+    var onImmersiveTap: () -> Void = {}
 
     /// 页内容边距（与 ChapterPaginator 分页 pageSize 的扣除量一致）
     static let pageInsets = UIEdgeInsets(top: 12, left: 20, bottom: 40, right: 20)
@@ -114,7 +120,15 @@ struct PagedReaderView: UIViewControllerRepresentable {
         // 造成内容重复 / 阅读顺序错乱；单页数据源下应恒为 false，保证翻页顺序与内容连贯。
         vc.isDoubleSided = false
         context.coordinator.parent = self
+        context.coordinator.attach(pvc: vc)
         context.coordinator.configure(pageSize: contentSize(of: vc.view.bounds))
+        // 沉浸「单击中央」：原生 tap 手势，允许与 UIPageViewController 的翻页手势并存识别，
+        // 且仅命中中央区域（水平 ±1/6、垂直 ±1/3）时回调——不吞边缘点按（保留翻页点按）。
+        let immersiveTap = UITapGestureRecognizer(
+            target: context.coordinator, action: #selector(Coordinator.handleImmersiveTap(_:)))
+        immersiveTap.cancelsTouchesInView = false
+        immersiveTap.delegate = context.coordinator
+        vc.view.addGestureRecognizer(immersiveTap)
         // 初始定位：章 + 页（由字符 offset 决定页下标）
         let (chapter, page) = context.coordinator.initialTarget(
             selection: selection, offset: initialPageOffset)
@@ -128,11 +142,19 @@ struct PagedReaderView: UIViewControllerRepresentable {
 
     func updateUIViewController(_ vc: UIPageViewController, context: Context) {
         context.coordinator.parent = self
+        context.coordinator.onImmersiveTap = onImmersiveTap
         vc.view.backgroundColor = UIColor(settings.effectiveBackground)
         vc.isDoubleSided = false
         context.coordinator.attach(pvc: vc)
         let size = contentSize(of: vc.view.bounds)
-        context.coordinator.applyIfNeeded(pageSize: size, fingerprint: layoutFingerprint)
+        // 排版令牌变化（外层设置变更）→ 强制重排，确保「改字号/字距/行距/背景/日夜间」立即重排生效，
+        // 而非仅靠 updateUIViewController 的自然触发（那正是「仅往后翻页才生效」的根因）。
+        if reflowToken != context.coordinator.lastReflowToken {
+            context.coordinator.lastReflowToken = reflowToken
+            context.coordinator.forceRelayout(pageSize: size)
+        } else {
+            context.coordinator.applyIfNeeded(pageSize: size, fingerprint: layoutFingerprint)
+        }
 
         // 外部跳章（目录 / 工具栏 / 设置切换）→ 与当前显示不一致时重新定位到章首页
         let desired = selection
@@ -151,13 +173,17 @@ struct PagedReaderView: UIViewControllerRepresentable {
 
     // MARK: - Coordinator
 
-    final class Coordinator: NSObject, UIPageViewControllerDataSource, UIPageViewControllerDelegate {
+    final class Coordinator: NSObject, UIPageViewControllerDataSource, UIPageViewControllerDelegate, UIGestureRecognizerDelegate {
         var parent: PagedReaderView
         var currentChapter: Int
         var currentPage: Int
         private var vcCache: [String: UIViewController] = [:]
         private var lastFingerprint = ""
         private weak var pvc: UIPageViewController?
+        /// 排版重排令牌（与 parent.reflowToken 比对，变化即强制重排）
+        private var lastReflowToken = 0
+        /// 沉浸「单击中央」回调（由 updateUIViewController 随父视图刷新）
+        var onImmersiveTap: (() -> Void)?
 
         init(_ parent: PagedReaderView) {
             self.parent = parent
@@ -300,6 +326,37 @@ struct PagedReaderView: UIViewControllerRepresentable {
                 currentPage = newPage
                 pvc?.setViewControllers([target], direction: .forward, animated: false)
             }
+        }
+
+        /// 强制重排（排版令牌变化时由 updateUIViewController 调用）：记录当前字符 offset →
+        /// 更新分页参数 → 清分页缓存 + 页控制器缓存 → 按 offset 重新定位。
+        /// 保证「改字号/字距/行距/背景/日夜间」在当前页立即生效，而非仅往后翻页才变。
+        func forceRelayout(pageSize: CGSize) {
+            let off = currentOffset()
+            parent.paginator.pageSize = pageSize
+            parent.paginator.attributes = parent.buildAttributes()
+            parent.paginator.invalidate()
+            vcCache.removeAll()
+            relayoutCurrentPage(to: off)
+        }
+
+        /// 沉浸「单击中央」：仅在沉浸模式且命中中央区域时回调切换控制层显隐。
+        /// 用原生手势而非 SwiftUI SpatialTapGesture——后者会被 UIPageViewController 的
+        /// pan/卷页手势吞掉，导致中央切换失效（「沉浸式单击中央切换丢失」根因）。
+        @objc func handleImmersiveTap(_ gesture: UITapGestureRecognizer) {
+            guard parent.settings.isImmersive, let view = gesture.view else { return }
+            let size = view.bounds.size
+            let loc = gesture.location(in: view)
+            if abs(loc.x - size.width / 2) < size.width / 6 &&
+               abs(loc.y - size.height / 2) < size.height / 3 {
+                onImmersiveTap?()
+            }
+        }
+
+        /// 与 UIPageViewController 的翻页手势并存：不吞掉滑动 / 卷页识别。
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            true
         }
 
         private func currentOffset() -> Int {

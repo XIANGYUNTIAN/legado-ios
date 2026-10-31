@@ -138,6 +138,9 @@ struct BookReaderView: View {
     @State private var chapterTexts: [Int: String] = [:]
     /// 沉浸模式下的控制层显隐（单击中央切换）。注意：这是运行时状态，非持久化设置。
     @State private var immersiveChromeVisible = false
+    /// 排版重排令牌：任一阅读设置变化时自增，驱动 PagedReaderView 强制重排
+    /// （改字号/字距/行距/背景/日夜间 → 当前页立即重新分页，不再「仅往后翻页才生效」）。
+    @State private var reflowToken = 0
     /// 首次进入分页模式时的章内字符偏移（恢复退出前页面；nil → 章首页）
     @State private var restorePageOffset: Int? = nil
     /// 最近一次翻页完成时的章内页偏移，用于退出时保存页位置
@@ -185,7 +188,10 @@ struct BookReaderView: View {
                         readerContent
                             .simultaneousGesture(
                                 SpatialTapGesture().onEnded { value in
-                                    guard settings.isImmersive else { return }
+                                    // 页面模式（PagedReaderView）的中央切换由原生 UITapGestureRecognizer 处理，
+                                    // 因为 SwiftUI 手势会被 UIPageViewController 的 pan/卷页手势吞掉；
+                                    // 滚动模式下才由这里的 SpatialTapGesture 处理。
+                                    guard settings.isImmersive, settings.pageMode == .scroll else { return }
                                     let size = geo.size
                                     if abs(value.location.x - size.width / 2) < size.width / 6 &&
                                        abs(value.location.y - size.height / 2) < size.height / 3 {
@@ -220,6 +226,11 @@ struct BookReaderView: View {
             .toolbar(.hidden, for: .tabBar)
             .toolbar(chromeVisible ? .visible : .hidden, for: .navigationBar)
             .statusBarHidden(!chromeVisible)
+            // 阅读设置任一变化 → 强制分页重排（不依赖 representable 的 update 时序，
+            // 那是「改字体仅往后翻页生效 / 当前页不变」的根因）。
+            .onReceive(settings.objectWillChange) { _ in
+                reflowToken += 1
+            }
             .onAppear {
                 // 避免 sheet dismiss 等原因导致重复加载、进度被重置
                 if !didLoad {
@@ -282,7 +293,11 @@ struct BookReaderView: View {
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, minHeight: 120)
                     )
-                }
+                },
+                // 设置变化 → 强制重排（改字号/字距/行距/背景/日夜间当前页立即重排）
+                reflowToken: reflowToken,
+                // 沉浸「单击中央」：页面模式下由原生 tap 手势触发
+                onImmersiveTap: { immersiveChromeVisible.toggle() }
             )
             // UIPageViewController 的 transitionStyle 仅在 init 时生效：
             // 动画切换时以 .id 强制重建，应用新的滑动/卷页样式。

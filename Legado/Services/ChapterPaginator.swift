@@ -11,8 +11,10 @@ import CoreText
 /// 线程说明：所有方法在 UIKit 主线程调用（UIPageViewController 数据源 / 委托回调均主线程），
 /// 故不做并发隔离；缓存按章下标索引，设置或尺寸变化时 `invalidate()` 全清重排。
 final class ChapterPaginator {
-    /// 每章分页缓存：chapterIndex → 该章 [NSRange]（每页可见字符范围）
-    private var cache: [Int: [NSRange]] = [:]
+    /// 每章分页缓存：chapterIndex → (文本长度, [NSRange])。
+    /// 缓存以「章下标 + 文本长度」为键：正文是整章一次性写入的（网络章抓取后、本地章装载后），
+    /// 若文本长度与缓存不符则重算，杜绝「改了字号/字距后仍返回旧分页」的陈旧缓存。
+    private var cache: [Int: (textLength: Int, ranges: [NSRange])] = [:]
     /// 分页可用尺寸（内容区，已扣除页边距）
     var pageSize: CGSize = .zero
     /// 排版属性（字体/字号/字距/行距/颜色）
@@ -27,9 +29,12 @@ final class ChapterPaginator {
     func pages(chapterIndex: Int, text: String?) -> [NSRange] {
         guard let text, !text.isEmpty,
               pageSize.width > 1, pageSize.height > 1 else { return [] }
-        if let cached = cache[chapterIndex] { return cached }
+        let len = (text as NSString).length
+        if let cached = cache[chapterIndex], cached.textLength == len {
+            return cached.ranges
+        }
         let ranges = Self.paginate(text, pageSize: pageSize, attributes: attributes)
-        cache[chapterIndex] = ranges
+        cache[chapterIndex] = (len, ranges)
         return ranges
     }
 
