@@ -103,8 +103,9 @@ struct PagedReaderView: UIViewControllerRepresentable {
                                 previousViewControllers: [UIViewController],
                                 transitionCompleted completed: Bool) {
             guard completed,
-                  let current = pageViewController.viewControllers?.first,
-                  let idx = index(of: current) else { return }
+                  let current = pageViewController.viewControllers?.first else { return }
+            let idx = index(of: current)
+            guard idx != NSNotFound else { return }
             currentIndex = idx
             parent.selection = idx
             parent.onPageChange(idx)
