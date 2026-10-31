@@ -6,8 +6,8 @@ import UIKit
 /// 相比 v50/v51 的「一页 = 一章」：
 /// - 本版用 `ChapterPaginator`（Core Text）把章节按屏幕尺寸切成多页，翻页 = 翻**屏幕页**，
 ///   章节内部多页，跨章边界自动衔接（上一章末页 → 下一章首页）。
-/// - 翻页动画：仿真 → `.pageCurl` 真卷页 + `isDoubleSided = true`（双面书页）；
-///   滑动 → `.scroll`；无 → `.scroll` 且程序化跳转不带动画。
+/// - 翻页动画：仿真 → `.pageCurl` 真卷页（单面，背面纸色）；滑动 → `.scroll`；
+///   无 → `.scroll` 且程序化跳转不带动画。
 /// - 页身份为 (chapterIndex, pageIndex)；正文按需抓取，文本就绪后自动重排定位。
 /// - 设置（字号/字距/行距/背景/日夜间）变化时实时重排，并按字符 offset 保持当前页位置
 ///   （配合外层 live-preview 面板，正文可见且即时联动）。
@@ -98,8 +98,10 @@ struct PagedReaderView: UIViewControllerRepresentable {
         vc.dataSource = context.coordinator
         vc.delegate = context.coordinator
         vc.view.backgroundColor = UIColor(settings.effectiveBackground)
-        // 仿真卷页 → 双面书页（背面纸色，由系统镜像当前页）
-        vc.isDoubleSided = (settings.pageAnimation == .curl)
+        // 仿真卷页：单面卷曲（背面显示纸色）。
+        // 注意：isDoubleSided=true 会令 UIPageViewController 把「相邻页镜像到当前页背面」，
+        // 造成内容重复 / 阅读顺序错乱；单页数据源下应恒为 false，保证翻页顺序与内容连贯。
+        vc.isDoubleSided = false
         context.coordinator.parent = self
         context.coordinator.configure(pageSize: contentSize(of: vc.view.bounds))
         // 初始定位：章 + 页（由字符 offset 决定页下标）
@@ -116,7 +118,7 @@ struct PagedReaderView: UIViewControllerRepresentable {
     func updateUIViewController(_ vc: UIPageViewController, context: Context) {
         context.coordinator.parent = self
         vc.view.backgroundColor = UIColor(settings.effectiveBackground)
-        vc.isDoubleSided = (settings.pageAnimation == .curl)
+        vc.isDoubleSided = false
         context.coordinator.attach(pvc: vc)
         let size = contentSize(of: vc.view.bounds)
         context.coordinator.applyIfNeeded(pageSize: size, fingerprint: layoutFingerprint)

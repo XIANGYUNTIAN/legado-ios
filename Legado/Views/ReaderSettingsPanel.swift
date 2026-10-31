@@ -48,6 +48,9 @@ struct ReaderSettingsPanel: View {
             }
         }
         .frame(maxWidth: .infinity)
+        // 高度上限：面板经 safeAreaInset 底部承载，正文在其上方可见并可实时联动。
+        // 若不做上限，内部 ScrollView（贪婪）会撑到近全屏，把正文挤成窄条、遮挡效果。
+        .frame(maxHeight: 300, alignment: .top)
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(
