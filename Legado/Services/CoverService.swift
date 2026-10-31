@@ -16,7 +16,7 @@ final class CoverService {
     /// 内存缓存：id → 封面图
     private var inMemory: [String: UIImage] = [:]
     /// 在途请求：合并同 id 并发请求，避免重复打网络
-    private var pending: [String: Task<(UIImage?, String?), Never>] = []
+    private var pending: [String: Task<(UIImage?, String?), Never>] = [:]
 
     private init() {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
@@ -120,9 +120,10 @@ final class CoverService {
                                  saturation: 0.6, brightness: 0.2, alpha: 1)
             guard let ctx = UIGraphicsGetCurrentContext() else { return }
             let space = CGColorSpaceCreateDeviceRGB()
+            var locations: [CGFloat] = [0, 1]
             let grad = CGGradient(colorsSpace: space,
                                  colors: [top.cgColor, bottom.cgColor] as CFArray,
-                                 locations: [0, 1])!
+                                 locations: &locations)!
             ctx.drawLinearGradient(grad, start: .zero, end: CGPoint(x: 0, y: h),
                                   startRadius: 0, endRadius: 0, options: [])
             // 标题（居中、自动换行）

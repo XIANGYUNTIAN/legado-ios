@@ -619,7 +619,7 @@ struct BookReaderView: View {
             ctx.fill(CGRect(origin: .zero, size: size))
             ctx.translateBy(x: 0, y: size.height)
             ctx.scaleBy(x: scale, y: -scale)
-            page.draw(with: .mediaBox, in: ctx)
+            page.draw(with: .mediaBox, to: ctx)
         }
     }
     #endif
