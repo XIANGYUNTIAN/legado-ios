@@ -151,29 +151,31 @@ final class ReaderSettings: ObservableObject {
 
     // MARK: - CJK 动态字体下载
 
-    /// 宋体/楷体等 iOS 非预装字体的下载去重集合（串行队列保护，跨线程安全）。
-    /// 以 `nonisolated` 暴露，使其可被下载回调所在的任意线程安全访问。
-    private nonisolated static let fontDlQueue = DispatchQueue(label: "legado.cjk.font.dl")
-    private nonisolated static var fontDownloading: Set<String> = []
+    /// iOS 非预装字体（宋体/楷体）的下载去重与调度。独立于 MainActor，使其可被下载回调的任意线程安全访问。
+    private struct FontDownloadTracker {
+        static let queue = DispatchQueue(label: "legado.cjk.font.dl")
+        static var downloading: Set<String> = []
+    }
 
     /// 若指定 PostScript 字体名尚未就绪，则经 Core Text 动态下载；下载完成后 `fontReadyTick`
     /// 自增，由阅读视图重排生效。已就绪或已在进行中则直接返回（避免重复下载）。
     func ensureCJKFont(_ postScriptName: String) {
         guard UIFont(name: postScriptName, size: 12) == nil else { return }
         var shouldStart = false
-        Self.fontDlQueue.sync {
-            if !Self.fontDownloading.contains(postScriptName) {
-                Self.fontDownloading.insert(postScriptName)
+        FontDownloadTracker.queue.sync {
+            if !FontDownloadTracker.downloading.contains(postScriptName) {
+                FontDownloadTracker.downloading.insert(postScriptName)
                 shouldStart = true
             }
         }
         guard shouldStart else { return }
         let descriptor = CTFontDescriptorCreateWithNameAndSize(postScriptName as CFString, 0)
-        CTFontDescriptorMatchFontDescriptorsWithProgressHandler([descriptor] as CFArray) { _, _ in
-            true
-        } completionHandler: { [weak self] _, _ in
-            Self.fontDlQueue.sync { Self.fontDownloading.remove(postScriptName) }
-            DispatchQueue.main.async { self?.fontReadyTick += 1 }
+        _ = CTFontDescriptorMatchFontDescriptorsWithProgressHandler([descriptor] as CFArray) { state, _ -> Bool in
+            if state == .didFinish {
+                FontDownloadTracker.queue.sync { FontDownloadTracker.downloading.remove(postScriptName) }
+                DispatchQueue.main.async { [weak self] in self?.fontReadyTick += 1 }
+            }
+            return true
         }
     }
 
