@@ -13,6 +13,10 @@ struct MyView: View {
                 Text("Legado for iOS 是 legado-E（阅读Sigma，GPL-3.0）的 iOS 复刻工程。本软件不提供任何内容，需自行导入书源。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                LabeledContent("作者", value: "小马哥")
+                Text("免责声明：本应用为开源阅读工具，不内置、不托管、不分发任何受版权保护的书籍或内容，亦不提供任何书源。所有书籍与书源均由用户自行添加与管理，相关版权及合规责任由使用者自行承担。本应用与任何内容提供方无任何关联，不对用户使用本应用所产生的行为及后果承担责任。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                 Link("GPL-3.0 许可证", destination: URL(string: "https://www.gnu.org/licenses/gpl-3.0.html")!)
             }
 
