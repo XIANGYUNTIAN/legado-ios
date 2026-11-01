@@ -1,0 +1,15 @@
+{
+  "bookSourceUrl": "https://example-video-site.com",
+  "bookSourceName": "示例视频源（模板·需替换为真实站点）",
+  "bookSourceType": 4,
+  "enabled": true,
+  "header": "{\"User-Agent\":\"Mozilla/5.0\",\"Referer\":\"https://example-video-site.com\"}",
+  "ruleToc": {
+    "chapterList": "class.episode-list@a",
+    "chapterName": "class.episode-list@a@text",
+    "chapterUrl": "class.episode-list@a@href"
+  },
+  "ruleContent": {
+    "content": "id.player@data-src"
+  }
+}

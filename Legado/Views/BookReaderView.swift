@@ -175,6 +175,17 @@ struct BookReaderView: View {
     }
 
     var body: some View {
+        // 视频书源：整页走独立视频阅读器，不触碰文本引擎
+        // （文本阅读器对 ruleContent 结果一律走文本清洗，会把播放地址当正文）
+        if let videoSource = sourceStore.sources.first(where: { $0.bookSourceUrl == book.sourceId }),
+           videoSource.bookSourceType == .video {
+            return AnyView(VideoReaderView(book: book, source: videoSource))
+        }
+        return AnyView(bodyContent)
+    }
+
+    @ViewBuilder
+    private var bodyContent: some View {
         NavigationStack {
             Group {
                 if isLoading {

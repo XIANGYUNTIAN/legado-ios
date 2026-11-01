@@ -41,13 +41,20 @@ struct SourceRuleSet: Codable, Equatable {
     var nextContentUrl: String?
     var subContent: String?
     var title: String?
+    /// 正文清洗正则（legado ruleContent.replaceRegex）：对抽出的内容做全文替换
+    var replaceRegex: String?
+    /// 后台 WebView 嗅探 JS（legado ruleContent.webJs）：非空时驱动 WebView 加载章节 URL 并执行 JS
+    var webJs: String?
+    /// 资源正则（legado ruleContent.sourceRegex）：配合章节 URL 的 webView 模式，
+    /// 从 WebView 加载到的媒体资源中嗅探出可直接播放的直链（一般写 `.*\.(mp3|mp4).*`）
+    var sourceRegex: String?
 
     /// initRule 的 JSON 键名为 "init"（避开关键字作为 CodingKey 用例）
     enum CodingKeys: String, CodingKey {
         case bookList, name, author, intro, kind, lastChapter, bookUrl, coverUrl, wordCount
         case initRule = "init", tocUrl, downloadUrls
         case chapterList, chapterName, chapterUrl, isVolume, nextTocUrl
-        case content, nextContentUrl, subContent, title
+        case content, nextContentUrl, subContent, title, replaceRegex, webJs, sourceRegex
     }
 
     init() {}
@@ -77,6 +84,9 @@ struct SourceRuleSet: Codable, Equatable {
         nextContentUrl = Self.lenientString(c, .nextContentUrl)
         subContent = Self.lenientString(c, .subContent)
         title = Self.lenientString(c, .title)
+        replaceRegex = Self.lenientString(c, .replaceRegex)
+        webJs = Self.lenientString(c, .webJs)
+        sourceRegex = Self.lenientString(c, .sourceRegex)
     }
 
     /// 依次尝试 String → Int → Double → Bool，覆盖书源 JSON 里个别非字符串规则值
@@ -91,7 +101,7 @@ struct SourceRuleSet: Codable, Equatable {
     var isEmpty: Bool {
         [bookList, name, author, intro, kind, lastChapter, bookUrl, coverUrl, wordCount,
          initRule, tocUrl, downloadUrls, chapterList, chapterName, chapterUrl, isVolume,
-         nextTocUrl, content, nextContentUrl, subContent, title]
+         nextTocUrl, content, nextContentUrl, subContent, title, replaceRegex, webJs, sourceRegex]
             .allSatisfy { $0?.isEmpty ?? true }
     }
 }

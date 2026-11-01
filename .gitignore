@@ -9,6 +9,9 @@ Payload/
 *.ipa
 *.xcarchive
 
+# 项目内部数据目录（WorkBuddy 会话记忆等，不入仓）
+.workbuddy/
+
 # 大型测试固件 / 可重新生成的数据（不入仓）
 _repro/yck.json
 tools/_src/*.json
