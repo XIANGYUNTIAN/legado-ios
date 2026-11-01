@@ -31,6 +31,8 @@ struct VideoReaderView: View {
     @State private var player: AVPlayer?
     /// 持有 resourceLoader 代理（delegate 为 weak，必须强引用，否则请求无人接管）
     @State private var activeLoaders: [ObjectIdentifier: HeaderProxyLoader] = [:]
+    /// 视频嗅探器（sourceRegex / webJs 链路）
+    @State private var sniffer = WebViewSniffer()
 
     var body: some View {
         NavigationStack {
@@ -46,20 +48,13 @@ struct VideoReaderView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let asset {
-                    if asset.needsUnsupportedEngine {
-                        ContentUnavailableView {
-                            Label("暂不支持的播放格式", systemImage: "play.slash")
-                        } description: {
-                            Text(unsupportedReason(asset))
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else if asset.isPlayable {
+                    if asset.isPlayable {
                         videoStage(asset: asset)
                     } else {
                         ContentUnavailableView {
                             Label("无可用播放地址", systemImage: "link.badge.plus")
                         } description: {
-                            Text("正文规则未解析出可播放的地址（直链 / m3u8）。原始返回：\n\(asset.raw.prefix(200))")
+                            Text("正文规则未解析出可播放的地址（直链 / m3u8 / 嗅探结果）。原始返回：\n\(asset.raw.prefix(200))")
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
@@ -91,11 +86,24 @@ struct VideoReaderView: View {
     @ViewBuilder
     private func videoStage(asset: VideoPlayAsset) -> some View {
         VStack(spacing: 0) {
-            VideoPlayer(player: player)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.black)
-                .onAppear { buildAndPlay(asset) }
-                .onChange(of: selectedQuality) { _, _ in buildAndPlay(asset) }
+            ZStack {
+                if asset.needsUnsupportedEngine {
+                    // DASH / FLV 等原生不支持的格式 → libVLC 软解
+                    if let url = effectiveURL(for: asset) {
+                        SoftPlayerView(url: url, headers: asset.headers)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(Color.black)
+                    } else {
+                        ProgressView("正在准备软解播放…")
+                    }
+                } else {
+                    VideoPlayer(player: player)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color.black)
+                        .onAppear { buildAndPlay(asset) }
+                        .onChange(of: selectedQuality) { _, _ in buildAndPlay(asset) }
+                }
+            }
 
             // 清晰度选择（多清晰度书源）
             if !asset.qualities.isEmpty {
@@ -126,6 +134,14 @@ struct VideoReaderView: View {
             }
             .padding()
         }
+    }
+
+    /// 当前应播放的地址：多清晰度优先选中项，否则主地址
+    private func effectiveURL(for asset: VideoPlayAsset) -> URL? {
+        if let q = selectedQuality, asset.qualities.indices.contains(q) {
+            return asset.qualities[q].url
+        }
+        return asset.activeURL
     }
 
     private func unsupportedReason(_ asset: VideoPlayAsset) -> String {
@@ -215,10 +231,13 @@ struct VideoReaderView: View {
             let contentRule = source.ruleContent?.content ?? ""
             let raw = (try? engine.getString(contentRule, content: html)) ?? ""
             let parsed = VideoPlayAsset.parse(raw, base: u)
-            await MainActor.run {
-                asset = parsed
-                isLoadingContent = false
-                buildAndPlay(parsed)
+            if parsed.isPlayable {
+                await setAsset(parsed)
+            } else if let sniffRule = source.ruleContent,
+                      (sniffRule.sourceRegex?.isEmpty == false || sniffRule.webJs?.isEmpty == false) {
+                await sniffAndResolve(chapterURL: u)
+            } else {
+                await setAsset(parsed)
             }
         } catch {
             await MainActor.run {
@@ -269,6 +288,7 @@ struct VideoReaderView: View {
     // MARK: - 播放控制
 
     private func buildAndPlay(_ a: VideoPlayAsset) {
+        guard !a.needsUnsupportedEngine else { return } // DASH/FLV 由 SoftPlayerView 软解
         let effectiveURL: URL?
         if let q = selectedQuality, a.qualities.indices.contains(q) {
             effectiveURL = a.qualities[q].url
@@ -280,6 +300,36 @@ struct VideoReaderView: View {
         if player == nil { player = AVPlayer() }
         player?.replaceCurrentItem(with: item)
         player?.play()
+    }
+
+    /// 设置播放资产并触发原生 AVPlayer 播放（软解格式由 SwiftUI 视图负责，此处跳过）
+    private func setAsset(_ a: VideoPlayAsset) async {
+        await MainActor.run {
+            asset = a
+            isLoadingContent = false
+            buildAndPlay(a)
+        }
+    }
+
+    /// 正文规则未解析出直链、但书源配置了嗅探规则时，启动 WebView 嗅探章节页获取媒体直链
+    private func sniffAndResolve(chapterURL: URL) async {
+        await MainActor.run { isLoadingContent = true; errorMessage = nil }
+        let candidates = await withCheckedContinuation { cont in
+            sniffer.sniff(pageURL: chapterURL,
+                          headers: sourceHeaders,
+                          sourceRegexPattern: source.ruleContent?.sourceRegex,
+                          webJs: source.ruleContent?.webJs,
+                          timeout: 15) { cont.resume(returning: $0) }
+        }
+        guard let first = candidates.first else {
+            await MainActor.run {
+                asset = nil
+                errorMessage = "嗅探未找到可用的媒体直链（页面可能为纯文本、需登录，或视频由 JS 动态加载未被捕获）"
+                isLoadingContent = false
+            }
+            return
+        }
+        await setAsset(VideoPlayAsset.parse(first.absoluteString, base: chapterURL))
     }
 
     /// 构造 AVPlayerItem：无防盗链头直接用 URL；否则经 HeaderProxyLoader 代理注入头。
