@@ -170,8 +170,9 @@ final class ReaderSettings: ObservableObject {
         }
         guard shouldStart else { return }
         let descriptor = CTFontDescriptorCreateWithNameAndSize(postScriptName as CFString, 0)
-        _ = CTFontDescriptorMatchFontDescriptorsWithProgressHandler([descriptor] as CFArray) { state, _ -> Bool in
-            if state == .didFinish {
+        _ = CTFontDescriptorMatchFontDescriptorsWithProgressHandler([descriptor] as CFArray, .downloadFonts) { state, _, _ -> Bool in
+            // CTFontMatchState.rawValue：0=inProgress，1=matched，2=failure；1/2 都代表本轮匹配结束
+            if state.rawValue >= 1 {
                 FontDownloadTracker.queue.sync { FontDownloadTracker.downloading.remove(postScriptName) }
                 DispatchQueue.main.async { [weak self] in self?.fontReadyTick += 1 }
             }
