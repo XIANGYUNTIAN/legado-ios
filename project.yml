@@ -20,7 +20,7 @@ targets:
     info:
       path: Legado/Info.plist
       properties:
-        CFBundleDisplayName: Legado
+        CFBundleDisplayName: 阅读（果）
         CFBundleShortVersionString: "1.0.0"
         CFBundleVersion: "4"
         LSRequiresIPhoneOS: true

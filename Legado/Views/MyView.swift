@@ -11,7 +11,7 @@ struct MyView: View {
             }
 
             Section("关于") {
-                Text("Legado for iOS 是 legado-E（阅读Sigma，GPL-3.0）的 iOS 复刻工程。本软件不提供任何内容，需自行导入书源。")
+                Text("阅读（果）是 legado-E（阅读Sigma，GPL-3.0）的 iOS 复刻工程。本软件不提供任何内容，需自行导入书源。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Text(verbatim: "作者：" + authorName)
