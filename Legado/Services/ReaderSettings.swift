@@ -1,5 +1,7 @@
 import Foundation
 import SwiftUI
+import UIKit
+import CoreText
 
 /// 阅读器排版与翻页设置，持久化到 Documents/reader_settings.json
 ///
@@ -49,15 +51,6 @@ final class ReaderSettings: ObservableObject {
         case heiti  = "黑体"
         case kaiti  = "楷体"
 
-        /// 预设对应的 SwiftUI 字体（不含字号，由 textFont 统一加 size）
-        var base: Font {
-            switch self {
-            case .system: return .system(.body, design: .default)
-            case .songti: return .system(.body, design: .serif)
-            case .heiti:  return .system(.body, design: .default)
-            case .kaiti:  return Font.custom("Kaiti SC", size: 17)
-            }
-        }
     }
 
     /// 翻页模式：滚动（连续纵向） / 左右翻页（按章分页横向）
@@ -95,6 +88,10 @@ final class ReaderSettings: ObservableObject {
 
     @Published var isImmersive: Bool = false
 
+    /// 运行时字体就绪计数：宋体/楷体等「非预装、按需下载」CJK 字体下载完成时自增，
+    /// 驱动阅读视图（尤其翻页模式）重新排版，使新字体立即生效。无需持久化。
+    @Published var fontReadyTick: Int = 0
+
     private let fileURL: URL
 
     init() {
@@ -116,17 +113,67 @@ final class ReaderSettings: ObservableObject {
         isNight ? Color.white : theme.foreground
     }
 
-    /// 当前正文字体（含字号与自定义字体名）
+    /// 当前正文字体（含字号与自定义字体名）。滚动/翻页两套渲染路径共用同一解析。
     var textFont: Font {
-        if !customFontName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return .custom(customFontName, size: fontSize)
+        Font(resolvedUIFont())
+    }
+
+    /// 解析为实际 UIFont：自定义字体名优先，否则按预设族加载。
+    /// 系统/黑体用苹方（黑体用中字重区分）；宋体/楷体为 iOS 非预装字体，需经动态下载，
+    /// 未就绪时先兜底系统字体保证可读，下载完成后由 `fontReadyTick` 驱动重排切换。
+    func resolvedUIFont() -> UIFont {
+        Self.uiFont(for: fontFamily, size: CGFloat(fontSize), customName: customFontName)
+    }
+
+    /// 按字体族解析 UIFont（供正文与设置面板预览共用）。
+    ///
+    /// - Note: 宋体/楷体在 iOS 上为「按需下载」字体（非预装）：首次使用会经 `ensureCJKFont`
+    ///          异步下载；已就绪则直接返回，未就绪则兜底系统字体，下载完成后自动生效。
+    static func uiFont(for family: FontFamily, size: CGFloat, customName: String) -> UIFont {
+        if !customName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return UIFont(name: customName, size: size) ?? .systemFont(ofSize: size)
         }
-        // 把预设基准字体按当前字号重建（base 是 .body 尺寸，需显式化字号）
-        switch fontFamily {
-        case .system: return .system(size: fontSize, design: .default)
-        case .songti: return .system(size: fontSize, design: .serif)
-        case .heiti:  return .system(size: fontSize, design: .default)
-        case .kaiti:  return Font.custom("Kaiti SC", size: fontSize)
+        let psName: String?
+        switch family {
+        case .songti: psName = "Songti SC"
+        case .kaiti:  psName = "Kaiti SC"
+        case .system, .heiti: psName = nil
+        }
+        if let ps = psName {
+            if let f = UIFont(name: ps, size: size) { return f }
+            shared.ensureCJKFont(ps)        // 未就绪：后台下载，当前兜底系统字体
+            return .systemFont(ofSize: size)
+        }
+        // 系统/黑体：iOS 黑体（Heiti SC）同样非预装，用中字重苹方区分，避免依赖下载。
+        return family == .heiti ? .systemFont(ofSize: size, weight: .semibold)
+                                : .systemFont(ofSize: size)
+    }
+
+    // MARK: - CJK 动态字体下载
+
+    /// 宋体/楷体等 iOS 非预装字体的下载去重集合（串行队列保护，跨线程安全）。
+    /// 以 `nonisolated` 暴露，使其可被下载回调所在的任意线程安全访问。
+    private nonisolated static let fontDlQueue = DispatchQueue(label: "legado.cjk.font.dl")
+    private nonisolated static var fontDownloading: Set<String> = []
+
+    /// 若指定 PostScript 字体名尚未就绪，则经 Core Text 动态下载；下载完成后 `fontReadyTick`
+    /// 自增，由阅读视图重排生效。已就绪或已在进行中则直接返回（避免重复下载）。
+    func ensureCJKFont(_ postScriptName: String) {
+        guard UIFont(name: postScriptName, size: 12) == nil else { return }
+        var shouldStart = false
+        Self.fontDlQueue.sync {
+            if !Self.fontDownloading.contains(postScriptName) {
+                Self.fontDownloading.insert(postScriptName)
+                shouldStart = true
+            }
+        }
+        guard shouldStart else { return }
+        let descriptor = CTFontDescriptorCreateWithNameAndSize(postScriptName as CFString, 0)
+        CTFontDescriptorMatchFontDescriptorsWithProgressHandler([descriptor] as CFArray) { _, _ in
+            true
+        } completionHandler: { [weak self] _, _ in
+            Self.fontDlQueue.sync { Self.fontDownloading.remove(postScriptName) }
+            DispatchQueue.main.async { self?.fontReadyTick += 1 }
         }
     }
 

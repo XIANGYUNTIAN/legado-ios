@@ -116,7 +116,7 @@ struct ReaderSettingsPanel: View {
                         settings.save()
                     } label: {
                         Text(font.rawValue)
-                            .font(.subheadline)
+                            .font(Font(ReaderSettings.uiFont(for: font, size: 17, customName: "")))
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
                             .background(

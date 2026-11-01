@@ -57,15 +57,16 @@ struct PagedReaderView: UIViewControllerRepresentable {
                       height: bounds.height - insets.top - insets.bottom)
     }
 
-    /// 排版指纹：任一排版/背景设置变化 → 指纹变化 → 触发重排
+    /// 排版指纹：任一排版/背景设置变化 → 指纹变化 → 触发重排。
+    /// 含 fontReadyTick：宋体/楷体下载完成后自增 → 翻页模式据此重排，新字体立即生效。
     var layoutFingerprint: String {
-        "\(settings.fontFamily.rawValue)|\(settings.customFontName)|\(settings.fontSize)|\(settings.letterSpacing)|\(settings.lineSpacing)|\(settings.justified)|\(settings.theme.rawValue)|\(settings.isNight)|\(settings.showChapterHeader)"
+        "\(settings.fontFamily.rawValue)|\(settings.customFontName)|\(settings.fontSize)|\(settings.letterSpacing)|\(settings.lineSpacing)|\(settings.justified)|\(settings.theme.rawValue)|\(settings.isNight)|\(settings.showChapterHeader)|\(settings.fontReadyTick)"
     }
 
     /// 当前排版属性（供 Core Text 分页与页面渲染共用）
     func buildAttributes() -> [NSAttributedString.Key: Any] {
         var attrs: [NSAttributedString.Key: Any] = [
-            .font: resolveUIFont(),
+            .font: settings.resolvedUIFont(),
             .foregroundColor: UIColor(settings.effectiveForeground),
             .kern: CGFloat(settings.letterSpacing),
         ]
@@ -75,19 +76,6 @@ struct PagedReaderView: UIViewControllerRepresentable {
         para.alignment = settings.justified ? .justified : .left
         attrs[.paragraphStyle] = para
         return attrs
-    }
-
-    private func resolveUIFont() -> UIFont {
-        let size = CGFloat(settings.fontSize)
-        if !settings.customFontName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return UIFont(name: settings.customFontName, size: size) ?? UIFont.systemFont(ofSize: size)
-        }
-        switch settings.fontFamily {
-        case .system: return UIFont.systemFont(ofSize: size)
-        case .songti: return UIFont(name: "Songti SC", size: size) ?? UIFont.systemFont(ofSize: size)
-        case .heiti:  return UIFont(name: "Heiti SC", size: size) ?? UIFont.systemFont(ofSize: size)
-        case .kaiti:  return UIFont(name: "Kaiti SC", size: size) ?? UIFont.systemFont(ofSize: size)
-        }
     }
 
     /// 某章参与分页的全文（标题拼在正文前，章首页自然含标题）。
