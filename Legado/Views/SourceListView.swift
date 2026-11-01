@@ -1,10 +1,14 @@
 import SwiftUI
+import Foundation
 
 struct SourceListView: View {
     @EnvironmentObject private var store: BookSourceStore
     @State private var showImport = false
     @State private var showScan = false
     @State private var showExport = false
+
+    // 本地文件导入结果提示
+    @State private var importResult: String?
 
     // 批量选择模式
     @State private var isSelecting = false
@@ -62,8 +66,17 @@ struct SourceListView: View {
                         } label: {
                             Image(systemName: "qrcode.viewfinder")
                         }
-                        Button {
-                            showImport = true
+                        Menu {
+                            Button {
+                                showImport = true
+                            } label: {
+                                Label("粘贴 / 链接导入", systemImage: "doc.on.clipboard")
+                            }
+                            Button {
+                                pickLocalSourceFile()
+                            } label: {
+                                Label("从文件导入", systemImage: "folder")
+                            }
                         } label: {
                             Image(systemName: "plus")
                         }
@@ -109,6 +122,14 @@ struct SourceListView: View {
                     description: Text("点击右上角 + 导入 legado 格式书源 JSON")
                 )
             }
+        }
+        .alert("书源导入", isPresented: Binding(
+            get: { importResult != nil },
+            set: { if !$0 { importResult = nil } }
+        )) {
+            Button("好") { importResult = nil }
+        } message: {
+            Text(importResult ?? "")
         }
     }
 
@@ -165,5 +186,57 @@ struct SourceListView: View {
     private func exitSelecting() {
         isSelecting = false
         selection = []
+    }
+
+    // MARK: - 本地文件导入
+
+    /// 调起系统文档选择器，选中的文件由系统拷贝到本地临时目录，
+    /// 回调拿到的 URL 无需安全作用域、不依赖 iCloud 落地状态。
+    private func pickLocalSourceFile() {
+        DocumentImporter.present(
+            onPick: { url in
+                Task { await importFromLocalFile(url) }
+            },
+            onCancel: { }
+        )
+    }
+
+    private func importFromLocalFile(_ url: URL) async {
+        do {
+            let text = try readSourceFileText(from: url)
+            let count = try await store.importSources(from: text)
+            importResult = count > 0
+                ? "成功导入 \(count) 个书源"
+                : "未解析到有效书源（请确认是 legado 格式书源 JSON）"
+        } catch {
+            importResult = "导入失败：\(error.localizedDescription)"
+        }
+    }
+
+    /// 读取本地书源文件文本，按 UTF-8 → UTF-16 → GB18030 顺序尝试解码，
+    /// 兼容中文书源常见的 GBK/GB18030 编码文件。
+    private func readSourceFileText(from url: URL) throws -> String {
+        let data = try Data(contentsOf: url)
+        let candidates: [String.Encoding] = [.utf8, .utf16, .utf16LittleEndian, .utf16BigEndian]
+        for enc in candidates {
+            if let s = String(data: data, encoding: enc),
+               !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return s
+            }
+        }
+        let gb18030 = String.Encoding(
+            rawValue: CFStringConvertEncodingToNSStringEncoding(
+                CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)
+            )
+        )
+        if let s = String(data: data, encoding: gb18030),
+           !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return s
+        }
+        throw NSError(
+            domain: "SourceImport",
+            code: -1,
+            userInfo: [NSLocalizedDescriptionKey: "文件编码无法识别（需 UTF-8 / UTF-16 / GB18030）"]
+        )
     }
 }
