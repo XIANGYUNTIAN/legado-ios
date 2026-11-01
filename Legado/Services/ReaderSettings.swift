@@ -135,8 +135,8 @@ final class ReaderSettings: ObservableObject {
         }
         let psName: String?
         switch family {
-        case .songti: psName = "Songti SC"
-        case .kaiti:  psName = "Kaiti SC"
+        case .songti: psName = "STSongti-SC-Regular"   // PostScript face 名（族名 "Songti SC" 无法被 UIFont/动态下载 API 解析）
+        case .kaiti:  psName = "STKaiti-SC-Regular"      // PostScript face 名（族名 "Kaiti SC" 同上）
         case .system, .heiti: psName = nil
         }
         if let ps = psName {
