@@ -66,19 +66,15 @@ struct SourceListView: View {
                         } label: {
                             Image(systemName: "qrcode.viewfinder")
                         }
-                        Menu {
-                            Button {
-                                showImport = true
-                            } label: {
-                                Label("粘贴 / 链接导入", systemImage: "doc.on.clipboard")
-                            }
-                            Button {
-                                pickLocalSourceFile()
-                            } label: {
-                                Label("从文件导入", systemImage: "folder")
-                            }
+                        Button {
+                            showImport = true
                         } label: {
                             Image(systemName: "plus")
+                        }
+                        Button {
+                            pickLocalSourceFile()
+                        } label: {
+                            Label("从文件导入", systemImage: "folder")
                         }
                         Button {
                             showExport = true
