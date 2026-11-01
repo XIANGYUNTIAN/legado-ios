@@ -50,16 +50,16 @@ jobs:
 
       - name: Package IPA
         run: |
-          rm -rf Payload Legado-unsigned.ipa
+          rm -rf Payload Legado-IOS.ipa
           mkdir -p Payload
           cp -R "build/Legado.xcarchive/Products/Applications/Legado.app" Payload/
-          zip -qry Legado-unsigned.ipa Payload
-          ls -lh Legado-unsigned.ipa
-          unzip -l Legado-unsigned.ipa | head -20
+          zip -qry Legado-IOS.ipa Payload
+          ls -lh Legado-IOS.ipa
+          unzip -l Legado-IOS.ipa | head -20
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Legado-unsigned-ipa
-          path: Legado-unsigned.ipa
+          name: Legado-IOS-ipa
+          path: Legado-IOS.ipa
           if-no-files-found: error
