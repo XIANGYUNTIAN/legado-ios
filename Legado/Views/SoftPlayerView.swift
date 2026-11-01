@@ -1,5 +1,5 @@
 import SwiftUI
-import VLCKitSPM
+import VLCKit
 
 /// 软解播放视图（DASH / FLV 等原生 AVPlayer 不支持的格式）。
 ///
