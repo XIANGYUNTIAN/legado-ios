@@ -22,7 +22,7 @@ struct ContentView: View {
                 SubscriptionSourceListView()
             }
             .tabItem {
-                Label("订阅源", systemImage: "rss")
+                Label("订阅源", systemImage: "dot.radiowaves.left.and.right")
             }
 
             NavigationStack {
