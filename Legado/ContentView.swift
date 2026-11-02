@@ -18,6 +18,12 @@ struct ContentView: View {
             .tabItem {
                 Label("书源", systemImage: "server.rack")
             }
+            NavigationStack {
+                SubscriptionSourceListView()
+            }
+            .tabItem {
+                Label("订阅源", systemImage: "rss")
+            }
 
             NavigationStack {
                 MyView()

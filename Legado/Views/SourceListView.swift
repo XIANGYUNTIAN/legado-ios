@@ -72,7 +72,12 @@ struct SourceListView: View {
                             Image(systemName: "plus")
                         }
                         Button {
-                            pickLocalSourceFile()
+                            DocumentImporter.present(
+                                onPick: { url in
+                                    Task { await importFromLocalFile(url) }
+                                },
+                                onCancel: { }
+                            )
                         } label: {
                             Label("从文件导入", systemImage: "folder")
                         }
@@ -185,17 +190,6 @@ struct SourceListView: View {
     }
 
     // MARK: - 本地文件导入
-
-    /// 调起系统文档选择器，选中的文件由系统拷贝到本地临时目录，
-    /// 回调拿到的 URL 无需安全作用域、不依赖 iCloud 落地状态。
-    private func pickLocalSourceFile() {
-        DocumentImporter.present(
-            onPick: { url in
-                Task { await importFromLocalFile(url) }
-            },
-            onCancel: { }
-        )
-    }
 
     private func importFromLocalFile(_ url: URL) async {
         do {
