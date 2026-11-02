@@ -157,18 +157,17 @@ struct SubscriptionArticleListView: View {
 
     /// 解析一页，返回（文章列表，下一页 URL）。下一页仅当 ruleNextPage 命中时计算。
     static func parsePage(html: String, source: SubscriptionSource, baseURL: URL) -> ([RssArticle], URL?) {
-        let dict = source.ruleArticles ?? [:]
-        let container = (dict["ruleArticles"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let container = source.ruleArticles.trimmingCharacters(in: .whitespacesAndNewlines)
         let articles: [RssArticle]
         if !container.isEmpty {
-            articles = parseByRules(dict: dict, container: container, html: html, source: source, baseURL: baseURL)
+            articles = parseByRules(container: container, html: html, source: source, baseURL: baseURL)
         } else if let rss = RssXmlParser.parse(xml: html, baseURL: baseURL) {
             articles = rss
         } else {
             articles = []
         }
 
-        let nextRule = (dict["ruleNextPage"] ?? source.ruleNextPage).trimmingCharacters(in: .whitespacesAndNewlines)
+        let nextRule = source.ruleNextPage.trimmingCharacters(in: .whitespacesAndNewlines)
         var next: URL?
         if !nextRule.isEmpty {
             let engine = RuleEngine()
@@ -183,7 +182,7 @@ struct SubscriptionArticleListView: View {
     }
 
     /// 自定义规则解析（复用书源规则引擎 BookListAnalyzer，与书源 bookList 同语义）
-    static func parseByRules(dict: [String: String], container: String, html: String, source: SubscriptionSource, baseURL: URL) -> [RssArticle] {
+    static func parseByRules(container: String, html: String, source: SubscriptionSource, baseURL: URL) -> [RssArticle] {
         let engine = RuleEngine()
         var synthetic = BookSource()
         synthetic.bookSourceUrl = source.sourceUrl
@@ -192,11 +191,12 @@ struct SubscriptionArticleListView: View {
         engine.setSource(synthetic)
         engine.setBaseUrl(source.sourceUrl)
 
-        let titleRule = dict["ruleTitle"] ?? source.ruleTitle
-        let linkRule = dict["ruleLink"] ?? source.ruleLink
-        let pubDateRule = dict["rulePubDate"] ?? source.rulePubDate
-        let descRule = dict["ruleDescription"] ?? source.ruleDescription
-        let imageRule = dict["ruleImage"] ?? source.ruleImage
+        // 对齐 legado：字段规则为 RssSource 顶层字符串，不再从规则对象字典读取
+        let titleRule = source.ruleTitle
+        let linkRule = source.ruleLink
+        let pubDateRule = source.rulePubDate
+        let descRule = source.ruleDescription
+        let imageRule = source.ruleImage
 
         var ruleError: String?
         let items = BookListAnalyzer.items(rule: container, html: html, engine: engine, ruleError: &ruleError)

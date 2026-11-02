@@ -8,8 +8,9 @@ struct SubscriptionSource: Codable, Identifiable, Equatable {
     var sourceGroup: String = ""
     var enabled: Bool = true
     var sortUrl: String = ""
-    /// 列表规则：legado ruleArticles 对象（ruleTitle / ruleLink / ruleContent ...），以 [String: String] 承载
-    var ruleArticles: [String: String]? = nil
+    /// 列表规则容器选择器：对齐 legado RssSource.ruleArticles，为单个字符串（CSS 选择器 / 正则 / @js）
+    /// 原 iOS 实现错配为 [String:String] 字典，导入真实订阅源时解码失败变 nil，导致解析误走 XML 分支返回空
+    var ruleArticles: String = ""
     var ruleNextPage: String = ""
     var ruleTitle: String = ""
     var rulePubDate: String = ""
@@ -49,7 +50,7 @@ struct SubscriptionSource: Codable, Identifiable, Equatable {
         sourceGroup = Self.ls(c, .sourceGroup) ?? ""
         enabled = Self.lb(c, .enabled, default: true)
         sortUrl = Self.ls(c, .sortUrl) ?? ""
-        ruleArticles = try? c.decodeIfPresent([String: String].self, forKey: .ruleArticles)
+        ruleArticles = Self.ls(c, .ruleArticles) ?? ""
         ruleNextPage = Self.ls(c, .ruleNextPage) ?? ""
         ruleTitle = Self.ls(c, .ruleTitle) ?? ""
         rulePubDate = Self.ls(c, .rulePubDate) ?? ""
