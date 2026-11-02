@@ -66,20 +66,25 @@ struct SourceListView: View {
                         } label: {
                             Image(systemName: "qrcode.viewfinder")
                         }
-                        Button {
-                            showImport = true
+                        // 加号「+」展开菜单：粘贴/网址导入 + 本地文件导入（合并原独立 folder 入口）
+                        Menu {
+                            Button {
+                                showImport = true
+                            } label: {
+                                Label("粘贴 / 网址导入", systemImage: "doc.on.clipboard")
+                            }
+                            Button {
+                                DocumentImporter.present(
+                                    onPick: { url in
+                                        Task { await importFromLocalFile(url) }
+                                    },
+                                    onCancel: { }
+                                )
+                            } label: {
+                                Label("从文件导入", systemImage: "folder")
+                            }
                         } label: {
                             Image(systemName: "plus")
-                        }
-                        Button {
-                            DocumentImporter.present(
-                                onPick: { url in
-                                    Task { await importFromLocalFile(url) }
-                                },
-                                onCancel: { }
-                            )
-                        } label: {
-                            Label("从文件导入", systemImage: "folder")
                         }
                         Button {
                             showExport = true

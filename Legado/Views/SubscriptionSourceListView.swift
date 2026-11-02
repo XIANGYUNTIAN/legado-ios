@@ -23,8 +23,7 @@ struct SubscriptionSourceListView: View {
                     selectableRow(source)
                 } else {
                     HStack(spacing: 12) {
-                        Image(systemName: source.enabled ? "dot.radiowaves.left.and.right" : "dot.radiowaves.left.and.right")
-                            .foregroundStyle(source.enabled ? Color.accentColor : Color.secondary)
+                        sourceIconView(source)
                         rowLabel(source)
                         Spacer()
                         Text(source.typeName)
@@ -35,6 +34,7 @@ struct SubscriptionSourceListView: View {
                             .clipShape(Capsule())
                     }
                     .contentShape(Rectangle())
+                    .opacity(source.enabled ? 1 : 0.55)
                     .onTapGesture { store.toggle(source) }
                 }
             }
@@ -70,21 +70,25 @@ struct SubscriptionSourceListView: View {
                         } label: {
                             Image(systemName: "qrcode.viewfinder")
                         }
-                        Button {
-                            showImport = true
+                        // 加号「+」展开菜单：粘贴/网址导入 + 本地文件导入（合并原独立 folder 入口）
+                        Menu {
+                            Button {
+                                showImport = true
+                            } label: {
+                                Label("粘贴 / 网址导入", systemImage: "doc.on.clipboard")
+                            }
+                            Button {
+                                DocumentImporter.present(
+                                    onPick: { url in
+                                        Task { await importFromLocalFile(url) }
+                                    },
+                                    onCancel: { }
+                                )
+                            } label: {
+                                Label("从文件导入", systemImage: "folder")
+                            }
                         } label: {
                             Image(systemName: "plus")
-                        }
-                        // 本地导入：直接内联 DocumentImporter.present，避免 release 优化把私有包装整段剔除
-                        Button {
-                            DocumentImporter.present(
-                                onPick: { url in
-                                    Task { await importFromLocalFile(url) }
-                                },
-                                onCancel: { }
-                            )
-                        } label: {
-                            Label("从文件导入", systemImage: "folder")
                         }
                         Button {
                             showExport = true
@@ -141,6 +145,37 @@ struct SubscriptionSourceListView: View {
 
     // MARK: - 行视图
 
+    /// 订阅源图标：优先加载 sourceIcon（favicon URL），失败或为空回退到「rss」系统图标；
+    /// 禁用源在右下角叠加斜杠标记，不另起圆点列。
+    @ViewBuilder
+    private func sourceIconView(_ source: SubscriptionSource) -> some View {
+        Group {
+            if let url = URL(string: source.sourceIcon), !source.sourceIcon.isEmpty {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image.resizable().scaledToFit()
+                    default:
+                        Image(systemName: "rss")
+                    }
+                }
+            } else {
+                Image(systemName: "rss")
+            }
+        }
+        .frame(width: 28, height: 28)
+        .foregroundStyle(.secondary)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(alignment: .bottomTrailing) {
+            if !source.enabled {
+                Image(systemName: "slash.circle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .background(.background)
+            }
+        }
+    }
+
     private func rowLabel(_ source: SubscriptionSource) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(source.sourceName.isEmpty ? source.sourceUrl : source.sourceName)
@@ -158,6 +193,7 @@ struct SubscriptionSourceListView: View {
             Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                 .foregroundStyle(selected ? Color.accentColor : Color.secondary)
                 .font(.title3)
+            sourceIconView(source)
             rowLabel(source)
         }
         .contentShape(Rectangle())
