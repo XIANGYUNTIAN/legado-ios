@@ -205,10 +205,13 @@ struct VideoReaderView: View {
     private func loadContent(index: Int) async {
         guard chapters.indices.contains(index) else { return }
         let chapter = chapters[index]
-        guard let urlRel = chapter.url,
-              let u = resolveURL(urlRel, base: book.bookUrl.flatMap { URLSanitizer.sanitize($0) } ?? source.bookSourceURL) else {
+        // legado 章节 URL 可能带 `##$##,{webView:true}` 选项：剥离真实地址、解析 webView 标志。
+        // 命中 webView 标志 → 走 WebView 嗅探（对应 legado 的 webView 模式加载）。
+        let rawURL = chapter.url ?? ""
+        let (cleanURL, useWebViewForChapter) = Self.parseURLOption(rawURL)
+        guard let u = resolveURL(cleanURL, base: book.bookUrl.flatMap { URLSanitizer.sanitize($0) } ?? source.bookSourceURL) else {
             await MainActor.run {
-                errorMessage = "章节地址无效：\(chapter.url ?? "")"
+                errorMessage = "章节地址无效：\(rawURL)"
             }
             return
         }
@@ -230,11 +233,16 @@ struct VideoReaderView: View {
             engine.setBaseUrl(source.bookSourceUrl)
             let contentRule = source.ruleContent?.content ?? ""
             let raw = (try? engine.getString(contentRule, content: html)) ?? ""
-            let parsed = VideoPlayAsset.parse(raw, base: u)
+            // 正文规则结果也可能是「URL + ##$##,{webView:true}」形式（legado 同语义）
+            let (rawURLCandidate, rawWebView) = Self.parseURLOption(raw)
+            let parsed = VideoPlayAsset.parse(rawURLCandidate, base: u)
             if parsed.isPlayable {
                 await setAsset(parsed)
             } else if let sniffRule = source.ruleContent,
-                      (sniffRule.sourceRegex?.isEmpty == false || sniffRule.webJs?.isEmpty == false) {
+                      (sniffRule.sourceRegex?.isEmpty == false
+                       || sniffRule.webJs?.isEmpty == false
+                       || useWebViewForChapter
+                       || rawWebView) {
                 await sniffAndResolve(chapterURL: u)
             } else {
                 await setAsset(parsed)
@@ -382,6 +390,26 @@ struct VideoReaderView: View {
         if let url = URLSanitizer.sanitize(relative) { return url }
         guard let base else { return nil }
         return URL(string: relative, relativeTo: base)?.absoluteURL
+    }
+
+    /// 解析 legado 的「URL + ##$##,{选项}」语法（章节 URL 与正文规则结果均可能携带）。
+    /// 返回（真实地址，是否要求 webView 模式）。webView 模式 → 走 WebView 嗅探而非直接抓取。
+    static func parseURLOption(_ raw: String) -> (url: String, webView: Bool) {
+        guard raw.contains("##$##") else { return (raw, false) }
+        let parts = raw.components(separatedBy: "##$##")
+        let urlPart = parts.first ?? raw
+        let optPart = parts.dropFirst().joined(separator: "##$##")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "^,", with: "", options: .regularExpression)
+        var webView = false
+        if let data = optPart.data(using: .utf8),
+           let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            if let w = obj["webView"] as? Bool { webView = w }
+            else if let w = obj["webView"] as? String, w.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "true" {
+                webView = true
+            }
+        }
+        return (urlPart, webView)
     }
 
     // MARK: - 选集面板

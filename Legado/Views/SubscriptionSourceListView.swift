@@ -22,20 +22,30 @@ struct SubscriptionSourceListView: View {
                 if isSelecting {
                     selectableRow(source)
                 } else {
-                    HStack(spacing: 12) {
-                        sourceIconView(source)
-                        rowLabel(source)
-                        Spacer()
-                        Text(source.typeName)
-                            .font(.caption2)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(.quaternary)
-                            .clipShape(Capsule())
+                    NavigationLink(destination: SubscriptionArticleListView(source: source)) {
+                        HStack(spacing: 12) {
+                            sourceIconView(source)
+                            rowLabel(source)
+                            Spacer()
+                        }
                     }
-                    .contentShape(Rectangle())
                     .opacity(source.enabled ? 1 : 0.55)
-                    .onTapGesture { store.toggle(source) }
+                    .overlay(alignment: .trailing) {
+                        HStack(spacing: 8) {
+                            Text(source.typeName)
+                                .font(.caption2)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(.quaternary)
+                                .clipShape(Capsule())
+                            Toggle("", isOn: Binding(
+                                get: { source.enabled },
+                                set: { _ in store.toggle(source) }
+                            ))
+                            .labelsHidden()
+                        }
+                        .padding(.trailing, 10)
+                    }
                 }
             }
             .onDelete(perform: store.delete)
@@ -145,26 +155,26 @@ struct SubscriptionSourceListView: View {
 
     // MARK: - 行视图
 
-    /// 订阅源图标：优先加载 sourceIcon（favicon URL），失败或为空回退到「rss」系统图标；
-    /// 禁用源在右下角叠加斜杠标记，不另起圆点列。
+    /// 订阅源图标：优先加载 sourceIcon（favicon URL），失败 / 为空 / 非 http(s) 时回退到
+    /// 以 sourceName 首字生成的确定性彩色圆角徽标——保证每行必有可见图标，解决「只有文字没有图标」。
     @ViewBuilder
     private func sourceIconView(_ source: SubscriptionSource) -> some View {
         Group {
-            if let url = URL(string: source.sourceIcon), !source.sourceIcon.isEmpty {
+            if let url = URLSanitizer.sanitize(source.sourceIcon),
+               url.scheme == "http" || url.scheme == "https" {
                 AsyncImage(url: url) { phase in
                     switch phase {
                     case .success(let image):
-                        image.resizable().scaledToFit()
+                        image.resizable().scaledToFill()
                     default:
-                        Image(systemName: "rss")
+                        fallbackBadge(source)
                     }
                 }
             } else {
-                Image(systemName: "rss")
+                fallbackBadge(source)
             }
         }
         .frame(width: 28, height: 28)
-        .foregroundStyle(.secondary)
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay(alignment: .bottomTrailing) {
             if !source.enabled {
@@ -174,6 +184,23 @@ struct SubscriptionSourceListView: View {
                     .background(.background)
             }
         }
+    }
+
+    /// 无 favicon 时的兜底图标：以名称首字生成的确定性彩色徽标（稳定可见）
+    private func fallbackBadge(_ source: SubscriptionSource) -> some View {
+        let name = source.sourceName.isEmpty ? source.sourceUrl : source.sourceName
+        let ch = name.first.map { String($0) } ?? "订"
+        return Text(ch)
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Self.badgeColor(for: source.sourceUrl))
+    }
+
+    private static func badgeColor(for key: String) -> Color {
+        let palette: [Color] = [.blue, .green, .orange, .purple, .pink, .teal, .indigo, .red]
+        let sum = key.utf8.reduce(0) { $0 + Int($1) }
+        return palette[sum % palette.count]
     }
 
     private func rowLabel(_ source: SubscriptionSource) -> some View {

@@ -42,6 +42,29 @@ final class WebViewSniffer: NSObject, WKNavigationDelegate, WKScriptMessageHandl
           if(el.currentSrc) post(el.currentSrc);
         }
       }
+      // 动态插入的 video / source 也纳入扫描（MutationObserver）
+      var _observer = new MutationObserver(function(muts){
+        for(var m=0;m<muts.length;m++){
+          var nodes = muts[m].addedNodes || [];
+          for(var n=0;n<nodes.length;n++){
+            var node = nodes[n];
+            if(node.nodeType === 1){
+              if(node.tagName === 'VIDEO' || node.tagName === 'SOURCE' || node.tagName === 'AUDIO'){
+                var s = node.src || node.currentSrc || node.getAttribute('src');
+                if(s) post(s);
+              }
+              if(node.querySelectorAll){
+                var inner = node.querySelectorAll('video,audio,source');
+                for(var k=0;k<inner.length;k++){
+                  var is = inner[k].src || inner[k].currentSrc || inner[k].getAttribute('src');
+                  if(is) post(is);
+                }
+              }
+            }
+          }
+        }
+      });
+      _observer.observe(document.documentElement || document, {childList:true, subtree:true});
       var _fetch = window.fetch;
       window.fetch = function(input, init){
         var u = (typeof input === 'string') ? input : (input && input.url);
@@ -55,9 +78,29 @@ final class WebViewSniffer: NSObject, WKNavigationDelegate, WKScriptMessageHandl
         if(this.__u && mediaExt(this.__u)) post(this.__u);
         return _send.apply(this, arguments);
       };
+      // 强制播放：大量视频站点的媒体请求只在 video.play() 真正触发后才发出，
+      // 隐藏 WebView 不会自动播放，故主动调用 play() 以触发媒体请求（自动播放策略已放开）
+      function forcePlay(){
+        var vs = document.querySelectorAll('video');
+        for(var i=0;i<vs.length;i++){
+          var v = vs[i];
+          try {
+            var p = v.play();
+            if(p && p.then) p.then(function(){}).catch(function(){});
+          } catch(e){}
+          post(v.currentSrc || v.src || v.getAttribute('src'));
+        }
+      }
+      // 拦截 video.play：首次播放即上报当前媒体地址
+      var _play = HTMLMediaElement.prototype.play;
+      HTMLMediaElement.prototype.play = function(){
+        try { post(this.currentSrc || this.src || this.getAttribute('src')); } catch(e){}
+        try { return _play.apply(this, arguments); } catch(e){ return Promise.resolve(); }
+      };
       scan();
-      setInterval(scan, 800);
-      window.addEventListener('load', function(){ setTimeout(scan, 400); });
+      document.addEventListener('DOMContentLoaded', function(){ setTimeout(forcePlay, 500); setTimeout(forcePlay, 1500); });
+      window.addEventListener('load', function(){ setTimeout(forcePlay, 800); setTimeout(forcePlay, 2500); });
+      setTimeout(forcePlay, 3000);
     })();
     """
 
