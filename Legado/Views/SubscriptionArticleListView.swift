@@ -1,6 +1,7 @@
 import SwiftUI
 import Foundation
 import SwiftSoup
+import WebKit
 
 /// 订阅源文章列表（对应 legado 订阅源的阅读入口）。
 ///
@@ -23,31 +24,55 @@ struct SubscriptionArticleListView: View {
     @State private var isLoadingMore = false
 
     var body: some View {
-        Group {
-            if isLoading {
-                ProgressView("正在加载订阅…")
+        if source.singleUrl {
+            singleUrlView
+        } else {
+            Group {
+                if isLoading {
+                    ProgressView("正在加载订阅…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let errorMessage {
+                    ContentUnavailableView {
+                        Label("加载失败", systemImage: "exclamation.triangle")
+                    } description: {
+                        Text(errorMessage)
+                    }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let errorMessage {
-                ContentUnavailableView {
-                    Label("加载失败", systemImage: "exclamation.triangle")
-                } description: {
-                    Text(errorMessage)
+                } else if articles.isEmpty {
+                    ContentUnavailableView {
+                        Label("暂无文章", systemImage: "newspaper")
+                    } description: {
+                        Text("订阅源「\(source.sourceName)」未解析到文章，可能站点结构已变或需要特定请求头。")
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    articleList
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if articles.isEmpty {
-                ContentUnavailableView {
-                    Label("暂无文章", systemImage: "newspaper")
-                } description: {
-                    Text("订阅源「\(source.sourceName)」未解析到文章，可能站点结构已变或需要特定请求头。")
+            }
+            .navigationTitle(source.sourceName.isEmpty ? "订阅" : source.sourceName)
+            .navigationBarTitleDisplayMode(.inline)
+            .onAppear { if articles.isEmpty { Task { await loadFirst() } } }
+        }
+    }
+
+    /// singleUrl 模式：源 URL 本身就是一个可浏览页面（如地址发布页/导航页），
+    /// 对齐 legado Android 行为：直接在 WebView 中打开，不走 RSS/Atom 列表解析。
+    private var singleUrlView: some View {
+        NavigationStack {
+            ZStack {
+                WebViewContainer(urlString: source.sourceUrl, isLoading: $isLoading)
+                if isLoading {
+                    ProgressView("加载中…")
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                articleList
+            }
+            .navigationTitle(source.sourceName.isEmpty ? "网页" : source.sourceName)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("完成") { isLoading = false }
+                }
             }
         }
-        .navigationTitle(source.sourceName.isEmpty ? "订阅" : source.sourceName)
-        .navigationBarTitleDisplayMode(.inline)
-        .onAppear { if articles.isEmpty { Task { await loadFirst() } } }
     }
 
     private var articleList: some View {

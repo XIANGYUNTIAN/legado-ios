@@ -23,6 +23,10 @@ struct SubscriptionSource: Codable, Identifiable, Equatable {
     var enableJs: Bool = false
     var loadWithBaseUrl: Bool = true
     var customOrder: Int = 0
+    /// 单 URL 模式：为 true 时源 URL 本身就是一个可浏览的页面（如地址发布页/导航页），
+    /// legado Android 直接在 WebView 中打开，不走 RSS/Atom 列表解析。
+    /// iOS 此前缺失此字段，导致这类源被当作 RSS 源解析，页面无 <item> 标签而返回空列表。
+    var singleUrl: Bool = false
 
     var id: String { sourceUrl.isEmpty ? UUID().uuidString : sourceUrl }
 
@@ -39,7 +43,7 @@ struct SubscriptionSource: Codable, Identifiable, Equatable {
     enum CodingKeys: String, CodingKey {
         case sourceUrl, sourceName, sourceIcon, sourceGroup, enabled, sortUrl
         case ruleArticles, ruleNextPage, ruleTitle, rulePubDate, ruleDescription
-        case ruleImage, ruleLink, ruleContent, header, enableJs, loadWithBaseUrl, customOrder
+        case ruleImage, ruleLink, ruleContent, header, enableJs, loadWithBaseUrl, customOrder, singleUrl
     }
 
     init(from decoder: Decoder) throws {
@@ -62,6 +66,7 @@ struct SubscriptionSource: Codable, Identifiable, Equatable {
         enableJs = Self.lb(c, .enableJs, default: false)
         loadWithBaseUrl = Self.lb(c, .loadWithBaseUrl, default: true)
         customOrder = Self.li(c, .customOrder)
+        singleUrl = Self.lb(c, .singleUrl, default: false)
     }
 
     private static func ls(_ c: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) -> String? {
