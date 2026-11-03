@@ -1,1 +1,517 @@
-aW1wb3J0IFN3aWZ0VUkNCmltcG9ydCBGb3VuZGF0aW9uDQppbXBvcnQgU3dpZnRTb3VwDQppbXBvcnQgV2ViS2l0DQoNCi8vLyDorqLpmIXmupDmlofnq6DliJfooajvvIjlr7nlupQgbGVnYWRvIOiuoumYhea6kOeahOmYheivu+WFpeWPo++8ieOAgg0KLy8vDQovLy8g5L+u5aSN44CM5a+85YWl55qE6K6i6ZiF5rqQ5omT5LiN5byA44CN77ya5q2k5YmN6K6i6ZiF5rqQ6KGM54K55Ye75Y+q5YGa5ZCv55SoL+emgeeUqOWIh+aNou+8jOayoeaciemYheivu+mhtemdouOAgg0KLy8vIOacrOinhuWbvui0n+i0o++8muaKk+WPliBzb3VyY2VVcmwg4oaSIOino+aekOaWh+eroOWIl+ihqO+8iOS8mOWFiOeUqOiuoumYhea6kOiHquWumuS5ieinhOWImSBydWxlQXJ0aWNsZXMg562J77yMDQovLy8g5peg6KeE5YiZ5YiZ5oyJIFJTUyAvIEF0b20g5Y6f55SfIFhNTCDop6PmnpDvvInihpIg5YiX6KGo5bGV56S6IOKGkiDngrnlh7vmlofnq6DlnKggV2ViVmlldyDmiZPlvIDjgIINCi8vLw0KLy8vIOino+aekOetlueVpeS4jiBsZWdhZG8gUnNzU291cmNlQW5hbHl6ZXIg5a+56b2Q77yaDQovLy8gLSDoh6rlrprkuYnop4TliJnlrZjlnKjml7bvvIzmioogcnVsZUFydGljbGVzIOWvueixoemHjOeahCBydWxlQXJ0aWNsZXPvvIjlrrnlmajvvIkvIHJ1bGVUaXRsZSAvIHJ1bGVMaW5rIC8NCi8vLyAgIHJ1bGVQdWJEYXRlIC8gcnVsZURlc2NyaXB0aW9uIC8gcnVsZUltYWdlIOaYoOWwhOi/myBCb29rTGlzdEFuYWx5emVyIOmAkOWFg+e0oOaxguWAvA0KLy8vICAg77yISFRNTCAvIEpTT04gLyBYUGF0aCAvIOato+WImemAmueUqO+8ie+8mw0KLy8vIC0g5peg6Ieq5a6a5LmJ6KeE5YiZ5pe277yI57ud5aSn5aSa5pWw5qCH5YeGIFJTUyAvIEF0b20g6K6i6ZiF5rqQ77yJ77yM6LWw5Y6f55SfIFhNTFBhcnNlciDmir3lj5YgaXRlbS9lbnRyeeOAgg0Kc3RydWN0IFN1YnNjcmlwdGlvbkFydGljbGVMaXN0VmlldzogVmlldyB7DQogICAgbGV0IHNvdXJjZTogU3Vic2NyaXB0aW9uU291cmNlDQoNCiAgICBAU3RhdGUgcHJpdmF0ZSB2YXIgYXJ0aWNsZXM6IFtSc3NBcnRpY2xlXSA9IFtdDQogICAgQFN0YXRlIHByaXZhdGUgdmFyIGlzTG9hZGluZyA9IHRydWUNCiAgICBAU3RhdGUgcHJpdmF0ZSB2YXIgZXJyb3JNZXNzYWdlOiBTdHJpbmc/DQogICAgQFN0YXRlIHByaXZhdGUgdmFyIG5leHRQYWdlVVJMOiBVUkw/DQogICAgQFN0YXRlIHByaXZhdGUgdmFyIGlzTG9hZGluZ01vcmUgPSBmYWxzZQ0KDQogICAgdmFyIGJvZHk6IHNvbWUgVmlldyB7DQogICAgICAgIGlmIHNvdXJjZS5zaW5nbGVVcmwgew0KICAgICAgICAgICAgc2luZ2xlVXJsVmlldw0KICAgICAgICB9IGVsc2Ugew0KICAgICAgICAgICAgR3JvdXAgew0KICAgICAgICAgICAgICAgIGlmIGlzTG9hZGluZyB7DQogICAgICAgICAgICAgICAgICAgIFByb2dyZXNzVmlldygi5q2j5Zyo5Yqg6L296K6i6ZiF4oCmIikNCiAgICAgICAgICAgICAgICAgICAgICAgIC5mcmFtZShtYXhXaWR0aDogLmluZmluaXR5LCBtYXhIZWlnaHQ6IC5pbmZpbml0eSkNCiAgICAgICAgICAgICAgICB9IGVsc2UgaWYgbGV0IGVycm9yTWVzc2FnZSB7DQogICAgICAgICAgICAgICAgICAgIENvbnRlbnRVbmF2YWlsYWJsZVZpZXcgew0KICAgICAgICAgICAgICAgICAgICAgICAgTGFiZWwoIuWKoOi9veWksei0pSIsIHN5c3RlbUltYWdlOiAiZXhjbGFtYXRpb24udHJpYW5nbGUiKQ0KICAgICAgICAgICAgICAgICAgICB9IGRlc2NyaXB0aW9uOiB7DQogICAgICAgICAgICAgICAgICAgICAgICBUZXh0KGVycm9yTWVzc2FnZSkNCiAgICAgICAgICAgICAgICAgICAgfQ0KICAgICAgICAgICAgICAgICAgICAuZnJhbWUobWF4V2lkdGg6IC5pbmZpbml0eSwgbWF4SGVpZ2h0OiAuaW5maW5pdHkpDQogICAgICAgICAgICAgICAgfSBlbHNlIGlmIGFydGljbGVzLmlzRW1wdHkgew0KICAgICAgICAgICAgICAgICAgICBDb250ZW50VW5hdmFpbGFibGVWaWV3IHsNCiAgICAgICAgICAgICAgICAgICAgICAgIExhYmVsKCLmmoLml6Dmlofnq6AiLCBzeXN0ZW1JbWFnZTogIm5ld3NwYXBlciIpDQogICAgICAgICAgICAgICAgICAgIH0gZGVzY3JpcHRpb246IHsNCiAgICAgICAgICAgICAgICAgICAgICAgIFRleHQoIuiuoumYhea6kOOAjFwoc291cmNlLnNvdXJjZU5hbWUp44CN5pyq6Kej5p6Q5Yiw5paH56ug77yM5Y+v6IO956uZ54K557uT5p6E5bey5Y+Y5oiW6ZyA6KaB54m55a6a6K+35rGC5aS044CCIikNCiAgICAgICAgICAgICAgICAgICAgfQ0KICAgICAgICAgICAgICAgICAgICAuZnJhbWUobWF4V2lkdGg6IC5pbmZpbml0eSwgbWF4SGVpZ2h0OiAuaW5maW5pdHkpDQogICAgICAgICAgICAgICAgfSBlbHNlIHsNCiAgICAgICAgICAgICAgICAgICAgYXJ0aWNsZUxpc3QNCiAgICAgICAgICAgICAgICB9DQogICAgICAgICAgICB9DQogICAgICAgICAgICAubmF2aWdhdGlvblRpdGxlKHNvdXJjZS5zb3VyY2VOYW1lLmlzRW1wdHkgPyAi6K6i6ZiFIiA6IHNvdXJjZS5zb3VyY2VOYW1lKQ0KICAgICAgICAgICAgLm5hdmlnYXRpb25CYXJUaXRsZURpc3BsYXlNb2RlKC5pbmxpbmUpDQogICAgICAgICAgICAub25BcHBlYXIgeyBpZiBhcnRpY2xlcy5pc0VtcHR5IHsgVGFzayB7IGF3YWl0IGxvYWRGaXJzdCgpIH0gfSB9DQogICAgICAgIH0NCiAgICB9DQoNCi8vLyBzaW5nbGVVcmwg5qih5byP77ya5rqQIFVSTCDmnKzouqvlsLHmmK/kuIDkuKrlj6/mtY/op4jpobXpnaLvvIjlpoLlnLDlnYDlj5HluIPpobUv5a+86Iiq6aG177yJ77yMDQogICAvLy8g5a+56b2QIGxlZ2FkbyBBbmRyb2lkIOihjOS4uu+8muebtOaOpeWcqCBXZWJWaWV3IOS4reaJk+W8gO+8jOS4jei1sCBSU1MvQXRvbSDliJfooajop6PmnpDjgIINCiAgIHByaXZhdGUgdmFyIHNpbmdsZVVybFZpZXc6IHNvbWUgVmlldyB7DQogICAgICAgU2luZ2xlVXJsV2ViVmlldyh1cmw6IHNvdXJjZS5zb3VyY2VVcmwsIHRpdGxlOiBzb3VyY2Uuc291cmNlTmFtZSkNCiAgIH0NCg0KICAgcHJpdmF0ZSB2YXIgYXJ0aWNsZUxpc3Q6IHNvbWUgVmlldyB7DQogICAgICAgIExpc3Qgew0KICAgICAgICAgICAgRm9yRWFjaChhcnRpY2xlcykgeyBhcnRpY2xlIGluDQogICAgICAgICAgICAgICAgQnV0dG9uIHsNCiAgICAgICAgICAgICAgICAgICAgb3BlbihhcnRpY2xlKQ0KICAgICAgICAgICAgICAgIH0gbGFiZWw6IHsNCiAgICAgICAgICAgICAgICAgICAgSFN0YWNrKHNwYWNpbmc6IDEyKSB7DQogICAgICAgICAgICAgICAgICAgICAgICBpZiBsZXQgaW1nID0gYXJ0aWNsZS5pbWFnZVVSTCwgIWltZy5pc0VtcHR5IHsNCiAgICAgICAgICAgICAgICAgICAgICAgICAgICBBc3luY0ltYWdlKHVybDogVVJMU2FuaXRpemVyLnNhbml0aXplKGltZykpIHsgcGhhc2UgaW4NCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgaWYgbGV0IGltYWdlID0gcGhhc2UuaW1hZ2Ugew0KICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgaW1hZ2UucmVzaXphYmxlKCkuc2NhbGVkVG9GaWxsKCkNCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgfSBlbHNlIHsNCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIENvbG9yLmNsZWFyDQogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIH0NCiAgICAgICAgICAgICAgICAgICAgICAgICAgICB9DQogICAgICAgICAgICAgICAgICAgICAgICAgICAgLmZyYW1lKHdpZHRoOiA2NCwgaGVpZ2h0OiA2NCkNCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAuY2xpcFNoYXBlKFJvdW5kZWRSZWN0YW5nbGUoY29ybmVyUmFkaXVzOiA4KSkNCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAuY2xpcHBlZCgpDQogICAgICAgICAgICAgICAgICAgICAgICB9DQogICAgICAgICAgICAgICAgICAgICAgICBWU3RhY2soYWxpZ25tZW50OiAubGVhZGluZywgc3BhY2luZzogNCkgew0KICAgICAgICAgICAgICAgICAgICAgICAgICAgIFRleHQoYXJ0aWNsZS50aXRsZSkNCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgLmZvbnQoLmhlYWRsaW5lKQ0KICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAubGluZUxpbWl0KDIpDQogICAgICAgICAgICAgICAgICAgICAgICAgICAgaWYgIWFydGljbGUucHViRGF0ZS5pc0VtcHR5IHsNCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgVGV4dChhcnRpY2xlLnB1YkRhdGUpDQogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAuZm9udCguY2FwdGlvbjIpDQogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAuZm9yZWdyb3VuZFN0eWxlKC5zZWNvbmRhcnkpDQogICAgICAgICAgICAgICAgICAgICAgICAgICAgfQ0KICAgICAgICAgICAgICAgICAgICAgICAgICAgIGlmICFhcnRpY2xlLmRlc2NyaXB0aW9uLmlzRW1wdHkgew0KICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBUZXh0KGFydGljbGUuZGVzY3JpcHRpb24uc3RyaXBUYWdzKCkpDQogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAuZm9udCguY2FwdGlvbikNCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIC5mb3JlZ3JvdW5kU3R5bGUoLnNlY29uZGFyeSkNCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIC5saW5lTGltaXQoMikNCiAgICAgICAgICAgICAgICAgICAgICAgICAgICB9DQogICAgICAgICAgICAgICAgICAgICAgICB9DQogICAgICAgICAgICAgICAgICAgIH0NCiAgICAgICAgICAgICAgICAgICAgLnBhZGRpbmcoLnZlcnRpY2FsLCA0KQ0KICAgICAgICAgICAgICAgIH0NCiAgICAgICAgICAgICAgICAuYnV0dG9uU3R5bGUoLnBsYWluKQ0KICAgICAgICAgICAgfQ0KICAgICAgICAgICAgaWYgbGV0IG5leHQgPSBuZXh0UGFnZVVSTCB7DQogICAgICAgICAgICAgICAgSFN0YWNrIHsNCiAgICAgICAgICAgICAgICAgICAgU3BhY2VyKCkNCiAgICAgICAgICAgICAgICAgICAgaWYgaXNMb2FkaW5nTW9yZSB7DQogICAgICAgICAgICAgICAgICAgICAgICBQcm9ncmVzc1ZpZXcoKQ0KICAgICAgICAgICAgICAgICAgICB9IGVsc2Ugew0KICAgICAgICAgICAgICAgICAgICAgICAgQnV0dG9uKCLliqDovb3mm7TlpJoiKSB7IFRhc2sgeyBhd2FpdCBsb2FkTW9yZShmcm9tOiBuZXh0KSB9IH0NCiAgICAgICAgICAgICAgICAgICAgfQ0KICAgICAgICAgICAgICAgICAgICBTcGFjZXIoKQ0KICAgICAgICAgICAgICAgIH0NCiAgICAgICAgICAgIH0NCiAgICAgICAgfQ0KICAgICAgICAubGlzdFN0eWxlKC5wbGFpbikNCiAgICB9DQoNCiAgICAvLyBNQVJLOiAtIOWKoOi9vQ0KDQogICAgcHJpdmF0ZSBmdW5jIGxvYWRGaXJzdCgpIGFzeW5jIHsNCiAgICAgICAgYXdhaXQgZmV0Y2hQYWdlKFVSTFNhbml0aXplci5zYW5pdGl6ZShzb3VyY2Uuc291cmNlVXJsKSA/PyBVUkwoc3RyaW5nOiBzb3VyY2Uuc291cmNlVXJsKSkNCiAgICB9DQoNCiAgICBwcml2YXRlIGZ1bmMgbG9hZE1vcmUoZnJvbSB1cmw6IFVSTCkgYXN5bmMgew0KICAgICAgICBndWFyZCAhaXNMb2FkaW5nTW9yZSBlbHNlIHsgcmV0dXJuIH0NCiAgICAgICAgYXdhaXQgTWFpbkFjdG9yLnJ1biB7IGlzTG9hZGluZ01vcmUgPSB0cnVlIH0NCiAgICAgICAgYXdhaXQgZmV0Y2hQYWdlKHVybCwgYXBwZW5kOiB0cnVlKQ0KICAgICAgICBhd2FpdCBNYWluQWN0b3IucnVuIHsgaXNMb2FkaW5nTW9yZSA9IGZhbHNlIH0NCiAgICB9DQoNCiAgICBwcml2YXRlIGZ1bmMgZmV0Y2hQYWdlKF8gdXJsOiBVUkw/LCBhcHBlbmQ6IEJvb2wgPSBmYWxzZSkgYXN5bmMgew0KICAgICAgICBndWFyZCBsZXQgdXJsIGVsc2Ugew0KICAgICAgICAgICAgaWYgIWFwcGVuZCB7IGF3YWl0IE1haW5BY3Rvci5ydW4geyBlcnJvck1lc3NhZ2UgPSAi6K6i6ZiF5rqQ5Zyw5Z2A5peg5pWI77yaXChzb3VyY2Uuc291cmNlVXJsKSI7IGlzTG9hZGluZyA9IGZhbHNlIH0gfQ0KICAgICAgICAgICAgcmV0dXJuDQogICAgICAgIH0NCiAgICAgICAgdmFyIGhlYWRlcnMgPSBTZWxmLmRlY29kZUhlYWRlcihzb3VyY2UuaGVhZGVyKQ0KICAgICAgICBpZiBoZWFkZXJzWyJVc2VyLUFnZW50Il0gPT0gbmlsIHsNCiAgICAgICAgICAgIGhlYWRlcnNbIlVzZXItQWdlbnQiXSA9IE5ldHdvcmtTZXJ2aWNlLmlQaG9uZVVBDQogICAgICAgIH0NCiAgICAgICAgZG8gew0KICAgICAgICAgICAgbGV0IGh0bWwgPSB0cnkgYXdhaXQgTmV0d29ya1NlcnZpY2Uuc2hhcmVkLmZldGNoVGV4dChmcm9tOiB1cmwsIGhlYWRlcnM6IGhlYWRlcnMpDQogICAgICAgICAgICBsZXQgKHBhZ2VBcnRpY2xlcywgbmV4dCkgPSBTZWxmLnBhcnNlUGFnZShodG1sOiBodG1sLCBzb3VyY2U6IHNvdXJjZSwgYmFzZVVSTDogdXJsKQ0KICAgICAgICAgICAgYXdhaXQgTWFpbkFjdG9yLnJ1biB7DQogICAgICAgICAgICAgICAgaWYgYXBwZW5kIHsNCiAgICAgICAgICAgICAgICAgICAgYXJ0aWNsZXMuYXBwZW5kKGNvbnRlbnRzT2Y6IHBhZ2VBcnRpY2xlcykNCiAgICAgICAgICAgICAgICB9IGVsc2Ugew0KICAgICAgICAgICAgICAgICAgICBhcnRpY2xlcyA9IHBhZ2VBcnRpY2xlcw0KICAgICAgICAgICAgICAgICAgICBpc0xvYWRpbmcgPSBmYWxzZQ0KICAgICAgICAgICAgICAgIH0NCiAgICAgICAgICAgICAgICBuZXh0UGFnZVVSTCA9IG5leHQNCiAgICAgICAgICAgIH0NCiAgICAgICAgfSBjYXRjaCB7DQogICAgICAgICAgICBhd2FpdCBNYWluQWN0b3IucnVuIHsNCiAgICAgICAgICAgICAgICBpZiAhYXBwZW5kIHsNCiAgICAgICAgICAgICAgICAgICAgZXJyb3JNZXNzYWdlID0gIuiuoumYheWKoOi9veWksei0pe+8mlwoZXJyb3IubG9jYWxpemVkRGVzY3JpcHRpb24pIg0KICAgICAgICAgICAgICAgICAgICBpc0xvYWRpbmcgPSBmYWxzZQ0KICAgICAgICAgICAgICAgIH0NCiAgICAgICAgICAgIH0NCiAgICAgICAgfQ0KICAgIH0NCg0KICAgIHByaXZhdGUgZnVuYyBvcGVuKF8gYXJ0aWNsZTogUnNzQXJ0aWNsZSkgew0KICAgICAgICBndWFyZCBsZXQgdXJsID0gVVJMU2FuaXRpemVyLnNhbml0aXplKGFydGljbGUubGluaykgZWxzZSB7IHJldHVybiB9DQogICAgICAgIFdlYlZpZXdQcmVzZW50ZXIuc2hhcmVkLnByZXNlbnQodXJsOiB1cmwuYWJzb2x1dGVTdHJpbmcsIHRpdGxlOiBhcnRpY2xlLnRpdGxlKQ0KICAgIH0NCg0KICAgIC8vIE1BUks6IC0g6Kej5p6QDQoNCiAgICAvLy8g6Kej5p6Q5LiA6aG177yM6L+U5Zue77yI5paH56ug5YiX6KGo77yM5LiL5LiA6aG1IFVSTO+8ieOAguS4i+S4gOmhteS7heW9kyBydWxlTmV4dFBhZ2Ug5ZG95Lit5pe26K6h566X44CCDQogICAgc3RhdGljIGZ1bmMgcGFyc2VQYWdlKGh0bWw6IFN0cmluZywgc291cmNlOiBTdWJzY3JpcHRpb25Tb3VyY2UsIGJhc2VVUkw6IFVSTCkgLT4gKFtSc3NBcnRpY2xlXSwgVVJMPykgew0KICAgICAgICBsZXQgY29udGFpbmVyID0gc291cmNlLnJ1bGVBcnRpY2xlcy50cmltbWluZ0NoYXJhY3RlcnMoaW46IC53aGl0ZXNwYWNlc0FuZE5ld2xpbmVzKQ0KICAgICAgICBsZXQgYXJ0aWNsZXM6IFtSc3NBcnRpY2xlXQ0KICAgICAgICBpZiAhY29udGFpbmVyLmlzRW1wdHkgew0KICAgICAgICAgICAgYXJ0aWNsZXMgPSBwYXJzZUJ5UnVsZXMoY29udGFpbmVyOiBjb250YWluZXIsIGh0bWw6IGh0bWwsIHNvdXJjZTogc291cmNlLCBiYXNlVVJMOiBiYXNlVVJMKQ0KICAgICAgICB9IGVsc2UgaWYgbGV0IHJzcyA9IFJzc1htbFBhcnNlci5wYXJzZSh4bWw6IGh0bWwsIGJhc2VVUkw6IGJhc2VVUkwpIHsNCiAgICAgICAgICAgIGFydGljbGVzID0gcnNzDQogICAgICAgIH0gZWxzZSB7DQogICAgICAgICAgICBhcnRpY2xlcyA9IFtdDQogICAgICAgIH0NCg0KICAgICAgICBsZXQgbmV4dFJ1bGUgPSBzb3VyY2UucnVsZU5leHRQYWdlLnRyaW1taW5nQ2hhcmFjdGVycyhpbjogLndoaXRlc3BhY2VzQW5kTmV3bGluZXMpDQogICAgICAgIHZhciBuZXh0OiBVUkw/DQogICAgICAgIGlmICFuZXh0UnVsZS5pc0VtcHR5IHsNCiAgICAgICAgICAgIGxldCBlbmdpbmUgPSBSdWxlRW5naW5lKCkNCiAgICAgICAgICAgIGlmIGxldCByZXNvbHZlZCA9ICh0cnk/IGVuZ2luZS5nZXRTdHJpbmcobmV4dFJ1bGUsIGNvbnRlbnQ6IGh0bWwpKT8udHJpbW1pbmdDaGFyYWN0ZXJzKGluOiAud2hpdGVzcGFjZXNBbmROZXdsaW5lcyksDQogICAgICAgICAgICAgICAhcmVzb2x2ZWQuaXNFbXB0eSwNCiAgICAgICAgICAgICAgIGxldCB1ID0gVVJMU2FuaXRpemVyLnNhbml0aXplKHJlc29sdmVkKQ0KICAgICAgICAgICAgICAgICAgPz8gVVJMKHN0cmluZzogcmVzb2x2ZWQsIHJlbGF0aXZlVG86IGJhc2VVUkwpPy5hYnNvbHV0ZVVSTCB7DQogICAgICAgICAgICAgICAgbmV4dCA9IHUNCiAgICAgICAgICAgIH0NCiAgICAgICAgfQ0KICAgICAgICByZXR1cm4gKGFydGljbGVzLCBuZXh0KQ0KICAgIH0NCg0KICAgIC8vLyDoh6rlrprkuYnop4TliJnop6PmnpDvvIjlpI3nlKjkuabmupDop4TliJnlvJXmk44gQm9va0xpc3RBbmFseXplcu+8jOS4juS5pua6kCBib29rTGlzdCDlkIzor63kuYnvvIkNCiAgICBzdGF0aWMgZnVuYyBwYXJzZUJ5UnVsZXMoY29udGFpbmVyOiBTdHJpbmcsIGh0bWw6IFN0cmluZywgc291cmNlOiBTdWJzY3JpcHRpb25Tb3VyY2UsIGJhc2VVUkw6IFVSTCkgLT4gW1Jzc0FydGljbGVdIHsNCiAgICAgICAgbGV0IGVuZ2luZSA9IFJ1bGVFbmdpbmUoKQ0KICAgICAgICB2YXIgc3ludGhldGljID0gQm9va1NvdXJjZSgpDQogICAgICAgIHN5bnRoZXRpYy5ib29rU291cmNlVXJsID0gc291cmNlLnNvdXJjZVVybA0KICAgICAgICBzeW50aGV0aWMuYm9va1NvdXJjZU5hbWUgPSBzb3VyY2Uuc291cmNlTmFtZQ0KICAgICAgICBzeW50aGV0aWMuaGVhZGVyID0gc291cmNlLmhlYWRlcg0KICAgICAgICBlbmdpbmUuc2V0U291cmNlKHN5bnRoZXRpYykNCiAgICAgICAgZW5naW5lLnNldEJhc2VVcmwoc291cmNlLnNvdXJjZVVybCkNCg0KICAgICAgICAvLyDlr7npvZAgbGVnYWRv77ya5a2X5q616KeE5YiZ5Li6IFJzc1NvdXJjZSDpobblsYLlrZfnrKbkuLLvvIzkuI3lho3ku47op4TliJnlr7nosaHlrZflhbjor7vlj5YNCiAgICAgICAgbGV0IHRpdGxlUnVsZSA9IHNvdXJjZS5ydWxlVGl0bGUNCiAgICAgICAgbGV0IGxpbmtSdWxlID0gc291cmNlLnJ1bGVMaW5rDQogICAgICAgIGxldCBwdWJEYXRlUnVsZSA9IHNvdXJjZS5ydWxlUHViRGF0ZQ0KICAgICAgICBsZXQgZGVzY1J1bGUgPSBzb3VyY2UucnVsZURlc2NyaXB0aW9uDQogICAgICAgIGxldCBpbWFnZVJ1bGUgPSBzb3VyY2UucnVsZUltYWdlDQoNCiAgICAgICAgdmFyIHJ1bGVFcnJvcjogU3RyaW5nPw0KICAgICAgICBsZXQgaXRlbXMgPSBCb29rTGlzdEFuYWx5emVyLml0ZW1zKHJ1bGU6IGNvbnRhaW5lciwgaHRtbDogaHRtbCwgZW5naW5lOiBlbmdpbmUsIHJ1bGVFcnJvcjogJnJ1bGVFcnJvcikNCiAgICAgICAgdmFyIHJlc3VsdDogW1Jzc0FydGljbGVdID0gW10NCiAgICAgICAgZm9yIGl0ZW0gaW4gaXRlbXMgew0KICAgICAgICAgICAgbGV0IHRpdGxlID0gQm9va0xpc3RBbmFseXplci5maWVsZCh0aXRsZVJ1bGUsIGl0ZW06IGl0ZW0sIGVuZ2luZTogZW5naW5lKQ0KICAgICAgICAgICAgZ3VhcmQgIXRpdGxlLmlzRW1wdHkgZWxzZSB7IGNvbnRpbnVlIH0NCiAgICAgICAgICAgIGxldCBsaW5rID0gU2VsZi5yZXNvbHZlVVJMKEJvb2tMaXN0QW5hbHl6ZXIuZmllbGQobGlua1J1bGUsIGl0ZW06IGl0ZW0sIGVuZ2luZTogZW5naW5lKSwgYmFzZTogYmFzZVVSTCkNCiAgICAgICAgICAgIGxldCBwdWJEYXRlID0gQm9va0xpc3RBbmFseXplci5maWVsZChwdWJEYXRlUnVsZSwgaXRlbTogaXRlbSwgZW5naW5lOiBlbmdpbmUpDQogICAgICAgICAgICBsZXQgZGVzYyA9IEJvb2tMaXN0QW5hbHl6ZXIuZmllbGQoZGVzY1J1bGUsIGl0ZW06IGl0ZW0sIGVuZ2luZTogZW5naW5lKQ0KICAgICAgICAgICAgbGV0IGltZyA9IFNlbGYucmVzb2x2ZVVSTChCb29rTGlzdEFuYWx5emVyLmZpZWxkKGltYWdlUnVsZSwgaXRlbTogaXRlbSwgZW5naW5lOiBlbmdpbmUpLCBiYXNlOiBiYXNlVVJMKQ0KICAgICAgICAgICAgcmVzdWx0LmFwcGVuZChSc3NBcnRpY2xlKHRpdGxlOiB0aXRsZSwNCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGxpbms6IGxpbmsgPz8gIiIsDQogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBwdWJEYXRlOiBwdWJEYXRlLA0KICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgZGVzY3JpcHRpb246IGRlc2MsDQogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBpbWFnZVVSTDogaW1nKSkNCiAgICAgICAgfQ0KICAgICAgICByZXR1cm4gcmVzdWx0DQogICAgfQ0KDQogICAgc3RhdGljIGZ1bmMgcmVzb2x2ZVVSTChfIHJlbDogU3RyaW5nLCBiYXNlOiBVUkw/KSAtPiBTdHJpbmc/IHsNCiAgICAgICAgbGV0IHQgPSByZWwudHJpbW1pbmdDaGFyYWN0ZXJzKGluOiAud2hpdGVzcGFjZXNBbmROZXdsaW5lcykNCiAgICAgICAgZ3VhcmQgIXQuaXNFbXB0eSBlbHNlIHsgcmV0dXJuIG5pbCB9DQogICAgICAgIGlmIGxldCB1ID0gVVJMU2FuaXRpemVyLnNhbml0aXplKHQpIHsgcmV0dXJuIHUuYWJzb2x1dGVTdHJpbmcgfQ0KICAgICAgICBpZiBsZXQgYmFzZSwgbGV0IHUgPSBVUkwoc3RyaW5nOiB0LCByZWxhdGl2ZVRvOiBiYXNlKT8uYWJzb2x1dGVVUkwgeyByZXR1cm4gdS5hYnNvbHV0ZVN0cmluZyB9DQogICAgICAgIHJldHVybiBuaWwNCiAgICB9DQoNCiAgICBzdGF0aWMgZnVuYyBkZWNvZGVIZWFkZXIoXyByYXc6IFN0cmluZz8pIC0+IFtTdHJpbmc6IFN0cmluZ10gew0KICAgICAgICBndWFyZCBsZXQgcmF3LCAhcmF3LnRyaW1taW5nQ2hhcmFjdGVycyhpbjogLndoaXRlc3BhY2VzQW5kTmV3bGluZXMpLmlzRW1wdHksDQogICAgICAgICAgICAgIGxldCBkYXRhID0gcmF3LmRhdGEodXNpbmc6IC51dGY4KSwNCiAgICAgICAgICAgICAgbGV0IG9iaiA9ICh0cnk/IEpTT05TZXJpYWxpemF0aW9uLmpzb25PYmplY3Qod2l0aDogZGF0YSkpIGFzPyBbU3RyaW5nOiBBbnldIGVsc2Ugew0KICAgICAgICAgICAgcmV0dXJuIFs6XQ0KICAgICAgICB9DQogICAgICAgIHZhciByZXN1bHQ6IFtTdHJpbmc6IFN0cmluZ10gPSBbOl0NCiAgICAgICAgZm9yIChrLCB2KSBpbiBvYmogeyByZXN1bHRba10gPSB2IGlzIFN0cmluZyA/IHYgYXMhIFN0cmluZyA6IFN0cmluZyhkZXNjcmliaW5nOiB2KSB9DQogICAgICAgIHJldHVybiByZXN1bHQNCiAgICB9DQp9DQoNCi8vIE1BUks6IC0gc2luZ2xlVXJsIOS4k+eUqCBXZWJWaWV3DQoNCi8vLyBzaW5nbGVVcmwg5rqQ55qE54us56uLIFdlYlZpZXfvvJrmupAgVVJMIOacrOi6q+aYr+WPr+a1j+iniOmhtemdou+8iOWcsOWdgOWPkeW4g+mhtS/lr7zoiKrpobXvvInvvIwNCi8vLyDlr7npvZAgbGVnYWRvIEFuZHJvaWQgUmVhZFJzc0FjdGl2aXR5KHNpbmdsZVVybD10cnVlKSDooYzkuLrjgIINCi8vLw0KLy8vIOS4jiBXZWJWaWV3Q29udGFpbmVy77yI55So5LqOIHN0YXJ0QnJvd3NlckF3YWl0IOeahCBKUyDmoaXlnLrmma/vvInkuI3lkIzvvJoNCi8vLyAtIOacrOinhuWbvuS4k+S4uuOAjOeUqOaIt+iHquS4u+a1j+iniOOAjeiuvuiuoe+8jOWunueOsOWujOaVtCBkZWNpZGVQb2xpY3lGb3Ig5YWB6K645omA5pyJ5a+86IiqDQovLy8gLSDpobbpg6jlt6XlhbfmoI/lkKvlkI7pgIAv5YmN6L+bL+WIt+aWsC/lrozmiJDvvIzkuI3kvp3otZYgSlMg5qGlDQovLy8gLSDkuI3kvb/nlKggWlN0YWNrIOmBruaMoSBQcm9ncmVzc1ZpZXfvvIjpgb/lhY3op6bmkbjooqvmi6bmiKrvvIkNCnN0cnVjdCBTaW5nbGVVcmxXZWJWaWV3OiBWaWV3IHsNCiAgICBsZXQgdXJsOiBTdHJpbmcNCiAgICBsZXQgdGl0bGU6IFN0cmluZw0KDQogICAgQEVudmlyb25tZW50KFwuZGlzbWlzcykgcHJpdmF0ZSB2YXIgZGlzbWlzcw0KICAgIEBTdGF0ZU9iamVjdCBwcml2YXRlIHZhciBjb29yZGluYXRvciA9IFNpbmdsZVVybFdlYlZpZXdDb29yZGluYXRvcigpDQoNCiAgICB2YXIgYm9keTogc29tZSBWaWV3IHsNCiAgICAgICAgTmF2aWdhdGlvblN0YWNrIHsNCiAgICAgICAgICAgIFZTdGFjayhzcGFjaW5nOiAwKSB7DQogICAgICAgICAgICAgICAgLy8gTUFSSzogV2ViVmlldw0KICAgICAgICAgICAgICAgIFNpbmdsZVVybFdlYlZpZXdDb250YWluZXIoDQogICAgICAgICAgICAgICAgICAgIHVybDogdXJsLA0KICAgICAgICAgICAgICAgICAgICBjb29yZGluYXRvcjogJGNvb3JkaW5hdG9yDQogICAgICAgICAgICAgICAgKQ0KICAgICAgICAgICAgfQ0KICAgICAgICAgICAgLm5hdmlnYXRpb25UaXRsZSh0aXRsZS5pc0VtcHR5ID8gIue9kemhtSIgOiB0aXRsZSkNCiAgICAgICAgICAgIC5uYXZpZ2F0aW9uQmFyVGl0bGVEaXNwbGF5TW9kZSguaW5saW5lKQ0KICAgICAgICAgICAgLnRvb2xiYXIgew0KICAgICAgICAgICAgICAgIFRvb2xiYXJJdGVtKHBsYWNlbWVudDogLm5hdmlnYXRpb25CYXJMZWFkaW5nKSB7DQogICAgICAgICAgICAgICAgICAgIEJ1dHRvbigi5a6M5oiQIikgeyBkaXNtaXNzKCkgfQ0KICAgICAgICAgICAgICAgIH0NCiAgICAgICAgICAgICAgICBUb29sYmFySXRlbShwbGFjZW1lbnQ6IC5uYXZpZ2F0aW9uQmFyVHJhaWxpbmcpIHsNCiAgICAgICAgICAgICAgICAgICAgSFN0YWNrKHNwYWNpbmc6IDE2KSB7DQogICAgICAgICAgICAgICAgICAgICAgICBCdXR0b24gew0KICAgICAgICAgICAgICAgICAgICAgICAgICAgIGNvb3JkaW5hdG9yLmdvQmFjaygpDQogICAgICAgICAgICAgICAgICAgICAgICB9IGxhYmVsOiB7DQogICAgICAgICAgICAgICAgICAgICAgICAgICAgSW1hZ2Uoc3lzdGVtTmFtZTogImNoZXZyb24ubGVmdCIpDQogICAgICAgICAgICAgICAgICAgICAgICB9DQogICAgICAgICAgICAgICAgICAgICAgICAuZGlzYWJsZWQoIWNvb3JkaW5hdG9yLmNhbkdvQmFjaykNCg0KICAgICAgICAgICAgICAgICAgICAgICAgQnV0dG9uIHsNCiAgICAgICAgICAgICAgICAgICAgICAgICAgICBjb29yZGluYXRvci5nb0ZvcndhcmQoKQ0KICAgICAgICAgICAgICAgICAgICAgICAgfSBsYWJlbDogew0KICAgICAgICAgICAgICAgICAgICAgICAgICAgIEltYWdlKHN5c3RlbU5hbWU6ICJjaGV2cm9uLnJpZ2h0IikNCiAgICAgICAgICAgICAgICAgICAgICAgIH0NCiAgICAgICAgICAgICAgICAgICAgICAgIC5kaXNhYmxlZCghY29vcmRpbmF0b3IuY2FuR29Gb3J3YXJkKQ0KDQogICAgICAgICAgICAgICAgICAgICAgICBCdXR0b24gew0KICAgICAgICAgICAgICAgICAgICAgICAgICAgIGNvb3JkaW5hdG9yLnJlbG9hZCgpDQogICAgICAgICAgICAgICAgICAgICAgICB9IGxhYmVsOiB7DQogICAgICAgICAgICAgICAgICAgICAgICAgICAgSW1hZ2Uoc3lzdGVtTmFtZTogImFycm93LmNvdW50ZXJjbG9ja3dpc2UiKQ0KICAgICAgICAgICAgICAgICAgICAgICAgfQ0KICAgICAgICAgICAgICAgICAgICB9DQogICAgICAgICAgICAgICAgfQ0KICAgICAgICAgICAgfQ0KICAgICAgICB9DQogICAgfQ0KfQ0KDQovLy8gU2luZ2xlVXJsV2ViVmlldyDnmoQgQ29vcmRpbmF0b3LvvJrmjIHmnIkgV0tXZWJWaWV3IOW8leeUqO+8jOWkhOeQhuWvvOiIqueKtuaAgeWSjOW3peWFt+agj+aTjeS9nOOAgg0KLy8vIOS9v+eUqCBAU3RhdGVPYmplY3Qg6aOO5qC855qEIE9ic2VydmFibGVPYmplY3TvvIzpgJrov4cgQmluZGluZyDkvKDpgJLnu5kgV2ViVmlld0NvbnRhaW5lcuOAgg0KZmluYWwgY2xhc3MgU2luZ2xlVXJsV2ViVmlld0Nvb3JkaW5hdG9yOiBPYnNlcnZhYmxlT2JqZWN0IHsNCiAgICBAUHVibGlzaGVkIHZhciBpc0xvYWRpbmcgPSB0cnVlDQogICAgQFB1Ymxpc2hlZCB2YXIgY2FuR29CYWNrID0gZmFsc2UNCiAgICBAUHVibGlzaGVkIHZhciBjYW5Hb0ZvcndhcmQgPSBmYWxzZQ0KICAgIEBQdWJsaXNoZWQgdmFyIGN1cnJlbnRVUkw6IFN0cmluZz8NCg0KICAgIHByaXZhdGUgd2VhayB2YXIgd2s6IFdLV2ViVmlldz8NCg0KICAgIGZ1bmMgc2V0V0soXyB3azogV0tXZWJWaWV3KSB7DQogICAgICAgIHNlbGYud2sgPSB3aw0KICAgIH0NCg0KICAgIGZ1bmMgZ29CYWNrKCkgew0KICAgICAgICBndWFyZCBsZXQgd2ssIHdrLmNhbkdvQmFjayBlbHNlIHsgcmV0dXJuIH0NCiAgICAgICAgd2suZ29CYWNrKCkNCiAgICB9DQoNCiAgICBmdW5jIGdvRm9yd2FyZCgpIHsNCiAgICAgICAgZ3VhcmQgbGV0IHdrLCB3ay5jYW5Hb0ZvcndhcmQgZWxzZSB7IHJldHVybiB9DQogICAgICAgIHdrLmdvRm9yd2FyZCgpDQogICAgfQ0KDQogICAgZnVuYyByZWxvYWQoKSB7DQogICAgICAgIGd1YXJkIGxldCB3ayBlbHNlIHsgcmV0dXJuIH0NCiAgICAgICAgd2sucmVsb2FkKCkNCiAgICB9DQp9DQoNCi8vLyBTaW5nbGVVcmxXZWJWaWV3IOeahCBXS1dlYlZpZXdSZXByZXNlbnRhYmxlDQovLy8gLSDlrp7njrAgZGVjaWRlUG9saWN5Rm9yIOWFgeiuuOaJgOacieWvvOiIqu+8jOehruS/nemhtemdouWGhSA8YT4g6ZO+5o6l54K55Ye75ZCO5ZyoIFdlYlZpZXcg5YaF6YOo6Lez6L2sDQpwcml2YXRlIHN0cnVjdCBTaW5nbGVVcmxXZWJWaWV3Q29udGFpbmVyOiBVSVZpZXdSZXByZXNlbnRhYmxlIHsNCiAgICBsZXQgdXJsOiBTdHJpbmcNCiAgICBAQmluZGluZyB2YXIgY29vcmRpbmF0b3I6IFNpbmdsZVVybFdlYlZpZXdDb29yZGluYXRvcg0KDQogICAgZnVuYyBtYWtlQ29vcmRpbmF0b3IoKSAtPiBTaW5nbGVVcmxXZWJWaWV3Q29vcmRpbmF0b3Igew0KICAgICAgICBjb29yZGluYXRvcg0KICAgIH0NCg0KICAgIGZ1bmMgbWFrZShjb250ZXh0OiBDb250ZXh0KSAtPiBXS1dlYlZpZXcgew0KICAgICAgICBsZXQgY29uZmlnID0gV0tXZWJWaWV3Q29uZmlndXJhdGlvbigpDQogICAgICAgIGNvbmZpZy5hbGxvd3NJbmxpbmVNZWRpYVBsYXliYWNrID0gdHJ1ZQ0KICAgICAgICBjb25maWcubWVkaWFQbGF5YmFja1JlcXVpcmVzVXNlckFjdGlvbiA9IGZhbHNlDQogICAgICAgIGxldCB3ayA9IFdLV2ViVmlldyhmcmFtZTogLnplcm8sIGNvbmZpZ3VyYXRpb246IGNvbmZpZykNCiAgICAgICAgd2submF2aWdhdGlvbkRlbGVnYXRlID0gY29udGV4dC5jb29yZGluYXRvcg0KICAgICAgICB3ay5hbGxvd3NCYWNrRm9yd2FyZE5hdmlnYXRpb25HZXN0dXJlcyA9IHRydWUNCiAgICAgICAgY29vcmRpbmF0b3Iuc2V0V0sod2spDQogICAgICAgIGlmIGxldCB1ID0gVVJMKHN0cmluZzogdXJsKSB7DQogICAgICAgICAgICB3ay5sb2FkKFVSTFJlcXVlc3QodXJsOiB1KSkNCiAgICAgICAgfQ0KICAgICAgICByZXR1cm4gd2sNCiAgICB9DQoNCiAgICBmdW5jIHVwZGF0ZW91aVZpZXcoXyB1aVZpZXc6IFdLV2ViVmlldywgY29udGV4dDogQ29udGV4dCkge30NCn0NCg0KLy8gTUFSSzogLSBDb29yZGluYXRvciDkvZzkuLogV0tOYXZpZ2F0aW9uRGVsZWdhdGUNCg0KZXh0ZW5zaW9uIFNpbmdsZVVybFdlYlZpZXdDb29yZGluYXRvcjogV0tOYXZpZ2F0aW9uRGVsZWdhdGUgew0KICAgIGZ1bmMgd2tXZWJWaWV3KF8gd2s6IFdLV2ViVmlldywgZGVjaWRlUG9saWN5Rm9yIG5hdmlnYXRpb25BY3Rpb246IFdLTmF2aWdhdGlvbkFjdGlvbiwNCiAgICAgICAgICAgICAgICAgICBkZWNpc2lvbkhhbmRsZXI6IEBlc2NhcGluZyAoV0tOYXZpZ2F0aW9uQWN0aW9uUG9saWN5KSAtPiBWb2lkKSB7DQogICAgICAgIC8vIOWFgeiuuOaJgOacieWvvOiIqu+8iOWMheaLrOmhtemdouWGhemTvuaOpeeCueWHu++8ie+8jOehruS/neeUqOaIt+iDveiHqueUseeCueWHu+mTvuaOpQ0KICAgICAgICBkZWNpc2lvbkhhbmRsZXIoLmFsbG93KQ0KICAgIH0NCg0KICAgIGZ1bmMgd2tXZWJWaWV3KF8gd2s6IFdLV2ViVmlldywgZGlkU3RhcnRQcm92aXNpb25hbE5hdmlnYXRpb24gbmF2aWdhdGlvbjogV0tOYXZpZ2F0aW9uISkgew0KICAgICAgICBpc0xvYWRpbmcgPSB0cnVlDQogICAgfQ0KDQogICAgZnVuYyB3a1dlYlZpZXcoXyB3azogV0tXZWJWaWV3LCBkaWRGaW5pc2ggbmF2aWdhdGlvbjogV0tOYXZpZ2F0aW9uISkgew0KICAgICAgICBpc0xvYWRpbmcgPSBmYWxzZQ0KICAgICAgICBjYW5Hb0JhY2sgPSB3ay5jYW5Hb0JhY2sNCiAgICAgICAgY2FuR29Gb3J3YXJkID0gd2suY2FuR29Gb3J3YXJkDQogICAgICAgIGN1cnJlbnRVUkwgPSB3ay51cmw/LmFic29sdXRlU3RyaW5nDQogICAgfQ0KDQogICAgZnVuYyB3a1dlYlZpZXcoXyB3azogV0tXZWJWaWV3LCBkaWRGYWlsIG5hdmlnYXRpb246IFdLTmF2aWdhdGlvbiEsIHdpdGhFcnJvciBlcnJvcjogRXJyb3IpIHsNCiAgICAgICAgaXNMb2FkaW5nID0gZmFsc2UNCiAgICB9DQoNCiAgICBmdW5jIHdrV2ViVmlldyhfIHdrOiBXS1dlYlZpZXcsIGRpZEZhaWxQcm92aXNpb25hbE5hdmlnYXRpb24gbmF2aWdhdGlvbjogV0tOYXZpZ2F0aW9uISwNCiAgICAgICAgICAgICAgICAgICB3aXRoRXJyb3IgZXJyb3I6IEVycm9yKSB7DQogICAgICAgIGlzTG9hZGluZyA9IGZhbHNlDQogICAgfQ0KfQ0KDQovLy8g6K6i6ZiF5rqQ5paH56ug5qih5Z6LDQpzdHJ1Y3QgUnNzQXJ0aWNsZTogSWRlbnRpZmlhYmxlIHsNCiAgICBsZXQgaWQgPSBVVUlEKCkNCiAgICBsZXQgdGl0bGU6IFN0cmluZw0KICAgIGxldCBsaW5rOiBTdHJpbmcNCiAgICBsZXQgcHViRGF0ZTogU3RyaW5nDQogICAgbGV0IGRlc2NyaXB0aW9uOiBTdHJpbmcNCiAgICBsZXQgaW1hZ2VVUkw6IFN0cmluZz8NCn0NCg0KLy8gTUFSSzogLSDmlofmnKzmuIXmtJfvvIjmj4/ov7DmkZjopoHvvIkNCg0KZXh0ZW5zaW9uIFN0cmluZyB7DQogICAgLy8vIOWOu+mZpCBIVE1MIOagh+etvuW5tuWOi+e8qeepuueZve+8jOeUqOS6juaWh+eroOaPj+i/sOaRmOimgQ0KICAgIGZ1bmMgc3RyaXBUYWdzKCkgLT4gU3RyaW5nIHsNCiAgICAgICAgdmFyIHMgPSBzZWxmDQogICAgICAgIHMgPSBzLnJlcGxhY2luZ09jY3VycmVuY2VzKG9mOiAiPGJyXFxzKi8/PiIsIHdpdGg6ICIgIiwgb3B0aW9uczogLnJlZ3VsYXJFeHByZXNzaW9uKQ0KICAgICAgICBzID0gcy5yZXBsYWNpbmdPY2N1cnJlbmNlcyhvZjogIjxbXj5dKz4iLCB3aXRoOiAiICIsIG9wdGlvbnM6IC5yZWd1bGFyRXhwcmVzc2lvbikNCiAgICAgICAgcyA9IHMucmVwbGFjaW5nT2NjdXJyZW5jZXMob2Y6ICImbmJzcDsiLCB3aXRoOiAiICIpDQogICAgICAgIHMgPSBzLnJlcGxhY2luZ09jY3VycmVuY2VzKG9mOiAiJmFtcDsiLCB3aXRoOiAiJiIpDQogICAgICAgIHMgPSBzLnJlcGxhY2luZ09jY3VycmVuY2VzKG9mOiAiJmx0OyIsIHdpdGg6ICI8IikNCiAgICAgICAgcyA9IHMucmVwbGFjaW5nT2NjdXJyZW5jZXMob2Y6ICImZ3Q7Iiwgd2l0aDogIj4iKQ0KICAgICAgICBzID0gcy5yZXBsYWNpbmdPY2N1cnJlbmNlcyhvZjogIlxccysiLCB3aXRoOiAiICIsIG9wdGlvbnM6IC5yZWd1bGFyRXhwcmVzc2lvbikNCiAgICAgICAgcmV0dXJuIHMudHJpbW1pbmdDaGFyYWN0ZXJzKGluOiAud2hpdGVzcGFjZXNBbmROZXdsaW5lcykNCiAgICB9DQp9DQoNCi8vIE1BUks6IC0gUlNTIC8gQXRvbSDljp/nlJ/op6PmnpANCg0KLy8vIOagh+WHhiBSU1MgMi4w77yIPGl0ZW0+77yJ5LiOIEF0b23vvIg8ZW50cnk+77yJ6K6i6ZiF5rqQ6Kej5p6Q44CCDQovLy8g5a+55bqUIGxlZ2FkbyDlr7nml6Doh6rlrprkuYnop4TliJnnmoTorqLpmIXmupDnmoTlpITnkIbvvJrnm7TmjqXmjIkgWE1MIOe7k+aehOaKveWPluaWh+eroOOAgg0KZmluYWwgY2xhc3MgUnNzWG1sUGFyc2VyIHsNCiAgICBwcml2YXRlIHZhciBpdGVtczogW1Jzc0FydGljbGVdID0gW10NCiAgICBwcml2YXRlIHZhciBiYXNlVVJMOiBVUkw/DQoNCiAgICBwcml2YXRlIHN0cnVjdCBSc3NBcnRpY2xlQnVpbGRlciB7DQogICAgICAgIHZhciB0aXRsZSA9ICIiDQogICAgICAgIHZhciBsaW5rID0gIiINCiAgICAgICAgdmFyIHB1YkRhdGUgPSAiIg0KICAgICAgICB2YXIgZGVzY3JpcHRpb24gPSAiIg0KICAgICAgICB2YXIgaW1hZ2VVUkw6IFN0cmluZz8NCiAgICB9DQoNCiAgICAvLy8g55SoIFN3aWZ0U291cCDop6PmnpAgUlNTL0F0b23vvIjkuI4gbGVnYWRvIEpzb3VwIOWvuem9kO+8muWQjOaXtuWFvOWuuSBYTUwg5LiOIEhUTUzvvInjgIINCiAgICAvLy8g5pen5a6e546w5L6d6LWWIFhNTFBhcnNlckRlbGVnYXRl77yM5Lil5qC8IFhNTCDop6PmnpDlmajpgYfliLAgSFRNTCDmupDljbPpnZnpu5jlpLHotKXov5Tlm57nqbrjgIINCiAgICBzdGF0aWMgZnVuYyBwYXJzZSh4bWw6IFN0cmluZywgYmFzZVVSTDogVVJMPykgLT4gW1Jzc0FydGljbGVdPyB7DQogICAgICAgIGxldCB0cmltbWVkID0geG1sLnRyaW1taW5nQ2hhcmFjdGVycyhpbjogLndoaXRlc3BhY2VzQW5kTmV3bGluZXMpDQogICAgICAgIGd1YXJkICF0cmltbWVkLmlzRW1wdHkgZWxzZSB7IHJldHVybiBuaWwgfQ0KDQogICAgICAgIGRvIHsNCiAgICAgICAgICAgIGxldCBkb2MgPSB0cnkgU3dpZnRTb3VwLnBhcnNlKHRyaW1tZWQpDQogICAgICAgICAgICAvLyBSU1MgPGl0ZW0+IOS4jiBBdG9tIDxlbnRyeT4g5ZCI5bm2DQogICAgICAgICAgICBsZXQgaXRlbXMgPSB0cnkgZG9jLnNlbGVjdCgiaXRlbSIpLmFycmF5KCkNCiAgICAgICAgICAgIGxldCBlbnRyaWVzID0gdHJ5IGRvYy5zZWxlY3QoImVudHJ5IikuYXJyYXkoKQ0KICAgICAgICAgICAgbGV0IGVsZW1lbnRzID0gaXRlbXMgKyBlbnRyaWVzDQogICAgICAgICAgICBndWFyZCAhZWxlbWVudHMuaXNFbXB0eSBlbHNlIHsgcmV0dXJuIG5pbCB9DQoNCiAgICAgICAgICAgIHZhciByZXN1bHQ6IFtSc3NBcnRpY2xlXSA9IFtdDQogICAgICAgICAgICBmb3IgZWxlbWVudCBpbiBlbGVtZW50cyB7DQogICAgICAgICAgICAgICAgbGV0IHRpdGxlID0gKCh0cnk/IGVsZW1lbnQuc2VsZWN0KCJ0aXRsZSIpLnRleHQoKSk/LnRyaW1taW5nQ2hhcmFjdGVycyhpbjogLndoaXRlc3BhY2VzQW5kTmV3bGluZXMpKSA/PyAiIg0KICAgICAgICAgICAgICAgIGd1YXJkICF0aXRsZS5pc0VtcHR5IGVsc2UgeyBjb250aW51ZSB9DQoNCiAgICAgICAgICAgICAgICB2YXIgbGluayA9ICgodHJ5PyBlbGVtZW50LnNlbGVjdCgibGluayIpLnRleHQoKSk/LnRyaW1taW5nQ2hhcmFjdGVycyhpbjogLndoaXRlc3BhY2VzQW5kTmV3bGluZXMpKSA/PyAiIg0KICAgICAgICAgICAgICAgIGlmIGxpbmsuaXNFbXB0eSB7DQogICAgICAgICAgICAgICAgICAgIGxpbmsgPSAoKHRyeT8gZWxlbWVudC5zZWxlY3QoImxpbmsiKS5hdHRyKCJocmVmIikpPy50cmltbWluZ0NoYXJhY3RlcnMoaW46IC53aGl0ZXNwYWNlc0FuZE5ld2xpbmVzKSkgPz8gIiINCiAgICAgICAgICAgICAgICB9DQoNCiAgICAgICAgICAgICAgICBsZXQgcHViRGF0ZSA9ICgodHJ5PyBlbGVtZW50LnNlbGVjdCgicHViRGF0ZSwgcHVibGlzaGVkLCB1cGRhdGVkLCBkYzpkYXRlIikudGV4dCgpKT8udHJpbW1pbmdDaGFyYWN0ZXJzKGluOiAud2hpdGVzcGFjZXNBbmROZXdsaW5lcykpID8/ICIiDQoNCiAgICAgICAgICAgICAgICB2YXIgZGVzY3JpcHRpb24gPSAoKHRyeT8gZWxlbWVudC5zZWxlY3QoImRlc2NyaXB0aW9uLCBzdW1tYXJ5LCBjb250ZW50LCBjb250ZW50OmVuY29kZWQiKS50ZXh0KCkpPy50cmltbWluZ0NoYXJhY3RlcnMoaW46IC53aGl0ZXNwYWNlc0FuZE5ld2xpbmVzKSkgPz8gIiINCiAgICAgICAgICAgICAgICBpZiBkZXNjcmlwdGlvbi5pc0VtcHR5IHsNCiAgICAgICAgICAgICAgICAgICAgZGVzY3JpcHRpb24gPSAoKHRyeT8gZWxlbWVudC5zZWxlY3QoImNvbnRlbnQiKS5hdHRyKCJ1cmwiKSk/LnRyaW1taW5nQ2hhcmFjdGVycyhpbjogLndoaXRlc3BhY2VzQW5kTmV3bGluZXMpKSA/PyAiIg0KICAgICAgICAgICAgICAgIH0NCg0KICAgICAgICAgICAgICAgIHZhciBpbWFnZVVSTDogU3RyaW5nPw0KICAgICAgICAgICAgICAgIC8vIGVuY2xvc3VyZSB1cmwNCiAgICAgICAgICAgICAgICBpZiBsZXQgdSA9IHRyeT8gZWxlbWVudC5zZWxlY3QoImVuY2xvc3VyZSIpLmF0dHIoInVybCIpLCAhdS5pc0VtcHR5IHsNCiAgICAgICAgICAgICAgICAgICAgaW1hZ2VVUkwgPSB1DQogICAgICAgICAgICAgICAgfQ0KICAgICAgICAgICAgICAgIC8vIG1lZGlhOmNvbnRlbnQgLyBtZWRpYTp0aHVtYm5haWwgdXJsDQogICAgICAgICAgICAgICAgaWYgaW1hZ2VVUkwgPT0gbmlsLA0KICAgICAgICAgICAgICAgICAgIGxldCB1ID0gdHJ5PyBlbGVtZW50LnNlbGVjdCgibWVkaWFcXDpjb250ZW50LCBtZWRpYVxcOnRodW1ibmFpbCIpLmF0dHIoInVybCIpLCAhdS5pc0VtcHR5IHsNCiAgICAgICAgICAgICAgICAgICAgaW1hZ2VVUkwgPSB1DQogICAgICAgICAgICAgICAgfQ0KICAgICAgICAgICAgICAgIC8vIGNvbnRlbnQgdXJsIGF0dHINCiAgICAgICAgICAgICAgICBpZiBpbWFnZVVSTCA9PSBuaWwsDQogICAgICAgICAgICAgICAgICAgbGV0IHUgPSB0cnk/IGVsZW1lbnQuc2VsZWN0KCJjb250ZW50IikuYXR0cigidXJsIiksICF1LmlzRW1wdHkgew0KICAgICAgICAgICAgICAgICAgICBpbWFnZVVSTCA9IHUNCiAgICAgICAgICAgICAgICB9DQogICAgICAgICAgICAgICAgLy8gaW1hZ2UgPiB1cmwgdGV4dA0KICAgICAgICAgICAgICAgIGlmIGltYWdlVVJMID09IG5pbCwNCiAgICAgICAgICAgICAgICAgICBsZXQgdSA9IHRyeT8gZWxlbWVudC5zZWxlY3QoImltYWdlIHVybCIpLnRleHQoKSwgIXUuaXNFbXB0eSB7DQogICAgICAgICAgICAgICAgICAgIGltYWdlVVJMID0gdQ0KICAgICAgICAgICAgICAgIH0NCg0KICAgICAgICAgICAgICAgIGxldCByZXNvbHZlZExpbmsgPSBTZWxmLnJlc29sdmUobGluaywgYmFzZTogYmFzZVVSTCkNCiAgICAgICAgICAgICAgICBsZXQgcmVzb2x2ZWRJbWcgPSBpbWFnZVVSTC5mbGF0TWFwIHsgU2VsZi5yZXNvbHZlKCQwLCBiYXNlOiBiYXNlVVJMKSB9DQoNCiAgICAgICAgICAgICAgICByZXN1bHQuYXBwZW5kKFJzc0FydGljbGUoDQogICAgICAgICAgICAgICAgICAgIHRpdGxlOiB0aXRsZSwNCiAgICAgICAgICAgICAgICAgICAgbGluazogcmVzb2x2ZWRMaW5rID8/ICIiLA0KICAgICAgICAgICAgICAgICAgICBwdWJEYXRlOiBwdWJEYXRlLA0KICAgICAgICAgICAgICAgICAgICBkZXNjcmlwdGlvbjogZGVzY3JpcHRpb24sDQogICAgICAgICAgICAgICAgICAgIGltYWdlVVJMOiByZXNvbHZlZEltZw0KICAgICAgICAgICAgICAgICkpDQogICAgICAgICAgICB9DQogICAgICAgICAgICByZXR1cm4gcmVzdWx0LmlzRW1wdHkgPyBuaWwgOiByZXN1bHQNCiAgICAgICAgfSBjYXRjaCB7DQogICAgICAgICAgICByZXR1cm4gbmlsDQogICAgICAgIH0NCiAgICB9DQoNCiAgICBwcml2YXRlIHN0YXRpYyBmdW5jIHJlc29sdmUoXyByZWw6IFN0cmluZywgYmFzZTogVVJMPykgLT4gU3RyaW5nPyB7DQogICAgICAgIGxldCB0ID0gcmVsLnRyaW1taW5nQ2hhcmFjdGVycyhpbjogLndoaXRlc3BhY2VzQW5kTmV3bGluZXMpDQogICAgICAgIGd1YXJkICF0LmlzRW1wdHkgZWxzZSB7IHJldHVybiBuaWwgfQ0KICAgICAgICBpZiBsZXQgdSA9IFVSTChzdHJpbmc6IHQpIHsgcmV0dXJuIHUuYWJzb2x1dGVTdHJpbmcgfQ0KICAgICAgICBpZiBsZXQgYmFzZSwgbGV0IHUgPSBVUkwoc3RyaW5nOiB0LCByZWxhdGl2ZVRvOiBiYXNlKT8uYWJzb2x1dGVVUkwgeyByZXR1cm4gdS5hYnNvbHV0ZVN0cmluZyB9DQogICAgICAgIHJldHVybiBuaWwNCiAgICB9DQp9DQo=
+import SwiftUI
+import Foundation
+import SwiftSoup
+import WebKit
+
+/// 订阅源文章列表（对应 legado 订阅源的阅读入口）。
+///
+/// 修复「导入的订阅源打不开」：此前订阅源行点击只做启用/禁用切换，没有阅读页面。
+/// 本视图负责：抓取 sourceUrl → 解析文章列表（优先用订阅源自定义规则 ruleArticles 等，
+/// 无规则则按 RSS / Atom 原生 XML 解析）→ 列表展示 → 点击文章在 WebView 打开。
+///
+/// 解析策略与 legado RssSourceAnalyzer 对齐：
+/// - 自定义规则存在时，把 ruleArticles 对象里的 ruleArticles（容器）/ ruleTitle / ruleLink /
+///   rulePubDate / ruleDescription / ruleImage 映射进 BookListAnalyzer 逐元素求值
+///   （HTML / JSON / XPath / 正则通用）；
+/// - 无自定义规则时（绝大多数标准 RSS / Atom 订阅源），走原生 XMLParser 抽取 item/entry。
+struct SubscriptionArticleListView: View {
+    let source: SubscriptionSource
+
+    @State private var articles: [RssArticle] = []
+    @State private var isLoading = true
+    @State private var errorMessage: String?
+    @State private var nextPageURL: URL?
+    @State private var isLoadingMore = false
+
+    var body: some View {
+        if source.singleUrl {
+            singleUrlView
+        } else {
+            Group {
+                if isLoading {
+                    ProgressView("正在加载订阅…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let errorMessage {
+                    ContentUnavailableView {
+                        Label("加载失败", systemImage: "exclamation.triangle")
+                    } description: {
+                        Text(errorMessage)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if articles.isEmpty {
+                    ContentUnavailableView {
+                        Label("暂无文章", systemImage: "newspaper")
+                    } description: {
+                        Text("订阅源「\(source.sourceName)」未解析到文章，可能站点结构已变或需要特定请求头。")
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    articleList
+                }
+            }
+            .navigationTitle(source.sourceName.isEmpty ? "订阅" : source.sourceName)
+            .navigationBarTitleDisplayMode(.inline)
+            .onAppear { if articles.isEmpty { Task { await loadFirst() } } }
+        }
+    }
+
+/// singleUrl 模式：源 URL 本身就是一个可浏览页面（如地址发布页/导航页），
+   /// 对齐 legado Android 行为：直接在 WebView 中打开，不走 RSS/Atom 列表解析。
+   private var singleUrlView: some View {
+       SingleUrlWebView(url: source.sourceUrl, title: source.sourceName)
+   }
+
+   private var articleList: some View {
+        List {
+            ForEach(articles) { article in
+                Button {
+                    open(article)
+                } label: {
+                    HStack(spacing: 12) {
+                        if let img = article.imageURL, !img.isEmpty {
+                            AsyncImage(url: URLSanitizer.sanitize(img)) { phase in
+                                if let image = phase.image {
+                                    image.resizable().scaledToFill()
+                                } else {
+                                    Color.clear
+                                }
+                            }
+                            .frame(width: 64, height: 64)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .clipped()
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(article.title)
+                                .font(.headline)
+                                .lineLimit(2)
+                            if !article.pubDate.isEmpty {
+                                Text(article.pubDate)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            if !article.description.isEmpty {
+                                Text(article.description.stripTags())
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .buttonStyle(.plain)
+            }
+            if let next = nextPageURL {
+                HStack {
+                    Spacer()
+                    if isLoadingMore {
+                        ProgressView()
+                    } else {
+                        Button("加载更多") { Task { await loadMore(from: next) } }
+                    }
+                    Spacer()
+                }
+            }
+        }
+        .listStyle(.plain)
+    }
+
+    // MARK: - 加载
+
+    private func loadFirst() async {
+        await fetchPage(URLSanitizer.sanitize(source.sourceUrl) ?? URL(string: source.sourceUrl))
+    }
+
+    private func loadMore(from url: URL) async {
+        guard !isLoadingMore else { return }
+        await MainActor.run { isLoadingMore = true }
+        await fetchPage(url, append: true)
+        await MainActor.run { isLoadingMore = false }
+    }
+
+    private func fetchPage(_ url: URL?, append: Bool = false) async {
+        guard let url else {
+            if !append { await MainActor.run { errorMessage = "订阅源地址无效：\(source.sourceUrl)"; isLoading = false } }
+            return
+        }
+        var headers = Self.decodeHeader(source.header)
+        if headers["User-Agent"] == nil {
+            headers["User-Agent"] = NetworkService.iPhoneUA
+        }
+        do {
+            let html = try await NetworkService.shared.fetchText(from: url, headers: headers)
+            let (pageArticles, next) = Self.parsePage(html: html, source: source, baseURL: url)
+            await MainActor.run {
+                if append {
+                    articles.append(contentsOf: pageArticles)
+                } else {
+                    articles = pageArticles
+                    isLoading = false
+                }
+                nextPageURL = next
+            }
+        } catch {
+            await MainActor.run {
+                if !append {
+                    errorMessage = "订阅加载失败：\(error.localizedDescription)"
+                    isLoading = false
+                }
+            }
+        }
+    }
+
+    private func open(_ article: RssArticle) {
+        guard let url = URLSanitizer.sanitize(article.link) else { return }
+        WebViewPresenter.shared.present(url: url.absoluteString, title: article.title)
+    }
+
+    // MARK: - 解析
+
+    /// 解析一页，返回（文章列表，下一页 URL）。下一页仅当 ruleNextPage 命中时计算。
+    static func parsePage(html: String, source: SubscriptionSource, baseURL: URL) -> ([RssArticle], URL?) {
+        let container = source.ruleArticles.trimmingCharacters(in: .whitespacesAndNewlines)
+        let articles: [RssArticle]
+        if !container.isEmpty {
+            articles = parseByRules(container: container, html: html, source: source, baseURL: baseURL)
+        } else if let rss = RssXmlParser.parse(xml: html, baseURL: baseURL) {
+            articles = rss
+        } else {
+            articles = []
+        }
+
+        let nextRule = source.ruleNextPage.trimmingCharacters(in: .whitespacesAndNewlines)
+        var next: URL?
+        if !nextRule.isEmpty {
+            let engine = RuleEngine()
+            if let resolved = (try? engine.getString(nextRule, content: html))?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !resolved.isEmpty,
+               let u = URLSanitizer.sanitize(resolved)
+                  ?? URL(string: resolved, relativeTo: baseURL)?.absoluteURL {
+                next = u
+            }
+        }
+        return (articles, next)
+    }
+
+    /// 自定义规则解析（复用书源规则引擎 BookListAnalyzer，与书源 bookList 同语义）
+    static func parseByRules(container: String, html: String, source: SubscriptionSource, baseURL: URL) -> [RssArticle] {
+        let engine = RuleEngine()
+        var synthetic = BookSource()
+        synthetic.bookSourceUrl = source.sourceUrl
+        synthetic.bookSourceName = source.sourceName
+        synthetic.header = source.header
+        engine.setSource(synthetic)
+        engine.setBaseUrl(source.sourceUrl)
+
+        // 对齐 legado：字段规则为 RssSource 顶层字符串，不再从规则对象字典读取
+        let titleRule = source.ruleTitle
+        let linkRule = source.ruleLink
+        let pubDateRule = source.rulePubDate
+        let descRule = source.ruleDescription
+        let imageRule = source.ruleImage
+
+        var ruleError: String?
+        let items = BookListAnalyzer.items(rule: container, html: html, engine: engine, ruleError: &ruleError)
+        var result: [RssArticle] = []
+        for item in items {
+            let title = BookListAnalyzer.field(titleRule, item: item, engine: engine)
+            guard !title.isEmpty else { continue }
+            let link = Self.resolveURL(BookListAnalyzer.field(linkRule, item: item, engine: engine), base: baseURL)
+            let pubDate = BookListAnalyzer.field(pubDateRule, item: item, engine: engine)
+            let desc = BookListAnalyzer.field(descRule, item: item, engine: engine)
+            let img = Self.resolveURL(BookListAnalyzer.field(imageRule, item: item, engine: engine), base: baseURL)
+            result.append(RssArticle(title: title,
+                                    link: link ?? "",
+                                    pubDate: pubDate,
+                                    description: desc,
+                                    imageURL: img))
+        }
+        return result
+    }
+
+    static func resolveURL(_ rel: String, base: URL?) -> String? {
+        let t = rel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return nil }
+        if let u = URLSanitizer.sanitize(t) { return u.absoluteString }
+        if let base, let u = URL(string: t, relativeTo: base)?.absoluteURL { return u.absoluteString }
+        return nil
+    }
+
+    static func decodeHeader(_ raw: String?) -> [String: String] {
+        guard let raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let data = raw.data(using: .utf8),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return [:]
+        }
+        var result: [String: String] = [:]
+        for (k, v) in obj { result[k] = v is String ? v as! String : String(describing: v) }
+        return result
+    }
+}
+
+// MARK: - singleUrl 专用 WebView
+
+/// singleUrl 源的独立 WebView：源 URL 本身是可浏览页面（地址发布页/导航页），
+/// 对齐 legado Android ReadRssActivity(singleUrl=true) 行为。
+///
+/// 与 WebViewContainer（用于 startBrowserAwait 的 JS 桥场景）不同：
+/// - 本视图专为「用户自主浏览」设计，实现完整 decidePolicyFor 允许所有导航
+/// - 顶部工具栏含后退/前进/刷新/完成，不依赖 JS 桥
+/// - 不使用 ZStack 遮挡 ProgressView（避免触摸被拦截）
+struct SingleUrlWebView: View {
+    let url: String
+    let title: String
+
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var coordinator = SingleUrlWebViewCoordinator()
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                // MARK: WebView
+                SingleUrlWebViewContainer(
+                    url: url,
+                    coordinator: $coordinator
+                )
+            }
+            .navigationTitle(title.isEmpty ? "网页" : title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("完成") { dismiss() }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    HStack(spacing: 16) {
+                        Button {
+                            coordinator.goBack()
+                        } label: {
+                            Image(systemName: "chevron.left")
+                        }
+                        .disabled(!coordinator.canGoBack)
+
+                        Button {
+                            coordinator.goForward()
+                        } label: {
+                            Image(systemName: "chevron.right")
+                        }
+                        .disabled(!coordinator.canGoForward)
+
+                        Button {
+                            coordinator.reload()
+                        } label: {
+                            Image(systemName: "arrow.counterclockwise")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// SingleUrlWebView 的 Coordinator：持有 WKWebView 引用，处理导航状态和工具栏操作。
+/// 使用 @StateObject 风格的 ObservableObject，通过 Binding 传递给 WebViewContainer。
+final class SingleUrlWebViewCoordinator: ObservableObject {
+    @Published var isLoading = true
+    @Published var canGoBack = false
+    @Published var canGoForward = false
+    @Published var currentURL: String?
+
+    private weak var wk: WKWebView?
+
+    func setWK(_ wk: WKWebView) {
+        self.wk = wk
+    }
+
+    func goBack() {
+        guard let wk, wk.canGoBack else { return }
+        wk.goBack()
+    }
+
+    func goForward() {
+        guard let wk, wk.canGoForward else { return }
+        wk.goForward()
+    }
+
+    func reload() {
+        guard let wk else { return }
+        wk.reload()
+    }
+}
+
+/// SingleUrlWebView 的 WKWebViewRepresentable
+/// - 实现 decidePolicyFor 允许所有导航，确保页面内 <a> 链接点击后在 WebView 内部跳转
+private struct SingleUrlWebViewContainer: UIViewRepresentable {
+    let url: String
+    @Binding var coordinator: SingleUrlWebViewCoordinator
+
+    func makeCoordinator() -> SingleUrlWebViewCoordinator {
+        coordinator
+    }
+
+    func make(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.allowsInlineMediaPlayback = true
+        config.mediaPlaybackRequiresUserAction = false
+        let wk = WKWebView(frame: .zero, configuration: config)
+        wk.navigationDelegate = context.coordinator
+        wk.allowsBackForwardNavigationGestures = true
+        coordinator.setWK(wk)
+        if let u = URL(string: url) {
+            wk.load(URLRequest(url: u))
+        }
+        return wk
+    }
+
+    func updateouiView(_ uiView: WKWebView, context: Context) {}
+}
+
+// MARK: - Coordinator 作为 WKNavigationDelegate
+
+extension SingleUrlWebViewCoordinator: WKNavigationDelegate {
+    func wkWebView(_ wk: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                   decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        // 允许所有导航（包括页面内链接点击），确保用户能自由点击链接
+        decisionHandler(.allow)
+    }
+
+    func wkWebView(_ wk: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        isLoading = true
+    }
+
+    func wkWebView(_ wk: WKWebView, didFinish navigation: WKNavigation!) {
+        isLoading = false
+        canGoBack = wk.canGoBack
+        canGoForward = wk.canGoForward
+        currentURL = wk.url?.absoluteString
+    }
+
+    func wkWebView(_ wk: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        isLoading = false
+    }
+
+    func wkWebView(_ wk: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
+                   withError error: Error) {
+        isLoading = false
+    }
+}
+
+/// 订阅源文章模型
+struct RssArticle: Identifiable {
+    let id = UUID()
+    let title: String
+    let link: String
+    let pubDate: String
+    let description: String
+    let imageURL: String?
+}
+
+// MARK: - 文本清洗（描述摘要）
+
+extension String {
+    /// 去除 HTML 标签并压缩空白，用于文章描述摘要
+    func stripTags() -> String {
+        var s = self
+        s = s.replacingOccurrences(of: "<br\\s*/?>", with: " ", options: .regularExpression)
+        s = s.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+        s = s.replacingOccurrences(of: "&nbsp;", with: " ")
+        s = s.replacingOccurrences(of: "&amp;", with: "&")
+        s = s.replacingOccurrences(of: "&lt;", with: "<")
+        s = s.replacingOccurrences(of: "&gt;", with: ">")
+        s = s.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// MARK: - RSS / Atom 原生解析
+
+/// 标准 RSS 2.0（<item>）与 Atom（<entry>）订阅源解析。
+/// 对应 legado 对无自定义规则的订阅源的处理：直接按 XML 结构抽取文章。
+final class RssXmlParser {
+    private var items: [RssArticle] = []
+    private var baseURL: URL?
+
+    private struct RssArticleBuilder {
+        var title = ""
+        var link = ""
+        var pubDate = ""
+        var description = ""
+        var imageURL: String?
+    }
+
+    /// 用 SwiftSoup 解析 RSS/Atom（与 legado Jsoup 对齐：同时兼容 XML 与 HTML）。
+    /// 旧实现依赖 XMLParserDelegate，严格 XML 解析器遇到 HTML 源即静默失败返回空。
+    static func parse(xml: String, baseURL: URL?) -> [RssArticle]? {
+        let trimmed = xml.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        do {
+            let doc = try SwiftSoup.parse(trimmed)
+            // RSS <item> 与 Atom <entry> 合并
+            let items = try doc.select("item").array()
+            let entries = try doc.select("entry").array()
+            let elements = items + entries
+            guard !elements.isEmpty else { return nil }
+
+            var result: [RssArticle] = []
+            for element in elements {
+                let title = ((try? element.select("title").text())?.trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
+                guard !title.isEmpty else { continue }
+
+                var link = ((try? element.select("link").text())?.trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
+                if link.isEmpty {
+                    link = ((try? element.select("link").attr("href"))?.trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
+                }
+
+                let pubDate = ((try? element.select("pubDate, published, updated, dc:date").text())?.trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
+
+                var description = ((try? element.select("description, summary, content, content:encoded").text())?.trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
+                if description.isEmpty {
+                    description = ((try? element.select("content").attr("url"))?.trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
+                }
+
+                var imageURL: String?
+                // enclosure url
+                if let u = try? element.select("enclosure").attr("url"), !u.isEmpty {
+                    imageURL = u
+                }
+                // media:content / media:thumbnail url
+                if imageURL == nil,
+                   let u = try? element.select("media\\:content, media\\:thumbnail").attr("url"), !u.isEmpty {
+                    imageURL = u
+                }
+                // content url attr
+                if imageURL == nil,
+                   let u = try? element.select("content").attr("url"), !u.isEmpty {
+                    imageURL = u
+                }
+                // image > url text
+                if imageURL == nil,
+                   let u = try? element.select("image url").text(), !u.isEmpty {
+                    imageURL = u
+                }
+
+                let resolvedLink = Self.resolve(link, base: baseURL)
+                let resolvedImg = imageURL.flatMap { Self.resolve($0, base: baseURL) }
+
+                result.append(RssArticle(
+                    title: title,
+                    link: resolvedLink ?? "",
+                    pubDate: pubDate,
+                    description: description,
+                    imageURL: resolvedImg
+                ))
+            }
+            return result.isEmpty ? nil : result
+        } catch {
+            return nil
+        }
+    }
+
+    private static func resolve(_ rel: String, base: URL?) -> String? {
+        let t = rel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return nil }
+        if let u = URL(string: t) { return u.absoluteString }
+        if let base, let u = URL(string: t, relativeTo: base)?.absoluteURL { return u.absoluteString }
+        return nil
+    }
+}
