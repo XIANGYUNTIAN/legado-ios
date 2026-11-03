@@ -295,25 +295,19 @@ final class RssXmlParser {
 
             var result: [RssArticle] = []
             for element in elements {
-                let title = (try? element.select("title").text())
-                    ?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let title = ((try? element.select("title").text())?.trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
                 guard !title.isEmpty else { continue }
 
-                var link = (try? element.select("link").text())
-                    ?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                var link = ((try? element.select("link").text())?.trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
                 if link.isEmpty {
-                    link = (try? element.select("link").attr("href"))
-                        ?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    link = ((try? element.select("link").attr("href"))?.trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
                 }
 
-                let pubDate = (try? element.select("pubDate, published, updated, dc:date").text())
-                    ?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let pubDate = ((try? element.select("pubDate, published, updated, dc:date").text())?.trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
 
-                var description = (try? element.select("description, summary, content, content:encoded").text())
-                    ?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                var description = ((try? element.select("description, summary, content, content:encoded").text())?.trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
                 if description.isEmpty {
-                    description = (try? element.select("content").attr("url"))
-                        ?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    description = ((try? element.select("content").attr("url"))?.trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
                 }
 
                 var imageURL: String?
