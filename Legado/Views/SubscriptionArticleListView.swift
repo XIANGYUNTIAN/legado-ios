@@ -290,7 +290,9 @@ final class RssXmlParser {
         do {
             let doc = try SwiftSoup.parse(trimmed)
             // RSS <item> 与 Atom <entry> 合并
-            let elements = try doc.select("item").array() + try doc.select("entry").array()
+            let items = try doc.select("item").array()
+            let entries = try doc.select("entry").array()
+            let elements = items + entries
             guard !elements.isEmpty else { return nil }
 
             var result: [RssArticle] = []
