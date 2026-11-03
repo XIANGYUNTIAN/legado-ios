@@ -55,27 +55,13 @@ struct SubscriptionArticleListView: View {
         }
     }
 
-    /// singleUrl 模式：源 URL 本身就是一个可浏览页面（如地址发布页/导航页），
-    /// 对齐 legado Android 行为：直接在 WebView 中打开，不走 RSS/Atom 列表解析。
-    private var singleUrlView: some View {
-        NavigationStack {
-            ZStack {
-                WebViewContainer(urlString: source.sourceUrl, isLoading: $isLoading)
-                if isLoading {
-                    ProgressView("加载中…")
-                }
-            }
-            .navigationTitle(source.sourceName.isEmpty ? "网页" : source.sourceName)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("完成") { isLoading = false }
-                }
-            }
-        }
-    }
+/// singleUrl 模式：源 URL 本身就是一个可浏览页面（如地址发布页/导航页），
+   /// 对齐 legado Android 行为：直接在 WebView 中打开，不走 RSS/Atom 列表解析。
+   private var singleUrlView: some View {
+       SingleUrlWebView(url: source.sourceUrl, title: source.sourceName)
+   }
 
-    private var articleList: some View {
+   private var articleList: some View {
         List {
             ForEach(articles) { article in
                 Button {
@@ -260,6 +246,151 @@ struct SubscriptionArticleListView: View {
         var result: [String: String] = [:]
         for (k, v) in obj { result[k] = v is String ? v as! String : String(describing: v) }
         return result
+    }
+}
+
+// MARK: - singleUrl 专用 WebView
+
+/// singleUrl 源的独立 WebView：源 URL 本身是可浏览页面（地址发布页/导航页），
+/// 对齐 legado Android ReadRssActivity(singleUrl=true) 行为。
+///
+/// 与 WebViewContainer（用于 startBrowserAwait 的 JS 桥场景）不同：
+/// - 本视图专为「用户自主浏览」设计，实现完整 decidePolicyFor 允许所有导航
+/// - 顶部工具栏含后退/前进/刷新/完成，不依赖 JS 桥
+/// - 不使用 ZStack 遮挡 ProgressView（避免触摸被拦截）
+struct SingleUrlWebView: View {
+    let url: String
+    let title: String
+
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var coordinator = SingleUrlWebViewCoordinator()
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                // MARK: WebView
+                SingleUrlWebViewContainer(
+                    url: url,
+                    coordinator: $coordinator
+                )
+            }
+            .navigationTitle(title.isEmpty ? "网页" : title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("完成") { dismiss() }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    HStack(spacing: 16) {
+                        Button {
+                            coordinator.goBack()
+                        } label: {
+                            Image(systemName: "chevron.left")
+                        }
+                        .disabled(!coordinator.canGoBack)
+
+                        Button {
+                            coordinator.goForward()
+                        } label: {
+                            Image(systemName: "chevron.right")
+                        }
+                        .disabled(!coordinator.canGoForward)
+
+                        Button {
+                            coordinator.reload()
+                        } label: {
+                            Image(systemName: "arrow.counterclockwise")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// SingleUrlWebView 的 Coordinator：持有 WKWebView 引用，处理导航状态和工具栏操作。
+/// 使用 @StateObject 风格的 ObservableObject，通过 Binding 传递给 WebViewContainer。
+final class SingleUrlWebViewCoordinator: ObservableObject {
+    @Published var isLoading = true
+    @Published var canGoBack = false
+    @Published var canGoForward = false
+    @Published var currentURL: String?
+
+    private weak var wk: WKWebView?
+
+    func setWK(_ wk: WKWebView) {
+        self.wk = wk
+    }
+
+    func goBack() {
+        guard let wk, wk.canGoBack else { return }
+        wk.goBack()
+    }
+
+    func goForward() {
+        guard let wk, wk.canGoForward else { return }
+        wk.goForward()
+    }
+
+    func reload() {
+        guard let wk else { return }
+        wk.reload()
+    }
+}
+
+/// SingleUrlWebView 的 WKWebViewRepresentable
+/// - 实现 decidePolicyFor 允许所有导航，确保页面内 <a> 链接点击后在 WebView 内部跳转
+private struct SingleUrlWebViewContainer: UIViewRepresentable {
+    let url: String
+    @Binding var coordinator: SingleUrlWebViewCoordinator
+
+    func makeCoordinator() -> SingleUrlWebViewCoordinator {
+        coordinator
+    }
+
+    func make(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.allowsInlineMediaPlayback = true
+        config.mediaPlaybackRequiresUserAction = false
+        let wk = WKWebView(frame: .zero, configuration: config)
+        wk.navigationDelegate = context.coordinator
+        wk.allowsBackForwardNavigationGestures = true
+        coordinator.setWK(wk)
+        if let u = URL(string: url) {
+            wk.load(URLRequest(url: u))
+        }
+        return wk
+    }
+
+    func updateouiView(_ uiView: WKWebView, context: Context) {}
+
+    // MARK: - Coordinator 作为 WKNavigationDelegate
+
+extension SingleUrlWebViewCoordinator: WKNavigationDelegate {
+    func wkWebView(_ wk: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                   decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        // 允许所有导航（包括页面内链接点击），确保用户能自由点击链接
+        decisionHandler(.allow)
+    }
+
+    func wkWebView(_ wk: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        isLoading = true
+    }
+
+    func wkWebView(_ wk: WKWebView, didFinish navigation: WKNavigation!) {
+        isLoading = false
+        canGoBack = wk.canGoBack
+        canGoForward = wk.canGoForward
+        currentURL = wk.url?.absoluteString
+    }
+
+    func wkWebView(_ wk: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        isLoading = false
+    }
+
+    func wkWebView(_ wk: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
+                   withError error: Error) {
+        isLoading = false
     }
 }
 
