@@ -310,7 +310,7 @@ struct SingleUrlWebView: View {
 
 /// SingleUrlWebView 的 Coordinator：持有 WKWebView 引用，处理导航状态和工具栏操作。
 /// 使用 @StateObject 风格的 ObservableObject，通过 Binding 传递给 WebViewContainer。
-final class SingleUrlWebViewCoordinator: ObservableObject {
+final class SingleUrlWebViewCoordinator: NSObject, ObservableObject {
     @Published var isLoading = true
     @Published var canGoBack = false
     @Published var canGoForward = false
@@ -348,7 +348,7 @@ private struct SingleUrlWebViewContainer: UIViewRepresentable {
         coordinator
     }
 
-    func make(context: Context) -> WKWebView {
+    func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.mediaPlaybackRequiresUserAction = false
@@ -362,35 +362,35 @@ private struct SingleUrlWebViewContainer: UIViewRepresentable {
         return wk
     }
 
-    func updateouiView(_ uiView: WKWebView, context: Context) {}
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
 }
 
 // MARK: - Coordinator 作为 WKNavigationDelegate
 
 extension SingleUrlWebViewCoordinator: WKNavigationDelegate {
-    func wkWebView(_ wk: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-                   decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         // 允许所有导航（包括页面内链接点击），确保用户能自由点击链接
         decisionHandler(.allow)
     }
 
-    func wkWebView(_ wk: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         isLoading = true
     }
 
-    func wkWebView(_ wk: WKWebView, didFinish navigation: WKNavigation!) {
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         isLoading = false
-        canGoBack = wk.canGoBack
-        canGoForward = wk.canGoForward
-        currentURL = wk.url?.absoluteString
+        canGoBack = webView.canGoBack
+        canGoForward = webView.canGoForward
+        currentURL = webView.url?.absoluteString
     }
 
-    func wkWebView(_ wk: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         isLoading = false
     }
 
-    func wkWebView(_ wk: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
-                   withError error: Error) {
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
+                 withError error: Error) {
         isLoading = false
     }
 }
