@@ -363,8 +363,9 @@ private struct SingleUrlWebViewContainer: UIViewRepresentable {
     }
 
     func updateouiView(_ uiView: WKWebView, context: Context) {}
+}
 
-    // MARK: - Coordinator 作为 WKNavigationDelegate
+// MARK: - Coordinator 作为 WKNavigationDelegate
 
 extension SingleUrlWebViewCoordinator: WKNavigationDelegate {
     func wkWebView(_ wk: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
@@ -513,4 +514,3 @@ final class RssXmlParser {
         if let base, let u = URL(string: t, relativeTo: base)?.absoluteURL { return u.absoluteString }
         return nil
     }
-}
