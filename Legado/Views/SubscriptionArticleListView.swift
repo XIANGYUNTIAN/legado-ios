@@ -376,7 +376,7 @@ private struct SingleUrlWebViewContainer: UIViewRepresentable {
         //   单靠 createWebViewWithConfiguration 拦截经常不触发，故改用注入式接管）
         let userContent = WKUserContentController()
         // 注册脚本消息通道：网页把书源 JSON 复制到剪贴板时，由本 Coordinator 捕获并导入
-        userContent.add(self, name: "bookSourceCopy")
+        userContent.add(coordinator, name: "bookSourceCopy")
         let linkFixJS = """
         (function(){
           function fix(){
