@@ -98,6 +98,20 @@ struct WebViewContainer: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         // 允许 JS 通过 window.open() 打开新窗口，使 createWebViewWith 也能捕获此类跳转
         config.preferences.javaScriptCanOpenWindowsAutomatically = true
+        // 兜底：在页面层接管所有链接点击，不依赖 WKUIDelegate 回调
+        let userContent = WKUserContentController()
+        let linkFixJS = """
+        (function(){
+          function fix(){
+            document.querySelectorAll('a[target="_blank"]').forEach(function(a){ a.target='_self'; });
+          }
+          fix();
+          try { new MutationObserver(fix).observe(document.documentElement, {childList:true, subtree:true}); } catch(e){}
+          try { window.open = function(u){ if(u){ window.location.href = u; } return null; }; } catch(e){}
+        })();
+        """
+        userContent.addUserScript(WKUserScript(source: linkFixJS, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        config.userContentController = userContent
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
