@@ -351,6 +351,8 @@ private struct SingleUrlWebViewContainer: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.mediaPlaybackRequiresUserAction = false
+        // 允许 JS 通过 window.open() 打开新窗口，使 createWebViewWith 也能捕获此类跳转
+        config.preferences.javaScriptCanOpenWindowsAutomatically = true
         let wk = WKWebView(frame: .zero, configuration: config)
         wk.navigationDelegate = context.coordinator
         wk.allowsBackForwardNavigationGestures = true
@@ -370,6 +372,12 @@ extension SingleUrlWebViewCoordinator: WKNavigationDelegate {
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         // 允许所有导航（包括页面内链接点击），确保用户能自由点击链接
+        // 同窗口跳转若链接为裸域名/缺 scheme 被当成相对路径解析，则补全为 https 绝对地址再加载
+        if let fixed = SingleUrlWebViewCoordinator.normalizedURL(for: navigationAction.request.url) {
+            decisionHandler(.cancel)
+            webView.load(URLRequest(url: fixed))
+            return
+        }
         decisionHandler(.allow)
     }
 
@@ -409,6 +417,21 @@ extension SingleUrlWebViewCoordinator: WKNavigationDelegate {
             }
         }
         webView.load(URLRequest(url: target))
+        return nil
+    }
+
+    /// 若链接是裸域名/缺 scheme（被 WKWebView 当成相对路径解析），返回补全 https 后的绝对 URL；否则返回 nil（表示无需处理）
+    private static func normalizedURL(for url: URL?) -> URL? {
+        guard let url = url else { return nil }
+        let scheme = url.scheme?.lowercased() ?? ""
+        if scheme == "http" || scheme == "https" { return nil }
+        // 特殊协议（about / javascript / data / mailto / tel 等）不处理
+        if !scheme.isEmpty { return nil }
+        // 纯裸域名：www.xxx.com 或 xxx.com/path，补 https://
+        let s = url.absoluteString
+        if let fixed = URL(string: "https://" + s), fixed.host != nil {
+            return fixed
+        }
         return nil
     }
 }
