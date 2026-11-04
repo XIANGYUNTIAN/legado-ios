@@ -1,6 +1,5 @@
 import SwiftUI
 import Foundation
-import SwiftSoup
 import WebKit
 
 /// 订阅源文章列表（对应 legado 订阅源的阅读入口）。
@@ -426,8 +425,11 @@ extension String {
 
 /// 标准 RSS 2.0（<item>）与 Atom（<entry>）订阅源解析。
 /// 对应 legado 对无自定义规则的订阅源的处理：直接按 XML 结构抽取文章。
-final class RssXmlParser {
+final class RssXmlParser: NSObject, XMLParserDelegate {
     private var items: [RssArticle] = []
+    private var current: RssArticleBuilder?
+    private var currentElement = ""
+    private var currentText = ""
     private var baseURL: URL?
 
     private struct RssArticleBuilder {
@@ -438,73 +440,85 @@ final class RssXmlParser {
         var imageURL: String?
     }
 
-    /// 用 SwiftSoup 解析 RSS/Atom（与 legado Jsoup 对齐：同时兼容 XML 与 HTML）。
-    /// 旧实现依赖 XMLParserDelegate，严格 XML 解析器遇到 HTML 源即静默失败返回空。
+    /// 标准 RSS/Atom 解析（XMLParserDelegate）。
+    /// 这是 11-02 已验证可用的实现，对绝大多数标准 RSS/Atom 源稳定。
     static func parse(xml: String, baseURL: URL?) -> [RssArticle]? {
-        let trimmed = xml.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
+        guard let data = xml.data(using: .utf8) else { return nil }
+        let parser = RssXmlParser()
+        parser.baseURL = baseURL
+        let xmlParser = XMLParser(data: data)
+        xmlParser.delegate = parser
+        guard xmlParser.parse() else { return nil }
+        return parser.items.isEmpty ? nil : parser.items
+    }
 
-        do {
-            let doc = try SwiftSoup.parse(trimmed)
-            // RSS <item> 与 Atom <entry> 合并
-            let items = try doc.select("item").array()
-            let entries = try doc.select("entry").array()
-            let elements = items + entries
-            guard !elements.isEmpty else { return nil }
-
-            var result: [RssArticle] = []
-            for element in elements {
-                let title = ((try? element.select("title").text())?.trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
-                guard !title.isEmpty else { continue }
-
-                var link = ((try? element.select("link").text())?.trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
-                if link.isEmpty {
-                    link = ((try? element.select("link").attr("href"))?.trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
-                }
-
-                let pubDate = ((try? element.select("pubDate, published, updated, dc:date").text())?.trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
-
-                var description = ((try? element.select("description, summary, content, content:encoded").text())?.trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
-                if description.isEmpty {
-                    description = ((try? element.select("content").attr("url"))?.trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
-                }
-
-                var imageURL: String?
-                // enclosure url
-                if let u = try? element.select("enclosure").attr("url"), !u.isEmpty {
-                    imageURL = u
-                }
-                // media:content / media:thumbnail url
-                if imageURL == nil,
-                   let u = try? element.select("media\\:content, media\\:thumbnail").attr("url"), !u.isEmpty {
-                    imageURL = u
-                }
-                // content url attr
-                if imageURL == nil,
-                   let u = try? element.select("content").attr("url"), !u.isEmpty {
-                    imageURL = u
-                }
-                // image > url text
-                if imageURL == nil,
-                   let u = try? element.select("image url").text(), !u.isEmpty {
-                    imageURL = u
-                }
-
-                let resolvedLink = Self.resolve(link, base: baseURL)
-                let resolvedImg = imageURL.flatMap { Self.resolve($0, base: baseURL) }
-
-                result.append(RssArticle(
-                    title: title,
-                    link: resolvedLink ?? "",
-                    pubDate: pubDate,
-                    description: description,
-                    imageURL: resolvedImg
-                ))
+    func parser(_ parser: XMLParser, didStartElement elementName: String,
+                namespaceURI: String?, qualifiedName qName: String?,
+                attributes attributeDict: [String: String]) {
+        currentElement = elementName.lowercased()
+        let en = elementName.lowercased()
+        if en == "item" || en == "entry" {
+            current = RssArticleBuilder()
+            currentText = ""
+        } else if en == "link" {
+            // Atom 的 link 用 href 属性；RSS 的 link 用文本内容
+            if let href = attributeDict["href"], !href.isEmpty {
+                current?.link = href
             }
-            return result.isEmpty ? nil : result
-        } catch {
-            return nil
+            currentText = ""
+        } else if en == "enclosure" {
+            if let url = attributeDict["url"], !url.isEmpty {
+                current?.imageURL = url
+            }
+        } else if en == "media:content" || en == "media:thumbnail" || en == "content" {
+            // media:content / content 常带 url 属性（封面或视频）
+            if let url = attributeDict["url"], !url.isEmpty {
+                current?.imageURL = url
+            }
+        } else if en == "image" {
+            currentText = ""
+        } else {
+            currentText = ""
         }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        currentText += string
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String,
+                namespaceURI: String?, qualifiedName qName: String?) {
+        let en = elementName.lowercased()
+        let text = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch en {
+        case "item", "entry":
+            if let b = current, !b.title.isEmpty {
+                let resolvedLink = Self.resolve(b.link, base: baseURL)
+                let resolvedImg = b.imageURL.flatMap { Self.resolve($0, base: baseURL) }
+                items.append(RssArticle(title: b.title,
+                                       link: resolvedLink ?? "",
+                                       pubDate: b.pubDate,
+                                       description: b.description,
+                                       imageURL: resolvedImg))
+            }
+            current = nil
+        case "title":
+            if current?.title.isEmpty ?? true { current?.title = text }
+        case "link":
+            if current?.link.isEmpty ?? true, !text.isEmpty { current?.link = text }
+        case "pubdate", "published", "updated", "dc:date":
+            if current?.pubDate.isEmpty ?? true { current?.pubDate = text }
+        case "description", "summary", "content", "content:encoded":
+            if current?.description.isEmpty ?? true { current?.description = text }
+        case "image":
+            // RSS <image><url>...</url></image>
+            if let img = current?.imageURL, img.isEmpty, !text.isEmpty {
+                current?.imageURL = text
+            }
+        default:
+            break
+        }
+        currentText = ""
     }
 
     private static func resolve(_ rel: String, base: URL?) -> String? {
