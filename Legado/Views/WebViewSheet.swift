@@ -95,7 +95,10 @@ struct WebViewContainer: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> WKWebView {
-        let webView = WKWebView()
+        let config = WKWebViewConfiguration()
+        // 允许 JS 通过 window.open() 打开新窗口，使 createWebViewWith 也能捕获此类跳转
+        config.preferences.javaScriptCanOpenWindowsAutomatically = true
+        let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         if let url = URL(string: urlString) {
             webView.load(URLRequest(url: url))
@@ -126,6 +129,24 @@ struct WebViewContainer: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             isLoading = false
+        }
+
+        // 同 App 内单窗口：拦截 target="_blank" / window.open 的新窗口请求，在当前 WebView 内加载，
+        // 否则这类链接会因没有创建新窗口的代理而被静默丢弃（表现为「点不动」）。
+        func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                     for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+            guard navigationAction.targetFrame == nil,
+                  let original = navigationAction.request.url else { return nil }
+            // 补全裸域名/缺 http(s) scheme 的链接（如发布页里的 www.xxx.com），避免 load 失败
+            var target = original
+            let scheme = target.scheme ?? ""
+            if scheme.isEmpty || (scheme != "http" && scheme != "https") {
+                if let fixed = URL(string: "https://" + original.absoluteString) {
+                    target = fixed
+                }
+            }
+            webView.load(URLRequest(url: target))
+            return nil
         }
     }
 }
