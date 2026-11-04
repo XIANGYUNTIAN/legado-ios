@@ -319,7 +319,7 @@ struct SingleUrlWebView: View {
 
 /// SingleUrlWebView 的 Coordinator：持有 WKWebView 引用，处理导航状态和工具栏操作。
 /// 使用 @StateObject 风格的 ObservableObject，通过 Binding 传递给 WebViewContainer。
-final class SingleUrlWebViewCoordinator: NSObject, ObservableObject, WKUIDelegate {
+final class SingleUrlWebViewCoordinator: NSObject, ObservableObject, WKUIDelegate, WKScriptMessageHandler {
     @Published var isLoading = true
     @Published var canGoBack = false
     @Published var canGoForward = false
@@ -375,6 +375,8 @@ private struct SingleUrlWebViewContainer: UIViewRepresentable {
         // （发布页多为 JS 动态渲染，卡片点击未必走 target=_blank 新窗口路径，
         //   单靠 createWebViewWithConfiguration 拦截经常不触发，故改用注入式接管）
         let userContent = WKUserContentController()
+        // 注册脚本消息通道：网页把书源 JSON 复制到剪贴板时，由本 Coordinator 捕获并导入
+        userContent.add(self, name: "bookSourceCopy")
         let linkFixJS = """
         (function(){
           function fix(){
@@ -386,6 +388,29 @@ private struct SingleUrlWebViewContainer: UIViewRepresentable {
         })();
         """
         userContent.addUserScript(WKUserScript(source: linkFixJS, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        // 拦截剪贴板写入：书源网页「一键导入」常把书源 JSON 复制到剪贴板、由 App 监听导入
+        // （Android 原版机制）。iOS 版此前缺此监听，导致点击「一键导入」毫无反应。
+        let clipboardJS = """
+        (function(){
+          try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              var orig = navigator.clipboard.writeText.bind(navigator.clipboard);
+              navigator.clipboard.writeText = function(text){
+                try { window.webkit.messageHandlers.bookSourceCopy.postMessage(String(text == null ? '' : text)); } catch(e){}
+                return orig(text);
+              };
+            }
+          } catch(e){}
+          try {
+            document.addEventListener('copy', function(e){
+              var cd = e.clipboardData || window.clipboardData;
+              var t = cd ? cd.getData('text') : '';
+              if (t) { try { window.webkit.messageHandlers.bookSourceCopy.postMessage(String(t)); } catch(err){} }
+            });
+          } catch(e){}
+        })();
+        """
+        userContent.addUserScript(WKUserScript(source: clipboardJS, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         config.userContentController = userContent
         let wk = WKWebView(frame: .zero, configuration: config)
         wk.navigationDelegate = context.coordinator
@@ -519,6 +544,38 @@ extension SingleUrlWebViewCoordinator {
                 // 注意：此处不要自动 reload(url)，否则会再次被 decidePolicyFor 拦截→再次导入→死循环。
                 // 仅提示失败，用户可手动复制链接到「书源」页导入。
                 importResult = "导入失败：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    // MARK: 剪贴板书源导入（网页「一键导入」复制 JSON 的兜底捕获）
+
+    /// 接收网页通过 window.webkit.messageHandlers.bookSourceCopy 传来的复制文本，
+    /// 识别为书源 JSON 后交给 App 统一导入入口（对齐 Android legado 的剪贴板监听机制）。
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == "bookSourceCopy",
+              let text = message.body as? String else { return }
+        importBookSource(fromText: text)
+    }
+
+    /// 从剪贴板文本导入书源：先做轻量预筛，避免用户手动复制普通文字时误触发联网导入。
+    private func importBookSource(fromText text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > 20 else { return }
+        let looksLikeSource = trimmed.contains("bookSourceUrl")
+            || trimmed.contains("bookSourceName")
+            || trimmed.contains("bookSourceType")
+            || trimmed.hasPrefix("[") || trimmed.hasPrefix("{")
+        guard looksLikeSource else { return }
+        guard let store = sourceStore else { return }
+        Task { @MainActor in
+            do {
+                let count = try await store.importFromTextOrLink(trimmed)
+                if count > 0 {
+                    importResult = "成功导入 \(count) 个书源，已可在「书源」页查看。"
+                }
+            } catch {
+                // 复制内容非书源时静默处理，不弹窗打扰用户
             }
         }
     }
