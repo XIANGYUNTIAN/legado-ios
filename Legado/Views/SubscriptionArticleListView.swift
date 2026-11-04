@@ -420,11 +420,11 @@ extension SingleUrlWebViewCoordinator: WKNavigationDelegate {
 
 // MARK: - Coordinator 作为 WKUIDelegate
 
-extension SingleUrlWebViewCoordinator: WKUIDelegate {
+extension SingleUrlWebViewCoordinator {
     // 页面内以 target="_blank" 或 window.open() 发起的新窗口导航：
     // App 内为单窗口，直接在当前 WebView 加载目标 URL，
     // 否则这类链接会因没有创建新窗口的代理而被静默丢弃（表现为「点不动」）。
-    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+    func webView(_ webView: WKWebView, createWebViewWithConfiguration configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         guard navigationAction.targetFrame == nil,
               let original = navigationAction.request.url else { return nil }
