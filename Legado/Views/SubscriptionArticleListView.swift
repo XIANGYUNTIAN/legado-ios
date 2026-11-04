@@ -262,6 +262,7 @@ struct SingleUrlWebView: View {
     let title: String
 
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var sourceStore: BookSourceStore
     @StateObject private var coordinator = SingleUrlWebViewCoordinator()
 
     var body: some View {
@@ -270,11 +271,20 @@ struct SingleUrlWebView: View {
                 // MARK: WebView
                 SingleUrlWebViewContainer(
                     url: url,
-                    coordinator: coordinator
+                    coordinator: coordinator,
+                    sourceStore: sourceStore
                 )
             }
             .navigationTitle(title.isEmpty ? "网页" : title)
             .navigationBarTitleDisplayMode(.inline)
+            .alert("书源导入", isPresented: Binding(
+                get: { coordinator.importResult != nil },
+                set: { if !$0 { coordinator.importResult = nil } }
+            )) {
+                Button("好") { coordinator.importResult = nil }
+            } message: {
+                Text(coordinator.importResult ?? "")
+            }
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("完成") { dismiss() }
@@ -314,11 +324,18 @@ final class SingleUrlWebViewCoordinator: NSObject, ObservableObject, WKUIDelegat
     @Published var canGoBack = false
     @Published var canGoForward = false
     @Published var currentURL: String?
+    /// 书源一键导入结果（成功/失败提示），由父 View 通过 .alert 展示
+    @Published var importResult: String?
 
     private weak var wk: WKWebView?
+    private var sourceStore: BookSourceStore?
 
     func setWK(_ wk: WKWebView) {
         self.wk = wk
+    }
+
+    func setSourceStore(_ store: BookSourceStore) {
+        self.sourceStore = store
     }
 
     func goBack() {
@@ -342,6 +359,7 @@ final class SingleUrlWebViewCoordinator: NSObject, ObservableObject, WKUIDelegat
 private struct SingleUrlWebViewContainer: UIViewRepresentable {
     let url: String
     @ObservedObject var coordinator: SingleUrlWebViewCoordinator
+    let sourceStore: BookSourceStore
 
     func makeCoordinator() -> SingleUrlWebViewCoordinator {
         coordinator
@@ -374,6 +392,7 @@ private struct SingleUrlWebViewContainer: UIViewRepresentable {
         wk.uiDelegate = context.coordinator
         wk.allowsBackForwardNavigationGestures = true
         coordinator.setWK(wk)
+        coordinator.setSourceStore(sourceStore)
         if let u = URL(string: url) {
             wk.load(URLRequest(url: u))
         }
@@ -388,9 +407,19 @@ private struct SingleUrlWebViewContainer: UIViewRepresentable {
 extension SingleUrlWebViewCoordinator: WKNavigationDelegate {
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        // 允许所有导航（包括页面内链接点击），确保用户能自由点击链接
+        guard let url = navigationAction.request.url else {
+            decisionHandler(.allow)
+            return
+        }
+        // legado 书源一键导入：拦截导航并交给 App 解析导入（对齐 Android 原版行为），
+        // 否则此类链接会被 WebView 当作普通网页下载/显示，App 不识别。
+        if SingleUrlWebViewCoordinator.isBookSourceImportURL(url) {
+            decisionHandler(.cancel)
+            importBookSource(from: url)
+            return
+        }
         // 同窗口跳转若链接为裸域名/缺 scheme 被当成相对路径解析，则补全为 https 绝对地址再加载
-        if let fixed = SingleUrlWebViewCoordinator.normalizedURL(for: navigationAction.request.url) {
+        if let fixed = SingleUrlWebViewCoordinator.normalizedURL(for: url) {
             decisionHandler(.cancel)
             webView.load(URLRequest(url: fixed))
             return
@@ -444,6 +473,11 @@ extension SingleUrlWebViewCoordinator {
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         guard navigationAction.targetFrame == nil,
               let original = navigationAction.request.url else { return nil }
+        // 书源一键导入（新窗口形式，如 window.open('...json')）：同样拦截并交给 App 导入
+        if SingleUrlWebViewCoordinator.isBookSourceImportURL(original) {
+            importBookSource(from: original)
+            return nil
+        }
         // 补全裸域名/缺 http(s) scheme 的链接（如发布页里的 www.xxx.com），避免 load 失败
         var target = original
         let scheme = target.scheme ?? ""
@@ -454,6 +488,45 @@ extension SingleUrlWebViewCoordinator {
         }
         webView.load(URLRequest(url: target))
         return nil
+    }
+
+    // MARK: 书源一键导入
+
+    /// 判断该 URL 是否为 legado 书源一键导入链接（命中则拦截并交给 App 解析导入）。
+    /// 覆盖三种形态：自定义 legado:// scheme、.json 书源文件、已知源仓库域名的导入路径。
+    private static func isBookSourceImportURL(_ url: URL) -> Bool {
+        let scheme = url.scheme?.lowercased() ?? ""
+        if scheme == "legado" { return true }
+        if url.pathExtension.lowercased() == "json" { return true }
+        let host = url.host?.lowercased() ?? ""
+        let path = url.path.lowercased()
+        let query = url.query?.lowercased() ?? ""
+        if host.contains("yckceo"),
+           path.contains("source") || path.contains("json") || path.contains("legado")
+             || query.contains("import") || query.contains("source") {
+            return true
+        }
+        return false
+    }
+
+    /// 拦截到书源导入链接后，调用 App 统一导入入口解析并落库，结果通过 importResult 反馈给用户。
+    func importBookSource(from url: URL) {
+        guard let store = sourceStore else {
+            importResult = "导入失败：书源存储未初始化"
+            return
+        }
+        Task { @MainActor in
+            do {
+                let count = try await store.importFromTextOrLink(url.absoluteString)
+                importResult = count > 0
+                    ? "成功导入 \(count) 个书源，已可在「书源」页查看。"
+                    : "未识别到有效书源，链接可能已失效。"
+            } catch {
+                importResult = "导入失败：\(error.localizedDescription)"
+                // 失败兜底：让 WebView 正常打开该链接，便于用户查看原始内容
+                if let wk { wk.load(URLRequest(url: url)) }
+            }
+        }
     }
 }
 
