@@ -392,6 +392,24 @@ extension SingleUrlWebViewCoordinator: WKNavigationDelegate {
                  withError error: Error) {
         isLoading = false
     }
+
+    // 页面内以 target="_blank" 或 window.open() 发起的新窗口导航：
+    // App 内为单窗口，直接在当前 WebView 加载目标 URL，
+    // 否则这类链接会因没有创建新窗口的代理而被静默丢弃（表现为「点不动」）。
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        guard navigationAction.targetFrame == nil,
+              let original = navigationAction.request.url else { return nil }
+        // 补全裸域名/缺 http(s) scheme 的链接（如发布页里的 www.xxx.com），避免 load 失败
+        var target = original
+        if target.scheme.isEmpty || (target.scheme != "http" && target.scheme != "https") {
+            if let fixed = URL(string: "https://" + original.absoluteString) {
+                target = fixed
+            }
+        }
+        webView.load(URLRequest(url: target))
+        return nil
+    }
 }
 
 /// 订阅源文章模型
