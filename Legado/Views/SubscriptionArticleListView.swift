@@ -402,7 +402,8 @@ extension SingleUrlWebViewCoordinator: WKNavigationDelegate {
               let original = navigationAction.request.url else { return nil }
         // 补全裸域名/缺 http(s) scheme 的链接（如发布页里的 www.xxx.com），避免 load 失败
         var target = original
-        if target.scheme.isEmpty || (target.scheme != "http" && target.scheme != "https") {
+        let scheme = target.scheme ?? ""
+        if scheme.isEmpty || (scheme != "http" && scheme != "https") {
             if let fixed = URL(string: "https://" + original.absoluteString) {
                 target = fixed
             }
