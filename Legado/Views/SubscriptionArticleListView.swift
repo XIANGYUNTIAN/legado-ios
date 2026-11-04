@@ -440,7 +440,7 @@ extension SingleUrlWebViewCoordinator: WKNavigationDelegate {
         // 否则此类链接会被 WebView 当作普通网页下载/显示，App 不识别。
         if SingleUrlWebViewCoordinator.isBookSourceImportURL(url) {
             decisionHandler(.cancel)
-            importBookSource(from: url)
+            importBookSource(from: SingleUrlWebViewCoordinator.resolveImportURL(url))
             return
         }
         // 同窗口跳转若链接为裸域名/缺 scheme 被当成相对路径解析，则补全为 https 绝对地址再加载
@@ -498,9 +498,9 @@ extension SingleUrlWebViewCoordinator {
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         guard navigationAction.targetFrame == nil,
               let original = navigationAction.request.url else { return nil }
-        // 书源一键导入（新窗口形式，如 window.open('...json')）：同样拦截并交给 App 导入
+        // 书源一键导入（新窗口形式，如 window.open('yuedu://...')）：同样拦截并交给 App 导入
         if SingleUrlWebViewCoordinator.isBookSourceImportURL(original) {
-            importBookSource(from: original)
+            importBookSource(from: SingleUrlWebViewCoordinator.resolveImportURL(original))
             return nil
         }
         // 补全裸域名/缺 http(s) scheme 的链接（如发布页里的 www.xxx.com），避免 load 失败
@@ -518,14 +518,37 @@ extension SingleUrlWebViewCoordinator {
     // MARK: 书源一键导入
 
     /// 判断该 URL 是否为 legado 书源一键导入链接（命中则拦截并交给 App 解析导入）。
-    /// 只认「铁证」两类，绝不凭「域名+路径关键字」猜测，避免把源仓库主站等普通网页误判为导入链接：
+    /// 只认「铁证」三类，绝不凭「域名+路径关键字」猜测，避免把源仓库主站等普通网页误判为导入链接：
     ///  1) legado:// 自定义导入协议（Android 原版一键导入使用的 scheme）；
-    ///  2) 直接指向书源数据文件（.json 结尾），如 yckceo 发布页「x.x 一键导入」按钮。
+    ///  2) yuedu://booksource/importonline?src=<json url> —— yckceo 系发布页「x.x 一键导入」按钮
+    ///     实际发出的协议（已用真页面确认：按钮即此链接，非剪贴板复制）；
+    ///  3) 直接指向书源数据文件（.json 结尾）。
     private static func isBookSourceImportURL(_ url: URL) -> Bool {
         let scheme = url.scheme?.lowercased() ?? ""
         if scheme == "legado" { return true }
+        if scheme == "yuedu" {
+            // 仅认 importonline 导入入口，避免误伤 yuedu:// 其它用途
+            return url.host?.lowercased() == "booksource"
+                && url.path.lowercased().hasPrefix("/importonline")
+        }
         if url.pathExtension.lowercased() == "json" { return true }
         return false
+    }
+
+    /// 将书源一键导入链接还原为真实的书源数据地址。
+    /// - yuedu://booksource/importonline?src=<encoded json url> → 解码出真实的 .json 地址后返回；
+    /// - legado:// 与 .json 链接无需转换，直接返回原 URL（由 importFromTextOrLink 自行解析）；
+    /// - 解析失败时返回原 URL，交由后续链路处理。
+    private static func resolveImportURL(_ url: URL) -> URL {
+        let scheme = url.scheme?.lowercased() ?? ""
+        guard scheme == "yuedu",
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let src = components.queryItems?.first(where: { $0.name.lowercased() == "src" })?.value,
+              let decoded = src.removingPercentEncoding,
+              let realURL = URL(string: decoded) else {
+            return url
+        }
+        return realURL
     }
 
     /// 拦截到书源导入链接后，调用 App 统一导入入口解析并落库，结果通过 importResult 反馈给用户。
