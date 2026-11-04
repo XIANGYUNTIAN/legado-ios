@@ -493,19 +493,13 @@ extension SingleUrlWebViewCoordinator {
     // MARK: 书源一键导入
 
     /// 判断该 URL 是否为 legado 书源一键导入链接（命中则拦截并交给 App 解析导入）。
-    /// 覆盖三种形态：自定义 legado:// scheme、.json 书源文件、已知源仓库域名的导入路径。
+    /// 只认「铁证」两类，绝不凭「域名+路径关键字」猜测，避免把源仓库主站等普通网页误判为导入链接：
+    ///  1) legado:// 自定义导入协议（Android 原版一键导入使用的 scheme）；
+    ///  2) 直接指向书源数据文件（.json 结尾），如 yckceo 发布页「x.x 一键导入」按钮。
     private static func isBookSourceImportURL(_ url: URL) -> Bool {
         let scheme = url.scheme?.lowercased() ?? ""
         if scheme == "legado" { return true }
         if url.pathExtension.lowercased() == "json" { return true }
-        let host = url.host?.lowercased() ?? ""
-        let path = url.path.lowercased()
-        let query = url.query?.lowercased() ?? ""
-        if host.contains("yckceo"),
-           path.contains("source") || path.contains("json") || path.contains("legado")
-             || query.contains("import") || query.contains("source") {
-            return true
-        }
         return false
     }
 
@@ -522,9 +516,9 @@ extension SingleUrlWebViewCoordinator {
                     ? "成功导入 \(count) 个书源，已可在「书源」页查看。"
                     : "未识别到有效书源，链接可能已失效。"
             } catch {
+                // 注意：此处不要自动 reload(url)，否则会再次被 decidePolicyFor 拦截→再次导入→死循环。
+                // 仅提示失败，用户可手动复制链接到「书源」页导入。
                 importResult = "导入失败：\(error.localizedDescription)"
-                // 失败兜底：让 WebView 正常打开该链接，便于用户查看原始内容
-                if let wk { wk.load(URLRequest(url: url)) }
             }
         }
     }
