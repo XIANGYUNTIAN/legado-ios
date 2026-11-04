@@ -309,7 +309,7 @@ struct SingleUrlWebView: View {
 
 /// SingleUrlWebView 的 Coordinator：持有 WKWebView 引用，处理导航状态和工具栏操作。
 /// 使用 @StateObject 风格的 ObservableObject，通过 Binding 传递给 WebViewContainer。
-final class SingleUrlWebViewCoordinator: NSObject, ObservableObject {
+final class SingleUrlWebViewCoordinator: NSObject, ObservableObject, WKUIDelegate {
     @Published var isLoading = true
     @Published var canGoBack = false
     @Published var canGoForward = false
@@ -355,6 +355,7 @@ private struct SingleUrlWebViewContainer: UIViewRepresentable {
         config.preferences.javaScriptCanOpenWindowsAutomatically = true
         let wk = WKWebView(frame: .zero, configuration: config)
         wk.navigationDelegate = context.coordinator
+        wk.uiDelegate = context.coordinator
         wk.allowsBackForwardNavigationGestures = true
         coordinator.setWK(wk)
         if let u = URL(string: url) {
@@ -401,6 +402,25 @@ extension SingleUrlWebViewCoordinator: WKNavigationDelegate {
         isLoading = false
     }
 
+    /// 若链接是裸域名/缺 scheme（被 WKWebView 当成相对路径解析），返回补全 https 后的绝对 URL；否则返回 nil（表示无需处理）
+    private static func normalizedURL(for url: URL?) -> URL? {
+        guard let url = url else { return nil }
+        let scheme = url.scheme?.lowercased() ?? ""
+        if scheme == "http" || scheme == "https" { return nil }
+        // 特殊协议（about / javascript / data / mailto / tel 等）不处理
+        if !scheme.isEmpty { return nil }
+        // 纯裸域名：www.xxx.com 或 xxx.com/path，补 https://
+        let s = url.absoluteString
+        if let fixed = URL(string: "https://" + s), fixed.host != nil {
+            return fixed
+        }
+        return nil
+    }
+}
+
+// MARK: - Coordinator 作为 WKUIDelegate
+
+extension SingleUrlWebViewCoordinator: WKUIDelegate {
     // 页面内以 target="_blank" 或 window.open() 发起的新窗口导航：
     // App 内为单窗口，直接在当前 WebView 加载目标 URL，
     // 否则这类链接会因没有创建新窗口的代理而被静默丢弃（表现为「点不动」）。
@@ -417,21 +437,6 @@ extension SingleUrlWebViewCoordinator: WKNavigationDelegate {
             }
         }
         webView.load(URLRequest(url: target))
-        return nil
-    }
-
-    /// 若链接是裸域名/缺 scheme（被 WKWebView 当成相对路径解析），返回补全 https 后的绝对 URL；否则返回 nil（表示无需处理）
-    private static func normalizedURL(for url: URL?) -> URL? {
-        guard let url = url else { return nil }
-        let scheme = url.scheme?.lowercased() ?? ""
-        if scheme == "http" || scheme == "https" { return nil }
-        // 特殊协议（about / javascript / data / mailto / tel 等）不处理
-        if !scheme.isEmpty { return nil }
-        // 纯裸域名：www.xxx.com 或 xxx.com/path，补 https://
-        let s = url.absoluteString
-        if let fixed = URL(string: "https://" + s), fixed.host != nil {
-            return fixed
-        }
         return nil
     }
 }
