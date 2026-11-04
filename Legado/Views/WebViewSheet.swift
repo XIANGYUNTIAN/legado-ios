@@ -100,6 +100,7 @@ struct WebViewContainer: UIViewRepresentable {
         config.preferences.javaScriptCanOpenWindowsAutomatically = true
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
         if let url = URL(string: urlString) {
             webView.load(URLRequest(url: url))
         }
@@ -108,7 +109,7 @@ struct WebViewContainer: UIViewRepresentable {
 
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         @Binding var isLoading: Bool
 
         init(isLoading: Binding<Bool>) {
