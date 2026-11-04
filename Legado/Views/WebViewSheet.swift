@@ -134,7 +134,7 @@ struct WebViewContainer: UIViewRepresentable {
 
         // 同 App 内单窗口：拦截 target="_blank" / window.open 的新窗口请求，在当前 WebView 内加载，
         // 否则这类链接会因没有创建新窗口的代理而被静默丢弃（表现为「点不动」）。
-        func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+        func webView(_ webView: WKWebView, createWebViewWithConfiguration configuration: WKWebViewConfiguration,
                      for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
             guard navigationAction.targetFrame == nil,
                   let original = navigationAction.request.url else { return nil }
