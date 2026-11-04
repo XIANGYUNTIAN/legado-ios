@@ -271,7 +271,7 @@ struct SingleUrlWebView: View {
                 // MARK: WebView
                 SingleUrlWebViewContainer(
                     url: url,
-                    coordinator: $coordinator
+                    coordinator: coordinator
                 )
             }
             .navigationTitle(title.isEmpty ? "网页" : title)
@@ -342,7 +342,7 @@ final class SingleUrlWebViewCoordinator: NSObject, ObservableObject {
 /// - 实现 decidePolicyFor 允许所有导航，确保页面内 <a> 链接点击后在 WebView 内部跳转
 private struct SingleUrlWebViewContainer: UIViewRepresentable {
     let url: String
-    @Binding var coordinator: SingleUrlWebViewCoordinator
+    @ObservedObject var coordinator: SingleUrlWebViewCoordinator
 
     func makeCoordinator() -> SingleUrlWebViewCoordinator {
         coordinator
