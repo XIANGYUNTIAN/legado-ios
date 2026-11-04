@@ -353,6 +353,22 @@ private struct SingleUrlWebViewContainer: UIViewRepresentable {
         config.mediaPlaybackRequiresUserAction = false
         // 允许 JS 通过 window.open() 打开新窗口，使 createWebViewWith 也能捕获此类跳转
         config.preferences.javaScriptCanOpenWindowsAutomatically = true
+        // 兜底：直接在页面层接管所有链接点击，不依赖 WKUIDelegate 回调
+        // （发布页多为 JS 动态渲染，卡片点击未必走 target=_blank 新窗口路径，
+        //   单靠 createWebViewWithConfiguration 拦截经常不触发，故改用注入式接管）
+        let userContent = WKUserContentController()
+        let linkFixJS = """
+        (function(){
+          function fix(){
+            document.querySelectorAll('a[target="_blank"]').forEach(function(a){ a.target='_self'; });
+          }
+          fix();
+          try { new MutationObserver(fix).observe(document.documentElement, {childList:true, subtree:true}); } catch(e){}
+          try { window.open = function(u){ if(u){ window.location.href = u; } return null; }; } catch(e){}
+        })();
+        """
+        userContent.addUserScript(WKUserScript(source: linkFixJS, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        config.userContentController = userContent
         let wk = WKWebView(frame: .zero, configuration: config)
         wk.navigationDelegate = context.coordinator
         wk.uiDelegate = context.coordinator
