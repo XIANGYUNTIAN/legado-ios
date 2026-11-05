@@ -40,6 +40,9 @@ struct ComicPagesView: View {
     let pages: [URL]
     let headers: [String: String]
     let title: String
+    /// 由父视图（BookReaderView）注入退出动作：阅读器自建 NavigationStack，
+    /// 子视图自己取 @Environment(\.dismiss) 可能只作用于内层空栈而无效。
+    let onClose: () -> Void
 
     var body: some View {
         ScrollView {
@@ -51,6 +54,26 @@ struct ComicPagesView: View {
         }
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button("关闭") { onClose() }
+            }
+        }
+        // 常驻悬浮出口：即使阅读设置处于沉浸模式、导航栏仍未显示，也不会把用户卡在图片页。
+        .overlay(alignment: .topTrailing) {
+            Button {
+                onClose()
+            } label: {
+                Label("返回", systemImage: "xmark")
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.regularMaterial, in: Capsule())
+            }
+            .buttonStyle(.borderless)
+            .padding(.top, 8)
+            .padding(.trailing, 12)
+        }
     }
 }
 

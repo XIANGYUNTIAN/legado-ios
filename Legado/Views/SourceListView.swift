@@ -6,6 +6,7 @@ struct SourceListView: View {
     @State private var showImport = false
     @State private var showScan = false
     @State private var showExport = false
+    @State private var showCheck = false
 
     // 本地文件导入结果提示
     @State private var importResult: String?
@@ -66,6 +67,12 @@ struct SourceListView: View {
                         } label: {
                             Image(systemName: "qrcode.viewfinder")
                         }
+                        Button {
+                            showCheck = true
+                        } label: {
+                            Image(systemName: "waveform.path.ecg")
+                        }
+                        .disabled(store.sources.isEmpty)
                         // 加号「+」展开菜单：粘贴/网址导入 + 本地文件导入（合并原独立 folder 入口）
                         Menu {
                             Button {
@@ -110,6 +117,21 @@ struct SourceListView: View {
         }
         .sheet(isPresented: $showExport) {
             SourceExportSheet(sources: store.sources)
+        }
+        .sheet(isPresented: $showCheck) {
+            SourceCheckView(
+                sources: store.sources,
+                onApplySelection: { ids in
+                    // 失效源「直接选中」：回到书源列表即进入勾选模式，由用户自助决定
+                    // 一键删除还是取消部分勾选后删除。
+                    isSelecting = true
+                    selection = ids
+                },
+                onDelete: { ids in
+                    store.delete(ids: Array(ids))
+                    selection.subtract(ids)
+                }
+            )
         }
         .confirmationDialog("确认删除", isPresented: $showDeleteConfirm) {
             Button("删除 \(selection.count) 个书源", role: .destructive) {

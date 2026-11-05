@@ -228,7 +228,8 @@ struct BookReaderView: View {
                 } else if !comicPages.isEmpty {
                     ComicPagesView(pages: comicPages,
                                    headers: comicHeaders,
-                                   title: currentChapter?.title ?? book.displayTitle)
+                                   title: currentChapter?.title ?? book.displayTitle,
+                                   onClose: { dismiss() })
                 } else {
                     // 正文区：按翻页模式渲染。沉浸模式下用 GeometryReader 包裹以获取尺寸，
                     // 通过 SpatialTapGesture 识别「单击中央」切换控制层显隐（沉浸式交互）。
@@ -272,6 +273,17 @@ struct BookReaderView: View {
             .navigationTitle(currentChapter?.title ?? book.displayTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar(.hidden, for: .tabBar)
+            .toolbar {
+                // 阅读器自建 NavigationStack，外层 navigationDestination 的系统返回按钮
+                // 不会出现在这一层；必须自带明确的退出入口，否则漫画 / 错误页会被卡死。
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        dismiss()   // 阅读位置由 .onDisappear 统一保存
+                    } label: {
+                        Label("返回", systemImage: "chevron.left")
+                    }
+                }
+            }
             .toolbar(chromeVisible ? .visible : .hidden, for: .navigationBar)
             .statusBarHidden(!chromeVisible)
             // 排版设置变化（字号/字距/行距/背景/日夜间/字体等）→ 记录当前页字符 offset →
@@ -532,9 +544,9 @@ struct BookReaderView: View {
     /// 控制层（导航栏 / 状态栏 / 底部工具栏）是否可见：
     /// 非沉浸恒可见；沉浸时由「单击中央」切换（immersiveChromeVisible）。
     private var chromeVisible: Bool {
-        // 加载中 / 读取失败强制显示导航栏：否则沉浸模式下控制层隐藏，
-        // 错误页既没有系统返回按钮也没有自定义按钮，用户会被卡在这一页。
-        if isLoading || errorMessage != nil { return true }
+        // 加载中 / 读取失败 / 漫画图片页强制显示导航栏：否则沉浸模式下控制层隐藏，
+        // 这些页面既没有系统返回按钮也没有自定义按钮，用户会被卡在这一页。
+        if isLoading || errorMessage != nil || !comicPages.isEmpty { return true }
         return !settings.isImmersive || immersiveChromeVisible
     }
 
