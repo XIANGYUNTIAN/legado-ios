@@ -15,11 +15,13 @@ struct BrowserMedia: Identifiable {
 /// 浏览器内弹出的面板：候选列表 / 播放器。用同一个 sheet item 切换，避免两个 sheet 抢 presented 状态。
 enum BrowserSheetState: Identifiable {
     case candidates
+    case episodes(VodEpisodeList)
     case media(BrowserMedia)
 
     var id: String {
         switch self {
         case .candidates: return "candidates"
+        case .episodes(let list): return "episodes-" + list.id.uuidString
         case .media(let m): return m.id.uuidString
         }
     }
@@ -98,6 +100,8 @@ struct SourceBrowserView: View {
                         BrowserCandidateSheet(candidates: candidates, headers: headers) { url in
                             sheetState = .media(BrowserMedia(url: url, headers: headers))
                         }
+                    case .episodes(let list):
+                        VodEpisodeSheet(list: list)
                     case .media(let media):
                         BrowserPlayerSheet(media: media)
                     }
@@ -370,6 +374,27 @@ struct BrowserWebView: UIViewRepresentable {
             isLoading = false
             currentPage = webView.url
             address = webView.url?.absoluteString ?? address
+            // 采集站 `api.php/provide/vod/?ac=detail` 返回的是 JSON 播放列表而非网页。
+            // 落到这种页面时直接解析成剧集 → 原生播放器，避免用户面对一屏 JSON
+            // 或被迫回到带广告的网页里找播放按钮。
+            webView.evaluateJavaScript("document.body ? document.body.innerText : ''") { result, _ in
+                guard let text = result as? String,
+                      VodPlaylistParser.isPlaylistPayload(text) else { return }
+                let base = self.currentPage ?? self.lastInitialURL
+                let list = VodPlaylistParser.episodes(from: text, base: base)
+                guard !list.isEmpty else { return }
+                var h = self.headers
+                if h["Referer"] == nil && h["referer"] == nil {
+                    h["Referer"] = base.absoluteString
+                }
+                let payload = VodEpisodeList(title: "选择剧集",
+                                             episodes: list,
+                                             headers: h,
+                                             referer: base.absoluteString)
+                DispatchQueue.main.async {
+                    self.sheetState = .episodes(payload)
+                }
+            }
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {

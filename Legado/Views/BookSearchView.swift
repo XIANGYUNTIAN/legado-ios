@@ -15,11 +15,24 @@ enum SearchMode: String, CaseIterable {
     case precise
 }
 
-/// 视频类搜索结果的直达播放目标：不加入书架，直接进站点浏览器播放。
+/// 视频类搜索结果的直达播放目标：优先解析成剧集进原生播放器，失败才回退站点浏览器。
 struct SearchPlayback: Identifiable {
     let id = UUID()
     let url: URL
     let title: String
+}
+
+/// 一个 sheet item 承载两种去向，避免两个 .sheet 同时争抢 presented 状态。
+enum SearchPlaybackRoute: Identifiable {
+    case episodes(VodEpisodeList)
+    case browser(SearchPlayback)
+
+    var id: String {
+        switch self {
+        case .episodes(let l): return "episodes-" + l.id.uuidString
+        case .browser(let p): return "browser-" + p.id.uuidString
+        }
+    }
 }
 
 /// 书源搜索：遍历全部可搜索书源，按 ruleSearch 规则检索书籍，可加入书架；
@@ -47,8 +60,10 @@ struct BookSearchView: View {
     @State private var searchSummary: String = ""
     /// 当前搜索任务句柄，支持随时取消（停止搜索）
     @State private var searchTask: Task<Void, Never>?
-    /// 视频结果直达播放（sheet item）
-    @State private var playback: SearchPlayback?
+    /// 视频结果直达播放（剧集 / 网页兜底二选一）
+    @State private var playback: SearchPlaybackRoute?
+    /// 正在做直链解析的目标，用来显示进度并防止重复点击
+    @State private var resolvingTarget: URL?
 
     /// 可搜索的书源：配置了含 {{key}} 的 searchUrl 且具备 ruleSearch.bookList
     private var searchableSources: [BookSource] {
@@ -108,8 +123,15 @@ struct BookSearchView: View {
                 }
             }
             .onDisappear { searchTask?.cancel() }
-            .sheet(item: $playback) { target in
-                SourceBrowserView(title: target.title, initialURL: target.url)
+            .sheet(item: $playback) { route in
+                Group {
+                    switch route {
+                    case .episodes(let list):
+                        VodEpisodeSheet(list: list)
+                    case .browser(let target):
+                        SourceBrowserView(title: target.title, initialURL: target.url)
+                    }
+                }
             }
             .alert("提示", isPresented: .constant(addedMessage != nil)) {
                 Button("好") { addedMessage = nil }
@@ -231,12 +253,17 @@ struct BookSearchView: View {
                             Spacer()
                             if let target = playbackTarget(for: book) {
                                 Button {
-                                    playback = SearchPlayback(url: target, title: book.name)
+                                    Task { await resolvePlayback(target: target, name: book.name) }
                                 } label: {
-                                    Image(systemName: "play.circle.fill")
-                                        .foregroundStyle(.tint)
+                                    if resolvingTarget == target {
+                                        ProgressView()
+                                    } else {
+                                        Image(systemName: "play.circle.fill")
+                                            .foregroundStyle(.tint)
+                                    }
                                 }
                                 .buttonStyle(.borderless)
+                                .disabled(resolvingTarget != nil)
                             }
                             Button {
                                 addToShelf(book)
@@ -382,17 +409,40 @@ struct BookSearchView: View {
 
     // MARK: - 视频结果直达播放
 
-    /// 只对「站点类」视频书源给出直达目标。
-    /// 采集类书源（bookSourceUrl 是「资源采集19」这类名称）的 bookUrl 是
-    /// `/api.php/provide/vod/?ac=detail&ids=…` 接口，打开只有 JSON，没有可点的内容；
-    /// 它们仍走「加入书架 → 阅读器 → 正文规则 → startBrowser 意图」链路（v38）。
+    /// 采集类书源（bookSourceUrl 是「资源采集19」这类名称）同样给 ▶：
+    /// 它们的 bookUrl 是 `/api.php/provide/vod/?ac=detail&ids=…`，返回的 JSON 里
+    /// `vod_play_url` 已经写好 m3u8 列表，解析后能直接播，不必再进网页。
     private func playbackTarget(for book: ExploredBook) -> URL? {
-        guard let source = videoSource(for: book),
-              let base = source.bookSourceURL,
-              let scheme = base.scheme?.lowercased(),
-              scheme == "http" || scheme == "https" else { return nil }
+        guard let source = videoSource(for: book), !book.bookUrl.isEmpty else { return nil }
         if let absolute = URLSanitizer.sanitize(book.bookUrl) { return absolute }
+        for base in source.siteURLs {
+            if let u = URL(string: book.bookUrl, relativeTo: base)?.absoluteURL { return u }
+        }
+        guard let base = source.bookSourceURL else { return nil }
         return URL(string: book.bookUrl, relativeTo: base)?.absoluteURL
+    }
+
+    /// 点 ▶ 先把目标页内容取回来解析直链；命中就直接进原生播放器（无网页、无广告），
+    /// 没命中才回退到可浏览的站点页面。
+    @MainActor
+    private func resolvePlayback(target: URL, name: String) async {
+        guard resolvingTarget == nil else { return }
+        resolvingTarget = target
+        defer { resolvingTarget = nil }
+        let headers = ["Referer": target.absoluteString]
+        if let text = try? await NetworkService.shared.fetchText(
+            from: target, headers: headers, timeout: 12
+        ) {
+            let list = VodPlaylistParser.episodes(from: text, base: target)
+            if !list.isEmpty {
+                playback = .episodes(VodEpisodeList(title: name,
+                                                    episodes: list,
+                                                    headers: headers,
+                                                    referer: target.absoluteString))
+                return
+            }
+        }
+        playback = .browser(SearchPlayback(url: target, title: name))
     }
 
     private func videoSource(for book: ExploredBook) -> BookSource? {

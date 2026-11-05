@@ -96,6 +96,12 @@ struct BookReaderView: View {
     @EnvironmentObject private var sourceStore: BookSourceStore
     @EnvironmentObject private var bookStore: BookStore
     @EnvironmentObject private var settings: ReaderSettings
+    /// 错误页必须能主动退出：沉浸模式会隐藏导航栏，仅靠系统返回按钮会「卡死」。
+    @Environment(\.dismiss) private var dismiss
+
+    /// 漫画 / 图片书源正文（ruleContent 返回的是图片地址列表）
+    @State private var comicPages: [URL] = []
+    @State private var comicHeaders: [String: String] = [:]
 
     @State private var chapters: [ReaderChapter] = []
     /// 已连续加载的章节段（首尾由 firstLoadedIndex / lastLoadedIndex 定位）
@@ -203,12 +209,26 @@ struct BookReaderView: View {
                     ProgressView("正在加载…")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let error = errorMessage {
-                    ContentUnavailableView {
-                        Label("读取失败", systemImage: "exclamation.triangle")
-                    } description: {
-                        Text(error)
+                    VStack(spacing: 18) {
+                        ContentUnavailableView {
+                            Label("读取失败", systemImage: "exclamation.triangle")
+                        } description: {
+                            Text(error)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        HStack(spacing: 14) {
+                            Button("返回书架") { dismiss() }
+                                .buttonStyle(.borderedProminent)
+                            Button("重试") { load() }
+                                .buttonStyle(.bordered)
+                        }
+                        .padding(.bottom, 40)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if !comicPages.isEmpty {
+                    ComicPagesView(pages: comicPages,
+                                   headers: comicHeaders,
+                                   title: currentChapter?.title ?? book.displayTitle)
                 } else {
                     // 正文区：按翻页模式渲染。沉浸模式下用 GeometryReader 包裹以获取尺寸，
                     // 通过 SpatialTapGesture 识别「单击中央」切换控制层显隐（沉浸式交互）。
@@ -512,7 +532,10 @@ struct BookReaderView: View {
     /// 控制层（导航栏 / 状态栏 / 底部工具栏）是否可见：
     /// 非沉浸恒可见；沉浸时由「单击中央」切换（immersiveChromeVisible）。
     private var chromeVisible: Bool {
-        !settings.isImmersive || immersiveChromeVisible
+        // 加载中 / 读取失败强制显示导航栏：否则沉浸模式下控制层隐藏，
+        // 错误页既没有系统返回按钮也没有自定义按钮，用户会被卡在这一页。
+        if isLoading || errorMessage != nil { return true }
+        return !settings.isImmersive || immersiveChromeVisible
     }
 
     /// 退出阅读时保存页位置（章 + 当前页字符偏移），下次进入恢复到退出前页面
@@ -1070,9 +1093,7 @@ struct BookReaderView: View {
         guard let source = matchedSource() else {
             throw RuleError.unsupportedMode("书源不存在或已删除（sourceId=\(book.sourceId ?? "nil")）")
         }
-        guard let rules = source.ruleToc, !rules.isEmpty else {
-            throw RuleError.unsupportedMode("书源「\(source.bookSourceName)」缺少目录规则（ruleToc 为空），无法阅读")
-        }
+        let rules = source.ruleToc
         guard let bookUrlStr = book.bookUrl else {
             throw RuleError.unsupportedMode("书籍缺少 bookUrl")
         }
@@ -1087,10 +1108,20 @@ struct BookReaderView: View {
         if headers["Referer"] == nil && headers["referer"] == nil {
             headers["Referer"] = bookURL.absoluteString
         }
-        let html = try await NetworkService.shared.fetchText(from: bookURL, headers: headers)
-        let extracted = try extractToc(html: html, rules: rules, base: bookURL, sourceBase: source.bookSourceURL, source: source)
-        if extracted.isEmpty { throw RuleError.emptyResult }
-        return extracted
+        // 目录规则缺失 / 解析失败 / 解析为空时，降级为「单章」而不是抛错卡在错误页。
+        // 漫画、影视、单页书源常见这种形态（目录由 JS 动态渲染，或压根没有章节列表），
+        // 书籍详情页本身就能当正文页继续走 ruleContent。
+        let single = [ReaderChapter(title: book.displayTitle, text: nil, url: bookURL.absoluteString)]
+        guard let rules = rules, !rules.isEmpty else { return single }
+        do {
+            let html = try await NetworkService.shared.fetchText(from: bookURL, headers: headers)
+            let extracted = try extractToc(html: html, rules: rules, base: bookURL,
+                                           sourceBase: source.bookSourceURL, source: source)
+            if extracted.isEmpty { return single }
+            return extracted
+        } catch {
+            return single
+        }
     }
 
     /// 书源 header 字段 → 请求头字典（ legado header 字段，缺它会被站点 401/403 拒绝）
@@ -1202,6 +1233,18 @@ struct BookReaderView: View {
             await MainActor.run { forceVideoPlayback = true }
             return ""
         }
+        // 漫画 / 图片书源：ruleContent 返回的是图片地址列表（HTML <img> / JSON 数组 /
+        // 一行一个 URL）。文本清洗会把这些地址当正文显示，必须切成图片页渲染。
+        // 要求 ≥2 张才切换，避免小说正文里偶发的封面图被误判成漫画。
+        let images = ComicPageDetector.imageURLs(from: raw, base: url)
+        if images.count >= 2 {
+            await MainActor.run {
+                comicPages = images
+                comicHeaders = headers
+            }
+            return ""
+        }
+        await MainActor.run { comicPages = [] }
         // 内容清洗：部分书源（如 dbxsd）ruleContent 抽取到的是原始 HTML（含 <div> 开标签 /
         // <script> 防爬脚本 / <p> 标签），须对齐 legado 标准「内容清洗」——去 script/style、
         // 块标签转换行、去残余标签、解码实体，否则正文混入标签。
