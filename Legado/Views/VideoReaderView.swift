@@ -261,9 +261,11 @@ struct VideoReaderView: View {
             // 此时无论书源是否显式写了 sourceRegex / webJs，都走 WebView 嗅探。
             // 旧实现只在「解析不出任何 URL」时才嗅探，播放页 URL 被 isPlayable 误判成
             // 可播放并直接丢给 AVPlayer（黑屏），嗅探分支实际不可达。
+            // 正文规则给出的播放页 URL（没写 webView 选项时）也必须作为嗅探目标；
+            // v36 此时仍去嗅探章节详情页，而播放器实际在规则返回的那个页面上。
             let sniffPage = (rawWebView || useWebViewForChapter)
                 ? (URLSanitizer.sanitize(rawURLCandidate) ?? u)
-                : u
+                : (parsed.activeURL ?? u)
             await sniffAndResolve(chapterURL: sniffPage, fallback: parsed)
         } catch {
             // 直连抓取被反爬拦下时，WebView 带完整浏览器环境仍可能拿到直链。
@@ -358,17 +360,25 @@ struct VideoReaderView: View {
     /// 不再要求书源显式配置 sourceRegex / webJs：在线视频站绝大多数靠 JS 动态插 video 标签。
     private func sniffAndResolve(chapterURL: URL, fallback: VideoPlayAsset) async {
         await MainActor.run { isLoadingContent = true; errorMessage = nil }
-        let candidates = await withCheckedContinuation { cont in
-            sniffer.sniff(pageURL: chapterURL,
-                          headers: sourceHeaders,
-                          sourceRegexPattern: source.ruleContent?.sourceRegex,
-                          webJs: source.ruleContent?.webJs,
-                          timeout: 15) { cont.resume(returning: $0) }
+        let headers = sourceHeaders
+        let regex = source.ruleContent?.sourceRegex
+        let js = source.ruleContent?.webJs
+        let detector = sniffer
+        let candidates = await withCheckedContinuation { (cont: CheckedContinuation<[URL], Never>) in
+            // WKWebView 必须在主线程创建。withCheckedContinuation 的同步闭包可能跑在
+            // 后台线程，直接调用会让页面加载 / 定时器不生效，表现为「空等 15 秒零候选」。
+            Task { @MainActor in
+                detector.sniff(pageURL: chapterURL,
+                               headers: headers,
+                               sourceRegexPattern: regex,
+                               webJs: js,
+                               timeout: 15) { cont.resume(returning: $0) }
+            }
         }
         guard let first = candidates.first else {
             await MainActor.run {
                 asset = nil
-                errorMessage = "嗅探未找到可用的媒体直链（页面可能需登录、有反爬，或视频由加密 JS 加载）。\n正文规则返回：\(fallback.raw.prefix(160))"
+                errorMessage = "嗅探未找到可用的媒体直链（页面可能需登录、有反爬，或视频由加密 JS 加载）。\n书源：\(source.bookSourceName)（\(source.typeName)）\n章节页：\(chapterURL.absoluteString)\n正文规则返回：\(fallback.raw.prefix(160))"
                 isLoadingContent = false
             }
             return

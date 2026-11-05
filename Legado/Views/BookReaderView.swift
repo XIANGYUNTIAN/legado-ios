@@ -164,6 +164,10 @@ struct BookReaderView: View {
     #endif
     /// 扫描页渲染结果缓存：key = 章节下标（= PDF 页下标），随已加载窗口裁剪，控制内存。
     @State private var pageImages: [Int: UIImage] = [:]
+    /// 正文规则产出播放地址时，运行时切到视频阅读器。
+    /// legado 判定「视频」依据的是 chapterContent 的 URL 形态，而非 bookSourceType 字段；
+    /// 第三方视频站书源常缺该字段，仅靠书源元数据会永远进不了播放器。
+    @State private var forceVideoPlayback = false
 
     /// 连续加载的章节段上限，防止超长阅读会话内存无限增长
     private let maxSegments = 25
@@ -185,7 +189,7 @@ struct BookReaderView: View {
         // 视频书源：整页走独立视频阅读器，不触碰文本引擎
         // （文本阅读器对 ruleContent 结果一律走文本清洗，会把播放地址当正文）
         // isVideoLike 同时覆盖缺失 bookSourceType 的第三方视频站书源。
-        if let videoSource = matchedSource(), videoSource.isVideoLike {
+        if let videoSource = matchedSource(), forceVideoPlayback || videoSource.isVideoLike {
             return AnyView(VideoReaderView(book: book, source: videoSource))
         }
         return AnyView(bodyContent)
@@ -1185,6 +1189,12 @@ struct BookReaderView: View {
                                  title: String) async throws -> String {
         let html = try await NetworkService.shared.fetchText(from: url, headers: headers)
         let raw = (try? engine.getString(contentRule, content: html)) ?? ""
+        // 视频书源的「正文」是播放地址（m3u8 / mp4 / 播放页 URL），不是文本。
+        // 一旦识别到媒体载荷，立即切到视频阅读器，避免被下面的文本清洗当正文显示。
+        if Self.isVideoPayload(raw) {
+            await MainActor.run { forceVideoPlayback = true }
+            return ""
+        }
         // 内容清洗：部分书源（如 dbxsd）ruleContent 抽取到的是原始 HTML（含 <div> 开标签 /
         // <script> 防爬脚本 / <p> 标签），须对齐 legado 标准「内容清洗」——去 script/style、
         // 块标签转换行、去残余标签、解码实体，否则正文混入标签。
@@ -1199,6 +1209,36 @@ struct BookReaderView: View {
     }
 
     // MARK: - 内容清洗
+
+    /// 判断正文规则结果是否为「视频载荷」（播放地址而非可读正文）。
+    /// 判定条件刻意收紧：必须含媒体特征，且主体是单个 / 少量 URL 或 JSON 行，
+    /// 避免长篇正文里偶然出现 "m3u8" 字样被误判成视频章节。
+    /// 支持 legado 的 URL + ##$##,{选项} 与 URL + ,{"webView":true} 两种写法。
+    static func isVideoPayload(_ raw: String) -> Bool {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty, s.count <= 8192 else { return false }
+        if s.uppercased().hasPrefix("#EXTM3U") { return true }
+        let lower = s.lowercased()
+        let mediaMarks = [".m3u8", ".mp4", ".mpd", ".flv", ".m4v", ".mkv",
+                          ".webm", "m3u8", "webview\":true", "webview\": true",
+                          // 部分视频书源的正文规则只返回播放页 URL（无媒体后缀、无选项）
+                          "/play/", "/vodplay/", "/vod/", "/video/", "/player/", "/watch/"]
+        guard mediaMarks.contains(where: { lower.contains($0) }) else { return false }
+        let lines = s.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard lines.count <= 8 else { return false }
+        for line in lines {
+            let body = line.components(separatedBy: "##$##").first ?? line
+            let urlPart = (body.components(separatedBy: ",{").first ?? body)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if urlPart.hasPrefix("{") { continue } // JSON 形态（{"url":...}）
+            guard urlPart.hasPrefix("http://") || urlPart.hasPrefix("https://")
+                    || urlPart.hasPrefix("//") else { return false }
+            if urlPart.contains(" ") { return false }
+        }
+        return true
+    }
 
     /// 章节正文 HTML 清洗（对齐 legado BookContent.cleanContent）：
     /// 1) 去除 <script>/<style> 块（含跨行）；2) 块级标签 / <br> 转换为换行；

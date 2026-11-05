@@ -167,7 +167,8 @@ struct BookSource: Codable, Identifiable, Equatable {
         if bookSourceType == .video { return true }
         if ruleContent?.sourceRegex?.isEmpty == false { return true }
         if ruleContent?.webJs?.isEmpty == false { return true }
-        let hints = ["视频", "影视", "电影", "剧集", "m3u8", "video", "movie"]
+        let hints = ["视频", "影视", "电影", "剧集", "影院", "影音", "短剧",
+                     "m3u8", "video", "movie"]
         let text = "\(bookSourceName) \(bookSourceGroup ?? "")".lowercased()
         return hints.contains { text.contains($0) }
     }

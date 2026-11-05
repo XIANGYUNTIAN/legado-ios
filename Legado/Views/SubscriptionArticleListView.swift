@@ -541,7 +541,8 @@ extension SingleUrlWebViewCoordinator {
     ///  1) legado:// 自定义导入协议（Android 原版一键导入使用的 scheme）；
     ///  2) yuedu://<任意 host>/importonline?src=<json url> —— yckceo 系发布页「x.x 一键导入」按钮；
     ///     真页面实证（2026-11-05 抓原始 HTML）：书源页是 yuedu://booksource/importonline?src=...，
-    ///     订阅源页是 legado://import/rssSource?src=...，两类页面协议不同，勿由书源推断订阅源；
+    ///     订阅源合集页是 legado://import/rssSource?src=...，单独订阅源页是
+    ///     legado://import/auto?src=...，三类页面协议 / 路径都不同，勿由书源推断订阅源；
     ///  3) 直接指向数据文件（.json 结尾）。
     private static func isBookSourceImportURL(_ url: URL) -> Bool {
         let scheme = url.scheme?.lowercased() ?? ""
@@ -602,19 +603,63 @@ extension SingleUrlWebViewCoordinator {
 
     // MARK: 一键导入分发（书源 / 订阅源）
 
-    /// 一键导入统一分发：先用「原始协议链接」判定目标类型，再解出 src 里的真实 http(s) JSON 地址。
-    /// - legado://import/rssSource 明确指向订阅源；
-    /// - 真实地址路径含 /rsss/ 的也是订阅源（https://www.yck2026.fun/yuedu/rsss/json/id/xxx.json）；
-    /// - 其余（含 /shuyuans/、yuedu://booksource/...）按书源处理。
+    /// 一键导入统一分发：先解出 src 里的真实 http(s) JSON 地址，再按「协议 / 路径 / 内容」三层判定。
+    /// 真页面实证（2026-11-05 抓原始 HTML，发布站两种订阅源栏目协议不同）：
+    ///  - 书源页          yuedu://booksource/importonline?src=.../shuyuans/json/id/xxx.json
+    ///  - 订阅源合集页    legado://import/rssSource?src=.../rsss/json/id/xxx.json
+    ///  - 单独订阅源页    legado://import/auto?src=.../rss/json/id/xxx.json
+    ///  - 站内「生成」按钮 legado://import/auto?src=<短链>，路径无任何类型关键词
+    /// v36 只认 rsssource / /rsss/，单独订阅源页的 auto 链接被当书源导入，
+    /// RSS JSON 因缺 bookSourceUrl 报「不是有效书源」。auto 在 Android 端本就是按内容自动识别。
     func importSource(from original: URL) {
         let real = SingleUrlWebViewCoordinator.resolveImportURL(original)
         let o = original.absoluteString.lowercased()
         let r = real.absoluteString.lowercased()
-        let isRss = o.contains("rsssource") || o.contains("/rsss/") || r.contains("rsssource") || r.contains("/rsss/")
-        if isRss {
+        let rssSignals = ["rsssource", "/rsss/", "/rss/"]
+        let bookSignals = ["booksource", "/shuyuans/", "/shuyuan/"]
+        let isRss = rssSignals.contains { o.contains($0) || r.contains($0) }
+        let isBook = bookSignals.contains { o.contains($0) || r.contains($0) }
+        if isRss && !isBook {
             importRssSource(from: real)
-        } else {
+        } else if isBook && !isRss {
             importBookSource(from: real)
+        } else {
+            // 无类型线索 / 线索冲突（含 legado://import/auto 与短链）→ 取回内容按字段自动识别
+            importAutoDetected(from: real)
+        }
+    }
+
+    /// legado://import/auto 的语义：按内容自动识别书源 / 订阅源。
+    /// 只取回一次文本，交给两个 Store 依次尝试：只有 JSON 里真有 sourceUrl 才会被订阅源
+    /// 接受，只有真有 bookSourceUrl 才会被书源接受，互不误收（两者都 filter 掉空主键）。
+    private func importAutoDetected(from url: URL) {
+        Task { @MainActor in
+            do {
+                let text = try await SubscriptionSourceStore.fetchText(from: url)
+                var lastError: Error?
+                if let rss = rssSourceStore {
+                    do {
+                        let count = try await rss.importSources(from: text)
+                        if count > 0 {
+                            importResult = "成功导入 \(count) 个订阅源，已可在「订阅源」页查看。"
+                            return
+                        }
+                    } catch { lastError = error }
+                }
+                if let book = sourceStore {
+                    do {
+                        let count = try await book.importSources(from: text)
+                        if count > 0 {
+                            importResult = "成功导入 \(count) 个书源，已可在「书源」页查看。"
+                            return
+                        }
+                    } catch { lastError = error }
+                }
+                let detail = lastError.map { "：\($0.localizedDescription)" } ?? ""
+                importResult = "导入失败：内容不是有效书源 / 订阅源\(detail)"
+            } catch {
+                importResult = "导入失败：\(error.localizedDescription)"
+            }
         }
     }
 
@@ -647,24 +692,35 @@ extension SingleUrlWebViewCoordinator {
         importBookSource(fromText: text)
     }
 
-    /// 从剪贴板文本导入书源：先做轻量预筛，避免用户手动复制普通文字时误触发联网导入。
+    /// 从剪贴板文本导入：先做轻量预筛，避免用户手动复制普通文字时误触发联网导入。
+    /// 发布站「一键导入」常同时把 JSON 复制到剪贴板；旧实现一律按书源导入，
+    /// 订阅源 JSON 会静默失败（甚至报「缺少 bookSourceUrl」），此处按内容分发。
     private func importBookSource(fromText text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.count > 20 else { return }
         let looksLikeSource = trimmed.contains("bookSourceUrl")
             || trimmed.contains("bookSourceName")
             || trimmed.contains("bookSourceType")
+            || trimmed.contains("sourceUrl")
+            || trimmed.contains("sourceName")
             || trimmed.hasPrefix("[") || trimmed.hasPrefix("{")
         guard looksLikeSource else { return }
-        guard let store = sourceStore else { return }
+        let isRss = trimmed.contains("\"sourceUrl\"") && !trimmed.contains("\"bookSourceUrl\"")
         Task { @MainActor in
             do {
-                let count = try await store.importFromTextOrLink(trimmed)
-                if count > 0 {
-                    importResult = "成功导入 \(count) 个书源，已可在「书源」页查看。"
+                if isRss, let rss = rssSourceStore {
+                    let count = try await rss.importFromTextOrLink(trimmed)
+                    if count > 0 {
+                        importResult = "成功导入 \(count) 个订阅源，已可在「订阅源」页查看。"
+                    }
+                } else if let store = sourceStore {
+                    let count = try await store.importFromTextOrLink(trimmed)
+                    if count > 0 {
+                        importResult = "成功导入 \(count) 个书源，已可在「书源」页查看。"
+                    }
                 }
             } catch {
-                // 复制内容非书源时静默处理，不弹窗打扰用户
+                // 复制内容非书源 / 订阅源时静默处理，不弹窗打扰用户
             }
         }
     }
