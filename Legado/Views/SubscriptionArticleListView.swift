@@ -16,6 +16,10 @@ import WebKit
 struct SubscriptionArticleListView: View {
     let source: SubscriptionSource
 
+    /// 订阅源存储（来自 LegadoApp 根注入的 subscriptionStore 同一实例，
+    /// 导入后「订阅源」列表可立即刷新）
+    @EnvironmentObject private var rssSourceStore: SubscriptionSourceStore
+
     @State private var articles: [RssArticle] = []
     @State private var isLoading = true
     @State private var errorMessage: String?
@@ -57,7 +61,7 @@ struct SubscriptionArticleListView: View {
 /// singleUrl 模式：源 URL 本身就是一个可浏览页面（如地址发布页/导航页），
    /// 对齐 legado Android 行为：直接在 WebView 中打开，不走 RSS/Atom 列表解析。
    private var singleUrlView: some View {
-       SingleUrlWebView(url: source.sourceUrl, title: source.sourceName)
+       SingleUrlWebView(url: source.sourceUrl, title: source.sourceName, rssSourceStore: rssSourceStore)
    }
 
    private var articleList: some View {
@@ -263,6 +267,7 @@ struct SingleUrlWebView: View {
 
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var sourceStore: BookSourceStore
+    @EnvironmentObject private var rssSourceStore: SubscriptionSourceStore
     @StateObject private var coordinator = SingleUrlWebViewCoordinator()
 
     var body: some View {
@@ -272,12 +277,13 @@ struct SingleUrlWebView: View {
                 SingleUrlWebViewContainer(
                     url: url,
                     coordinator: coordinator,
-                    sourceStore: sourceStore
+                    sourceStore: sourceStore,
+                    rssSourceStore: rssSourceStore
                 )
             }
             .navigationTitle(title.isEmpty ? "网页" : title)
             .navigationBarTitleDisplayMode(.inline)
-            .alert("书源导入", isPresented: Binding(
+            .alert("导入结果", isPresented: Binding(
                 get: { coordinator.importResult != nil },
                 set: { if !$0 { coordinator.importResult = nil } }
             )) {
@@ -329,6 +335,7 @@ final class SingleUrlWebViewCoordinator: NSObject, ObservableObject, WKUIDelegat
 
     private weak var wk: WKWebView?
     private var sourceStore: BookSourceStore?
+    private var rssSourceStore: SubscriptionSourceStore?
 
     func setWK(_ wk: WKWebView) {
         self.wk = wk
@@ -336,6 +343,10 @@ final class SingleUrlWebViewCoordinator: NSObject, ObservableObject, WKUIDelegat
 
     func setSourceStore(_ store: BookSourceStore) {
         self.sourceStore = store
+    }
+
+    func setRssSourceStore(_ store: SubscriptionSourceStore) {
+        self.rssSourceStore = store
     }
 
     func goBack() {
@@ -360,6 +371,7 @@ private struct SingleUrlWebViewContainer: UIViewRepresentable {
     let url: String
     @ObservedObject var coordinator: SingleUrlWebViewCoordinator
     let sourceStore: BookSourceStore
+    let rssSourceStore: SubscriptionSourceStore
 
     func makeCoordinator() -> SingleUrlWebViewCoordinator {
         coordinator
@@ -418,6 +430,7 @@ private struct SingleUrlWebViewContainer: UIViewRepresentable {
         wk.allowsBackForwardNavigationGestures = true
         coordinator.setWK(wk)
         coordinator.setSourceStore(sourceStore)
+        coordinator.setRssSourceStore(rssSourceStore)
         if let u = URL(string: url) {
             wk.load(URLRequest(url: u))
         }
@@ -440,7 +453,7 @@ extension SingleUrlWebViewCoordinator: WKNavigationDelegate {
         // 否则此类链接会被 WebView 当作普通网页下载/显示，App 不识别。
         if SingleUrlWebViewCoordinator.isBookSourceImportURL(url) {
             decisionHandler(.cancel)
-            importBookSource(from: SingleUrlWebViewCoordinator.resolveImportURL(url))
+            importSource(from: SingleUrlWebViewCoordinator.resolveImportURL(url))
             return
         }
         // 同窗口跳转若链接为裸域名/缺 scheme 被当成相对路径解析，则补全为 https 绝对地址再加载
@@ -500,7 +513,7 @@ extension SingleUrlWebViewCoordinator {
               let original = navigationAction.request.url else { return nil }
         // 书源一键导入（新窗口形式，如 window.open('yuedu://...')）：同样拦截并交给 App 导入
         if SingleUrlWebViewCoordinator.isBookSourceImportURL(original) {
-            importBookSource(from: SingleUrlWebViewCoordinator.resolveImportURL(original))
+            importSource(from: SingleUrlWebViewCoordinator.resolveImportURL(original))
             return nil
         }
         // 补全裸域名/缺 http(s) scheme 的链接（如发布页里的 www.xxx.com），避免 load 失败
@@ -517,19 +530,19 @@ extension SingleUrlWebViewCoordinator {
 
     // MARK: 书源一键导入
 
-    /// 判断该 URL 是否为 legado 书源一键导入链接（命中则拦截并交给 App 解析导入）。
+    /// 判断该 URL 是否为 legado 一键导入链接（命中则拦截并交给 App 解析导入）。
     /// 只认「铁证」三类，绝不凭「域名+路径关键字」猜测，避免把源仓库主站等普通网页误判为导入链接：
     ///  1) legado:// 自定义导入协议（Android 原版一键导入使用的 scheme）；
-    ///  2) yuedu://booksource/importonline?src=<json url> —— yckceo 系发布页「x.x 一键导入」按钮
-    ///     实际发出的协议（已用真页面确认：按钮即此链接，非剪贴板复制）；
-    ///  3) 直接指向书源数据文件（.json 结尾）。
+    ///  2) yuedu://<任意 host>/importonline?src=<json url> —— yckceo 系发布页「x.x 一键导入」按钮
+    ///     实际发出的协议（已用真页面确认：书源为 yuedu://booksource/...、订阅源为 yuedu://rsssource/...，
+    ///     二者共用 importonline 路径，故此处只认路径、不限 host）；
+    ///  3) 直接指向数据文件（.json 结尾）。
     private static func isBookSourceImportURL(_ url: URL) -> Bool {
         let scheme = url.scheme?.lowercased() ?? ""
         if scheme == "legado" { return true }
         if scheme == "yuedu" {
-            // 仅认 importonline 导入入口，避免误伤 yuedu:// 其它用途
-            return url.host?.lowercased() == "booksource"
-                && url.path.lowercased().hasPrefix("/importonline")
+            // 仅认 importonline 导入入口（书源 / 订阅源共用），避免误伤 yuedu:// 其它用途
+            return url.path.lowercased().hasPrefix("/importonline")
         }
         if url.pathExtension.lowercased() == "json" { return true }
         return false
@@ -566,6 +579,38 @@ extension SingleUrlWebViewCoordinator {
             } catch {
                 // 注意：此处不要自动 reload(url)，否则会再次被 decidePolicyFor 拦截→再次导入→死循环。
                 // 仅提示失败，用户可手动复制链接到「书源」页导入。
+                importResult = "导入失败：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    // MARK: 一键导入分发（书源 / 订阅源）
+
+    /// 一键导入统一分发：根据真实数据地址路径判断是「书源」还是「订阅源」，交给对应存储导入。
+    /// - 订阅源：src 路径含 /rsss/（如 https://www.yck2026.fun/yuedu/rsss/json/id/xxx.json）；
+    /// - 其余（含 /shuyuans/）按书源处理。
+    func importSource(from url: URL) {
+        if url.absoluteString.lowercased().contains("/rsss/") {
+            importRssSource(from: url)
+        } else {
+            importBookSource(from: url)
+        }
+    }
+
+    /// 订阅源一键导入：yuedu://rsssource/importonline?src=<json> 解析出的 json 地址交给订阅源存储导入。
+    func importRssSource(from url: URL) {
+        guard let store = rssSourceStore else {
+            importResult = "导入失败：订阅源存储未初始化"
+            return
+        }
+        Task { @MainActor in
+            do {
+                let count = try await store.importFromTextOrLink(url.absoluteString)
+                importResult = count > 0
+                    ? "成功导入 \(count) 个订阅源，已可在「订阅源」页查看。"
+                    : "未识别到有效订阅源，链接可能已失效。"
+            } catch {
+                // 注意：此处不要自动 reload(url)，否则会再次被拦截→再次导入→死循环。
                 importResult = "导入失败：\(error.localizedDescription)"
             }
         }
