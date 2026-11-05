@@ -41,8 +41,9 @@ struct SourceDetailView: View {
                             }
                         }
                     }
-                } footer: {
                     Text("进入站点后可点击页面中的视频直接播放；指向 m3u8 / mp4 的链接会交给播放器，右上角「嗅探」可查看抓到的直链。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
 
