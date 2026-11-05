@@ -26,6 +26,26 @@ struct SourceDetailView: View {
                 ))
             }
 
+            if !source.siteURLs.isEmpty {
+                Section("站点浏览") {
+                    ForEach(source.siteURLs, id: \.absoluteString) { url in
+                        NavigationLink {
+                            SourceBrowserView(title: source.bookSourceName, initialURL: url)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(url.host ?? url.absoluteString)
+                                Text(url.absoluteString)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+                } footer: {
+                    Text("进入站点后可点击页面中的视频直接播放；指向 m3u8 / mp4 的链接会交给播放器，右上角「嗅探」可查看抓到的直链。")
+                }
+            }
+
             Section("规则") {
                 ruleRow("搜索", source.ruleSearch)
                 ruleRow("发现", source.ruleExplore)

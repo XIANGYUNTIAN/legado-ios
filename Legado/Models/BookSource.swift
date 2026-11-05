@@ -122,6 +122,46 @@ struct BookSource: Codable, Identifiable, Equatable {
         URLSanitizer.sanitize(bookSourceUrl)
             ?? URL(string: bookSourceUrl)
     }
+
+    /// 内置浏览器可打开的站点地址。
+    /// 站点类书源（Xvideos / Jable / 香蕉视频）直接用 bookSourceUrl；
+    /// 「资源采集」类书源把 bookSourceUrl 写成「资源采集19」这类名称，真实域名藏在
+    /// bookSourceComment 的 JS 数组里（如 `http://feifei67.com`），需按域名粒度提取。
+    /// 书源详情页 / 发现页 / 搜索结果的「进入网站」入口都从这里取。
+    var siteURLs: [URL] {
+        var out: [URL] = []
+        var seen = Set<String>()
+        func add(_ raw: String) {
+            guard let u = URLSanitizer.sanitize(raw),
+                  let host = u.host, host.contains(".") else { return }
+            let key = host.lowercased() + (u.port.map { ":\($0)" } ?? "")
+            guard seen.insert(key).inserted else { return }
+            // 统一取站点根：comment 里的域名可能带 API 路径，直接打开没有可点的内容
+            guard var comps = URLComponents(url: u, resolvingAgainstBaseURL: false) else {
+                out.append(u)
+                return
+            }
+            comps.path = ""
+            comps.query = nil
+            comps.fragment = nil
+            out.append(comps.url ?? u)
+        }
+        add(bookSourceUrl)
+        if out.isEmpty {
+            let haystack = [bookSourceComment, searchUrl ?? "", exploreUrl ?? "", loginUrl ?? ""]
+                .joined(separator: "\n")
+            // 只匹配到域名部分，避免把 JS 拼接符 / 引号裹进 URL
+            guard let rx = try? NSRegularExpression(
+                pattern: #"https?://[A-Za-z0-9\-._]+(?::\d+)?"#) else { return out }
+            let ns = haystack as NSString
+            for m in rx.matches(in: haystack, range: NSRange(location: 0, length: ns.length)) {
+                add(ns.substring(with: m.range))
+                if out.count >= 12 { break }
+            }
+        }
+        return out
+    }
+
     var bookSourceName: String = ""
     var bookSourceGroup: String?
     var bookSourceType: BookSourceType = .text

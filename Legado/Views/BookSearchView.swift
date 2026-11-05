@@ -15,7 +15,15 @@ enum SearchMode: String, CaseIterable {
     case precise
 }
 
-/// 书源搜索：遍历全部可搜索书源，按 ruleSearch 规则检索书籍，一键加入书架。
+/// 视频类搜索结果的直达播放目标：不加入书架，直接进站点浏览器播放。
+struct SearchPlayback: Identifiable {
+    let id = UUID()
+    let url: URL
+    let title: String
+}
+
+/// 书源搜索：遍历全部可搜索书源，按 ruleSearch 规则检索书籍，可加入书架；
+/// 视频类书源的结果另给「▶ 直接播放」入口（对齐 legado 搜索结果点开即播）。
 /// 加入书架的书籍保留 sourceId + bookUrl，阅读时走规则阅读路径。
 ///
 /// searchUrl 三阶段流水线（对齐 legado AnalyzeUrl）：
@@ -39,6 +47,8 @@ struct BookSearchView: View {
     @State private var searchSummary: String = ""
     /// 当前搜索任务句柄，支持随时取消（停止搜索）
     @State private var searchTask: Task<Void, Never>?
+    /// 视频结果直达播放（sheet item）
+    @State private var playback: SearchPlayback?
 
     /// 可搜索的书源：配置了含 {{key}} 的 searchUrl 且具备 ruleSearch.bookList
     private var searchableSources: [BookSource] {
@@ -98,6 +108,9 @@ struct BookSearchView: View {
                 }
             }
             .onDisappear { searchTask?.cancel() }
+            .sheet(item: $playback) { target in
+                SourceBrowserView(title: target.title, initialURL: target.url)
+            }
             .alert("提示", isPresented: .constant(addedMessage != nil)) {
                 Button("好") { addedMessage = nil }
             } message: {
@@ -124,7 +137,7 @@ struct BookSearchView: View {
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 200)
                 }
-                Text("将遍历全部 \(searchableSources.count) 个可搜索书源；关键词支持书名 / 作者 / 主角名 · build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?")")
+                Text("将遍历全部 \(searchableSources.count) 个可搜索书源；视频源结果点 ▶ 直接进站播放 · build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?")")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -216,12 +229,22 @@ struct BookSearchView: View {
                                 }
                             }
                             Spacer()
+                            if let target = playbackTarget(for: book) {
+                                Button {
+                                    playback = SearchPlayback(url: target, title: book.name)
+                                } label: {
+                                    Image(systemName: "play.circle.fill")
+                                        .foregroundStyle(.tint)
+                                }
+                                .buttonStyle(.borderless)
+                            }
                             Button {
                                 addToShelf(book)
                             } label: {
                                 Image(systemName: "plus.circle.fill")
                                     .foregroundStyle(.tint)
                             }
+                            .buttonStyle(.borderless)
                         }
                         .padding(.vertical, 4)
                     }
@@ -355,6 +378,29 @@ struct BookSearchView: View {
         )
         bookStore.addBook(newBook)
         addedMessage = "已加入书架：《\(book.name)》"
+    }
+
+    // MARK: - 视频结果直达播放
+
+    /// 只对「站点类」视频书源给出直达目标。
+    /// 采集类书源（bookSourceUrl 是「资源采集19」这类名称）的 bookUrl 是
+    /// `/api.php/provide/vod/?ac=detail&ids=…` 接口，打开只有 JSON，没有可点的内容；
+    /// 它们仍走「加入书架 → 阅读器 → 正文规则 → startBrowser 意图」链路（v38）。
+    private func playbackTarget(for book: ExploredBook) -> URL? {
+        guard let source = videoSource(for: book),
+              let base = source.bookSourceURL,
+              let scheme = base.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else { return nil }
+        if let absolute = URLSanitizer.sanitize(book.bookUrl) { return absolute }
+        return URL(string: book.bookUrl, relativeTo: base)?.absoluteURL
+    }
+
+    private func videoSource(for book: ExploredBook) -> BookSource? {
+        guard !book.sourceId.isEmpty,
+              let source = sourceStore.sources.first(where: {
+                  BookSource.normalizedURL($0.bookSourceUrl) == BookSource.normalizedURL(book.sourceId)
+              }), source.isVideoLike else { return nil }
+        return source
     }
 
     // MARK: - 工具

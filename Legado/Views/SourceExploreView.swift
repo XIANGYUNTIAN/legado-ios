@@ -43,6 +43,7 @@ struct SourceExploreView: View {
     @State private var errorMessage: String?
     @State private var addedMessage: String?
     @State private var showDetail = false
+    @State private var showBrowser = false
 
     var body: some View {
         Group {
@@ -73,14 +74,26 @@ struct SourceExploreView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button("规则") {
-                    showDetail = true
+                HStack(spacing: 14) {
+                    if !source.siteURLs.isEmpty {
+                        Button { showBrowser = true } label: {
+                            Image(systemName: "safari")
+                        }
+                    }
+                    Button("规则") {
+                        showDetail = true
+                    }
                 }
             }
         }
         .onAppear { load() }
         .sheet(isPresented: $showDetail) {
             SourceDetailView(source: source)
+        }
+        .sheet(isPresented: $showBrowser) {
+            if let site = source.siteURLs.first {
+                SourceBrowserView(title: source.bookSourceName, initialURL: site)
+            }
         }
         .alert("提示", isPresented: .constant(addedMessage != nil)) {
             Button("好") { addedMessage = nil }
