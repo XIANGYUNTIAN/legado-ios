@@ -179,58 +179,114 @@ struct LocalBookReader {
     }
 
     /// 从 document.xml 抽取段落；遇标题样式（Heading / 标题）即为新章节起点。
+    /// 采用 XML SAX 解析（仅采集 <w:t> 文本节点），彻底规避旧正则匹配在非标准/复杂结构下
+    /// 把 <w:rPr> / <w:rFonts> 等格式标签当正文抓出、导致阅读/导出满屏原始 XML 的问题。
     private static func parseDocx(_ xml: String, title: String) throws -> [ReaderChapter] {
-        guard let pRegex = try? NSRegularExpression(pattern: #"<w:p[ >][\s\S]*?</w:p>"#, options: []) else {
-            throw LocalBookError.parseFailed("DOCX 段落解析失败")
-        }
-        let ns = xml as NSString
-        let pMatches = pRegex.matches(in: xml, range: NSRange(location: 0, length: ns.length))
-        var chapters: [ReaderChapter] = []
-        var currentTitle = title
-        var currentBody = ""
-
-        func flush() {
-            let t = currentBody.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !t.isEmpty {
-                chapters.append(ReaderChapter(title: currentTitle, text: t, url: nil))
-            }
-            currentBody = ""
-        }
-
-        for m in pMatches {
-            let pBlock = ns.substring(with: m.range)
-            var isHeading = false
-            if let styleRegex = try? NSRegularExpression(pattern: #"w:pStyle\s+w:val="([^"]*)""#, options: []),
-               let sm = styleRegex.firstMatch(in: pBlock, range: NSRange(location: 0, length: (pBlock as NSString).length)),
-               let srange = sm.range(at: 1) as? NSRange {
-                let style = (pBlock as NSString).substring(with: srange).lowercased()
-                if style.contains("heading") || style.contains("标题") {
-                    isHeading = true
-                }
-            }
-            let text = extractWText(pBlock)
-            if isHeading {
-                flush()
-                if !text.isEmpty { currentTitle = text }
-            } else if !text.isEmpty {
-                currentBody += text + "\n"
-            }
-        }
-        flush()
-
-        if chapters.isEmpty {
-            let all = extractWText(xml)
-            return [ReaderChapter(title: title, text: all, url: nil)]
+        let doc = DocxBodyParser()
+        let chapters = doc.parse(xml, baseTitle: title)
+        guard !chapters.isEmpty else {
+            // 兜底：直接抽取全部 <w:t> 文本（极少触发）
+            let all = Self.extractWText(xml)
+            return [ReaderChapter(title: title, text: all.isEmpty ? "（DOCX 无可读文本）" : all, url: nil)]
         }
         return chapters
     }
 
-    /// 取段落内全部 <w:t> 文本。
+    /// 取段落内全部 <w:t> 文本（仅作 parseDocx 的兜底）。
     private static func extractWText(_ block: String) -> String {
         guard let r = try? NSRegularExpression(pattern: #"<w:t[^>]*>([\s\S]*?)</w:t>"#, options: []) else { return "" }
         let ns = block as NSString
         let ms = r.matches(in: block, range: NSRange(location: 0, length: ns.length))
         return ms.map { ns.substring(with: $0.range(at: 1)) }.joined()
+    }
+
+    /// DOCX 正文 SAX 解析器：只收集 <w:t> 文本（忽略 <w:rPr>/<w:rFonts> 等格式标签与结构标签），
+    /// 以 <w:p> 为段落边界，<w:pStyle w:val="..."> 命中 heading/标题 时切章；
+    /// <w:tab>/<w:br>/<w:cr> 转为制表符/换行，<w:instrText> 域代码（如 TOC）跳过不输出。
+    private final class DocxBodyParser: NSObject, XMLParserDelegate {
+        private var chapters: [(title: String, body: String)] = []
+        private var currentTitle = ""
+        private var currentBody = ""
+        private var paraText = ""
+        private var paraStyle: String?
+        private var inText = false
+        private var inInstrText = false
+        private var baseTitle = ""
+
+        func parse(_ xml: String, baseTitle: String) -> [ReaderChapter] {
+            self.baseTitle = baseTitle
+            self.currentTitle = baseTitle
+            let data = xml.data(using: .utf8) ?? Data()
+            let parser = XMLParser(data: data)
+            parser.delegate = self
+            _ = parser.parse()
+            flushParagraph()
+            flushChapter()
+            return chapters.map { ReaderChapter(title: $0.title, text: $0.body, url: nil) }
+        }
+
+        func parser(_ p: XMLParser, didStartElement elementName: String,
+                    namespaceURI: String?, qualifiedName qName: String?,
+                    attributes attributeDict: [String: String]) {
+            let local = localName(elementName, qName)
+            switch local {
+            case "w:t": inText = true
+            case "w:instrtext": inInstrText = true
+            case "w:pstyle":
+                paraStyle = attributeDict["w:val"]?.lowercased()
+                          ?? attributeDict["val"]?.lowercased()
+            case "w:tab", "w:br", "w:cr":
+                if !inInstrText { paraText.append(local == "w:tab" ? "\t" : "\n") }
+            default: break
+            }
+        }
+
+        func parser(_ p: XMLParser, foundCharacters string: String) {
+            if inText && !inInstrText { paraText.append(string) }
+        }
+
+        func parser(_ p: XMLParser, didEndElement elementName: String,
+                    namespaceURI: String?, qualifiedName qName: String?) {
+            let local = localName(elementName, qName)
+            switch local {
+            case "w:t": inText = false
+            case "w:instrtext": inInstrText = false
+            case "w:p": flushParagraph()
+            case "w:tr": if !inInstrText { paraText.append("\n") }
+            case "w:tc": if !inInstrText { paraText.append("\t") }
+            default: break
+            }
+        }
+
+        private func flushParagraph() {
+            let text = paraText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let style = paraStyle
+            paraStyle = nil
+            paraText = ""
+            guard !text.isEmpty else { return }
+            let isHeading = (style?.contains("heading") ?? false) || (style?.contains("标题") ?? false)
+            if isHeading {
+                flushChapter()
+                currentTitle = text
+            } else {
+                currentBody.append(text + "\n")
+            }
+        }
+
+        private func flushChapter() {
+            let body = currentBody.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !body.isEmpty {
+                chapters.append((currentTitle.isEmpty ? baseTitle : currentTitle, body))
+            }
+            currentBody = ""
+        }
+
+        /// 去掉命名空间前缀（w:p → p / p），兼容有/无前缀两种文档写法
+        private func localName(_ elementName: String, _ qName: String?) -> String {
+            let name = qName ?? elementName
+            let comps = name.components(separatedBy: ":")
+            return (comps.last ?? name).lowercased()
+        }
     }
 
     // MARK: - MOBI / AZW3（PalmDOC）
