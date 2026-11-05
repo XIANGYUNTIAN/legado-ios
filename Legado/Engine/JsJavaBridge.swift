@@ -162,6 +162,9 @@ private final class ResultBox<T> {
     func toast(_ message: String)
     func longToast(_ message: String)
     func startBrowserAwait(_ url: String, _ title: String) -> String
+    /// legado `java.startBrowser(url,title)`：立即把地址交给外部浏览器播放，不阻塞。
+    /// 影视类书源不把播放地址写进 ruleContent 返回值，而是靠这个副作用传出。
+    func startBrowser(_ url: String, _ title: String)
     // webView（legado java.webView(url, tag, js)：加载页面并设置 Cookie，常用于过冷却/验证）
     func webView(_ url: String, _ tag: String, _ javaScript: String) -> String
     // 编码
@@ -464,6 +467,21 @@ private final class ResultBox<T> {
 
     func longToast(_ message: String) {
         toast(message)
+    }
+
+    /// 对应 legado `java.startBrowser(url, title)`。
+    ///
+    /// 影视类书源的正文规则普遍是这个形态：
+    /// `@js: java.startBrowser(baseUrl,title); '<p>【刷新正文】播放</p>'`
+    /// —— 播放地址通过副作用传出，返回值只是一段提示 HTML。iOS 侧不弹外部浏览器，
+    /// 而是记录「播放意图」交给内置播放器；key 用当前 baseUrl（章节页地址），
+    /// 与 VideoReaderView 中 engine.setBaseUrl(u.absoluteString) 对齐。
+    /// 旧版缺此方法 → JS 抛 `java.startBrowser is not a function`，整条正文链路中断。
+    func startBrowser(_ url: String, _ title: String) {
+        let target = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else { return }
+        VideoIntentStore.shared.record(page: baseUrl, url: target)
+        print("[js-startBrowser] \(target) (\(title))")
     }
 
     /// 对应 legado `java.webView(url, tag, js)`：加载页面并设置 Cookie，

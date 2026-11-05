@@ -161,14 +161,23 @@ struct BookSource: Codable, Identifiable, Equatable {
     /// 是否应进入视频播放器。
     /// 只看 bookSourceType==4 是不够的：真实流通的「在线视频网站」书源大量缺失该字段
     /// （导入后按默认 .text 处理），于是被丢进文本阅读器，m3u8 地址经内容清洗后当正文显示。
-    /// 补两类强信号：正文规则写了 sourceRegex / webJs（仅音视频源才有），或名称含影视关键词。
-    /// 书源详情仍可手动改类型，作为自动识别漏判时的兜底。
+    /// 补三类强信号：正文规则写了 sourceRegex / webJs（仅音视频源才有）、
+    /// 正文规则调用 `java.startBrowser` 或含 m3u8 字面量（影视源的标准播放写法）、
+    /// 名称含影视关键词。书源详情仍可手动改类型，作为自动识别漏判时的兜底。
+    ///
+    /// v38 实证：shareBookSource.json 的 6 个影视源 bookSourceType 全为 0，名称仅含 📺，
+    /// 播放地址由 `java.startBrowser(url,title)` 副作用传出，正文返回值是提示 HTML。
+    /// 旧判据全部落空 → 永远停在文本阅读器，改播放层无效。
     var isVideoLike: Bool {
         if bookSourceType == .video { return true }
         if ruleContent?.sourceRegex?.isEmpty == false { return true }
         if ruleContent?.webJs?.isEmpty == false { return true }
+        if let content = ruleContent?.content?.lowercased(),
+           content.contains("startbrowser") || content.contains("m3u8") {
+            return true
+        }
         let hints = ["视频", "影视", "电影", "剧集", "影院", "影音", "短剧",
-                     "m3u8", "video", "movie"]
+                     "资源采集", "📺", "📽", "m3u8", "video", "movie"]
         let text = "\(bookSourceName) \(bookSourceGroup ?? "")".lowercased()
         return hints.contains { text.contains($0) }
     }

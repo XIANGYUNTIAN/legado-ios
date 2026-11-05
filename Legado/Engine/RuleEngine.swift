@@ -639,6 +639,7 @@ final class RuleEngine {
     function getsurl(){ try{ return source.bookSourceUrl; }catch(e){ return ''; } }
     function gethd(){ try{ var h=source.header; if(!h) return {}; return JSON.parse(h); }catch(e){ return {}; } }
     function webView(a,b,c){ try{ return java.webView(b, c); }catch(e){ return ''; } }
+    function startBrowser(a,b){ try{ return java.startBrowser(a, b); }catch(e){ return ''; } }
     var Packages = { java: { net: { URLDecoder: { decode: function(s){ try{ return decodeURIComponent(s); }catch(e){ return s; } } } } } };
     """
 
@@ -672,6 +673,10 @@ final class RuleEngine {
             context.setObject(text, forKeyedSubscript: "result" as NSString)
         } else if let list = result as? [String] {
             context.setObject(list as NSArray, forKeyedSubscript: "result" as NSString)
+        } else if let list = result as? [Any] {
+            // JsonPath `$..vod_play_url` 等返回 [Any]；旧实现走 String(describing:)
+            // 会把数组变成 "[...]" 文本，JS 里的 result[0] 取到的是 "[" 而非首元素。
+            context.setObject(list as NSArray, forKeyedSubscript: "result" as NSString)
         } else if result == nil {
             context.setObject(NSNull(), forKeyedSubscript: "result" as NSString)
         } else {
@@ -679,8 +684,29 @@ final class RuleEngine {
         }
     }
 
+    /// 包装 JS 以求回「脚本完成值」。
+    ///
+    /// legado 的 evalJS 等价于全局 `eval`，脚本最后一条表达式的值就是规则结果。
+    /// 流通的影视类书源大量依赖此语义：
+    /// - 目录规则 `$..vod_play_url\n@js: … json.push(…); json`（末尾裸变量返回数组）；
+    /// - 正文规则 `@js: java.startBrowser(url,title); '<p>播放</p>'`（末尾字符串字面量）。
+    /// 旧实现包成 `(function(){ … })()`，函数无 return → 完成值丢失，目录解析为空、
+    /// 正文返回空串。改用直接 eval 保留完成值，同时仍由外层函数隔离作用域。
+    /// 含 `return` 的脚本不能进 eval（语法非法），保留原函数包装路径。
+    private static func wrapJSForCompletionValue(_ js: String) -> String {
+        if js.range(of: #"\breturn\b"#, options: .regularExpression) != nil {
+            return "(function(){ \(js) })()"
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: [js], options: []),
+              let literal = String(data: data, encoding: .utf8), literal.count >= 2 else {
+            return "(function(){ \(js) })()"
+        }
+        let encoded = String(literal.dropFirst().dropLast())
+        return "(function(){ return eval(\(encoded)); })()"
+    }
+
     private func evaluateJSInContext(_ context: JSContext, js: String) throws -> Any? {
-        let value = context.evaluateScript("(function(){ \(js) })()")
+        let value = context.evaluateScript(Self.wrapJSForCompletionValue(js))
         if let exception = context.exception {
             context.exception = nil
             throw RuleError.jsError(exception.toString())
@@ -688,6 +714,10 @@ final class RuleEngine {
         guard let value = value, !value.isUndefined, !value.isNull else {
             return nil
         }
+        // 保留数组 / 字典类型：BookListAnalyzer.items 需要按元素拆分，
+        // 旧实现一律 toString 会把 JSON 字符串数组压成逗号连接的单个字符串。
+        if value.isArray { return value.toArray() }
+        if let dict = value.toObject() as? [String: Any] { return dict }
         return value.toString() ?? ""
     }
     #endif

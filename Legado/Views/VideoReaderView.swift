@@ -242,6 +242,8 @@ struct VideoReaderView: View {
                 await setAsset(applySourceHeaders(to: chapterAsset), base: u)
                 return
             }
+            // 每次求值前清掉该章节的旧意图，防止切集时沿用上一集地址。
+            VideoIntentStore.shared.clear(page: u.absoluteString)
             let html = try await NetworkService.shared.fetchText(from: u, headers: headers)
             let engine = RuleEngine()
             engine.setSource(source)
@@ -250,11 +252,36 @@ struct VideoReaderView: View {
             engine.setBaseUrl(u.absoluteString)
             let contentRule = source.ruleContent?.content ?? ""
             let raw = (try? engine.getString(contentRule, content: html)) ?? ""
+
+            // v38：影视书源的播放地址常由 `java.startBrowser(url,title)` 的副作用传出，
+            // 正文返回值只是 `<p>【刷新正文】播放</p>` 之类的提示 HTML。优先消费该意图，
+            // 否则无论正文解析怎么加固都拿不到地址。
+            if let intent = VideoIntentStore.shared.consume(page: u.absoluteString) {
+                let (intentURL, _) = Self.parseURLOption(intent)
+                let intentAsset = VideoPlayAsset.parse(intentURL, base: u)
+                if intentAsset.isDirectMedia {
+                    await setAsset(applySourceHeaders(to: intentAsset), base: u)
+                    return
+                }
+                if let page = intentAsset.activeURL {
+                    await sniffAndResolve(chapterURL: page, fallback: intentAsset)
+                    return
+                }
+            }
+
             // 正文规则结果也可能是「URL + ##$##,{webView:true}」形式（legado 同语义）
             let (rawURLCandidate, rawWebView) = Self.parseURLOption(raw)
             let parsed = VideoPlayAsset.parse(rawURLCandidate, base: u)
             if parsed.isDirectMedia {
                 await setAsset(applySourceHeaders(to: parsed), base: u)
+                return
+            }
+            // 兜底：Xvideos / Jable 这类站点把 m3u8 明文写在 script 里，正文规则用的是
+            // `id.…@script.-3@all` 之类 iOS 未完整支持的抽取器，raw 为空或 JS 抛错。
+            // 直接从页面文本里捞第一个媒体直链，避免白白走 15 秒 WebView 嗅探。
+            if let found = Self.firstMediaURL(in: html, base: u) {
+                let direct = VideoPlayAsset.parse(found, base: u)
+                await setAsset(applySourceHeaders(to: direct), base: u)
                 return
             }
             // 形态二：正文规则给出播放页 / 未给出直链。在线视频站多为 JS 动态加载，
@@ -457,6 +484,33 @@ struct VideoReaderView: View {
             }
         }
         return (urlPart, webView)
+    }
+
+    /// 从页面文本里兜底捞明文媒体直链。
+    /// Xvideos / Jable 一类站点把 m3u8 直接写在 `<script>` 里，正文规则用的是
+    /// `id.content@script.-3@all` 这类 iOS 未完整支持的抽取器 → raw 为空或 JS 抛错。
+    /// 与其空等 15 秒嗅探，不如先按站点实际写法捞一次。只在正文解析失败后调用，
+    /// 不影响正常书源的规则语义。
+    static func firstMediaURL(in html: String, base: URL) -> String? {
+        let patterns: [String] = [
+            #"https?://[^\s"'<>]+\.m3u8[^\s"'<>]*"#,
+            #"setVideoUrl(?:Low|High)?\s*\(\s*['"]([^'"]+)['"]"#,
+            #"https?://[^\s"'<>]+\.mp4[^\s"'<>]*"#
+        ]
+        let ns = html as NSString
+        for pattern in patterns {
+            guard let rx = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+                  let m = rx.firstMatch(in: html, range: NSRange(location: 0, length: ns.length)) else { continue }
+            let group = m.numberOfRanges > 1 ? 1 : 0
+            let hit = ns.substring(with: m.range(at: group))
+                .replacingOccurrences(of: #"\\/"#, with: "/", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !hit.isEmpty else { continue }
+            if hit.hasPrefix("http://") || hit.hasPrefix("https://") { return hit }
+            if hit.hasPrefix("//") { return "https:" + hit }
+            if let abs = URL(string: hit, relativeTo: base)?.absoluteString { return abs }
+        }
+        return nil
     }
 
     // MARK: - 选集面板

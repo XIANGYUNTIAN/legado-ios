@@ -219,3 +219,55 @@ struct VideoPlayAsset {
         return out as String
     }
 }
+
+// MARK: - 书源 JS 播放意图
+
+/// 影视类书源通过 `java.startBrowser(url,title)` 传出的播放地址。
+///
+/// 背景：legado 的「资源采集 / Xvideos / Jable / 香蕉视频」这类书源，
+/// `ruleContent.content` 返回的是 `<p>【刷新正文】播放</p>` 之类提示文字，
+/// 真正的 m3u8 / mp4 地址由 `java.startBrowser` 的副作用交给系统浏览器。
+/// iOS 不能靠解析正文返回值拿到播放地址，必须在 JS 求值过程中捕获这个意图。
+///
+/// key 用触发时的 `java.baseUrl`（章节页地址），与 VideoReaderView 里
+/// `engine.setBaseUrl(u.absoluteString)` 一致，保证按章节精确匹配、切集不串台。
+final class VideoIntentStore {
+    static let shared = VideoIntentStore()
+
+    private let lock = NSLock()
+    private var byPage: [String: String] = [:]
+    private var recent: (page: String, url: String)?
+
+    func record(page: String, url: String) {
+        let key = page.trimmingCharacters(in: .whitespacesAndNewlines)
+        let target = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        byPage[key] = target
+        recent = (key, target)
+    }
+
+    /// 求值前清掉该章节的旧值，避免上一集地址残留。
+    func clear(page: String) {
+        lock.lock(); defer { lock.unlock() }
+        byPage.removeValue(forKey: page.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// 读取并移除（消费一次即可）。
+    func consume(page: String) -> String? {
+        let key = page.trimmingCharacters(in: .whitespacesAndNewlines)
+        lock.lock(); defer { lock.unlock() }
+        if let hit = byPage.removeValue(forKey: key) { return hit }
+        guard let r = recent, r.page == key else { return nil }
+        recent = nil
+        return r.url
+    }
+
+    /// 只读探测：文本阅读器据此判断是否要切到视频阅读器，不消费。
+    func peek(page: String) -> String? {
+        let key = page.trimmingCharacters(in: .whitespacesAndNewlines)
+        lock.lock(); defer { lock.unlock() }
+        if let hit = byPage[key] { return hit }
+        return recent?.page == key ? recent?.url : nil
+    }
+}

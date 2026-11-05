@@ -1140,7 +1140,10 @@ struct BookReaderView: View {
         let engine = RuleEngine()
         engine.setSource(source)
         engine.setBook(book)
-        engine.setBaseUrl(source.bookSourceUrl)
+        // baseUrl 必须是当前章节页地址，而不是书源根。影视书源正文 JS 普遍写
+        // `java.startBrowser(baseUrl,title)`——baseUrl 就是 m3u8 直链 / 播放页。
+        // 采集类书源的 bookSourceUrl 甚至只是「资源采集19」这类非 URL 名称。
+        engine.setBaseUrl(u.absoluteString)
         engine.setChapter(title: chapter.title, nextUrl: chapters[safe: index + 1]?.url)
         let contentRule = source.ruleContent?.content ?? ""
         var headers = sourceHeaders(source)
@@ -1188,10 +1191,14 @@ struct BookReaderView: View {
                                  index: Int,
                                  title: String) async throws -> String {
         let html = try await NetworkService.shared.fetchText(from: url, headers: headers)
+        // 404 换基准重试时 baseUrl 也要跟着换，否则 JS 里的 baseUrl 指向上一次的地址。
+        engine.setBaseUrl(url.absoluteString)
+        VideoIntentStore.shared.clear(page: url.absoluteString)
         let raw = (try? engine.getString(contentRule, content: html)) ?? ""
-        // 视频书源的「正文」是播放地址（m3u8 / mp4 / 播放页 URL），不是文本。
-        // 一旦识别到媒体载荷，立即切到视频阅读器，避免被下面的文本清洗当正文显示。
-        if Self.isVideoPayload(raw) {
+        // 视频书源的「正文」可能是播放地址，也可能只是一段提示 HTML——后者靠
+        // java.startBrowser 的副作用声明播放意图。两者任一命中即切到视频阅读器，
+        // 避免被下面的文本清洗当正文显示。
+        if Self.isVideoPayload(raw) || VideoIntentStore.shared.peek(page: url.absoluteString) != nil {
             await MainActor.run { forceVideoPlayback = true }
             return ""
         }
