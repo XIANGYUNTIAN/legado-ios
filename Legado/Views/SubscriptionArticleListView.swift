@@ -61,7 +61,8 @@ struct SubscriptionArticleListView: View {
 /// singleUrl 模式：源 URL 本身就是一个可浏览页面（如地址发布页/导航页），
    /// 对齐 legado Android 行为：直接在 WebView 中打开，不走 RSS/Atom 列表解析。
    private var singleUrlView: some View {
-       SingleUrlWebView(url: source.sourceUrl, title: source.sourceName, rssSourceStore: rssSourceStore)
+       SingleUrlWebView(url: source.sourceUrl, title: source.sourceName)
+           .environmentObject(rssSourceStore)
    }
 
    private var articleList: some View {
@@ -269,6 +270,11 @@ struct SingleUrlWebView: View {
     @EnvironmentObject private var sourceStore: BookSourceStore
     @EnvironmentObject private var rssSourceStore: SubscriptionSourceStore
     @StateObject private var coordinator = SingleUrlWebViewCoordinator()
+
+    init(url: String, title: String) {
+        self.url = url
+        self.title = title
+    }
 
     var body: some View {
         NavigationStack {
