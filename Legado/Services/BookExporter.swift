@@ -43,13 +43,26 @@ struct BookExporter {
     }
 
     /// 写入临时目录并返回文件 URL（供 UIActivityViewController 分享 / 存储到文件）。
-    /// 文件名取自 safeName，统一加 .txt 后缀。
+    /// 旧实现有三处隐患：try? 静默吞掉写失败、超长书名超出单文件名长度上限、
+    /// 同名书籍反复导出复用同一路径。任一命中都会把「不存在 / 过期」的 URL 交给分享面板，
+    /// 表现为点导出没反应。此处保证返回的 URL 指向本次真实写出的文件。
     static func writeTxtFile(named safeName: String, text: String) -> URL {
-        let clean = safeName.filter { !$0.isWhitespace && $0 != "/" && $0 != ":" && $0 != "\\" }
+        var clean = safeName.filter { !$0.isWhitespace && $0 != "/" && $0 != ":" && $0 != "\\" }
+        if clean.count > 60 { clean = String(clean.prefix(60)) }
         let base = clean.isEmpty ? "book" : clean
-        let fileName = "\(base).txt"
-        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
-        try? text.write(to: tmp, atomically: true, encoding: .utf8)
-        return tmp
+        let fileName = "\(base)_\(UUID().uuidString.prefix(6)).txt"
+        let fm = FileManager.default
+        let payload = text.isEmpty ? "（导出内容为空）" : text
+        var target = fm.temporaryDirectory.appendingPathComponent(fileName)
+        do {
+            try payload.write(to: target, atomically: true, encoding: .utf8)
+        } catch {
+            // 临时目录不可写时退到 Documents，避免把不存在的 URL 交给分享面板。
+            if let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
+                target = docs.appendingPathComponent(fileName)
+                try? payload.write(to: target, atomically: true, encoding: .utf8)
+            }
+        }
+        return target
     }
 }

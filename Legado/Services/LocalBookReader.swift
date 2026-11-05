@@ -185,19 +185,47 @@ struct LocalBookReader {
         let doc = DocxBodyParser()
         let chapters = doc.parse(xml, baseTitle: title)
         guard !chapters.isEmpty else {
-            // 兜底：直接抽取全部 <w:t> 文本（极少触发）
+            // 兜底：SAX 未产出章节时，按「段落 → <w:t>」严格抽取并按章节标题切分。
             let all = Self.extractWText(xml)
-            return [ReaderChapter(title: title, text: all.isEmpty ? "（DOCX 无可读文本）" : all, url: nil)]
+            if all.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return [ReaderChapter(title: title, text: "（DOCX 未提取到可读正文）", url: nil)]
+            }
+            return splitPlainText(all, title: title)
         }
         return chapters
     }
 
-    /// 取段落内全部 <w:t> 文本（仅作 parseDocx 的兜底）。
+    /// 兜底抽取：按 <w:p> 分段，段内只取严格的 <w:t>…</w:t> 文本节点。
+    /// 关键：<w:t 之后必须紧跟空白或 '>'，否则 <w:tblPr>/<w:tblBorders>/<w:top>
+    /// 等以 w:t 开头的格式标签会被误当文本节点，把原始 XML 当正文输出（v34 的症状）。
     private static func extractWText(_ block: String) -> String {
-        guard let r = try? NSRegularExpression(pattern: #"<w:t[^>]*>([\s\S]*?)</w:t>"#, options: []) else { return "" }
         let ns = block as NSString
-        let ms = r.matches(in: block, range: NSRange(location: 0, length: ns.length))
-        return ms.map { ns.substring(with: $0.range(at: 1)) }.joined()
+        guard let paraRe = try? NSRegularExpression(
+                pattern: #"<(?:w:)?p(?:\s[^>]*)?>([\s\S]*?)</(?:w:)?p>"#, options: []),
+              let textRe = try? NSRegularExpression(
+                pattern: #"<(?:w:)?t(?:\s[^>]*)?>([\s\S]*?)</(?:w:)?t>"#, options: []) else {
+            return ""
+        }
+        var lines: [String] = []
+        for p in paraRe.matches(in: block, range: NSRange(location: 0, length: ns.length)) {
+            let body = ns.substring(with: p.range(at: 1))
+            let bns = body as NSString
+            let ms = textRe.matches(in: body, range: NSRange(location: 0, length: bns.length))
+            let line = ms.map { bns.substring(with: $0.range(at: 1)) }.joined()
+            if !line.isEmpty { lines.append(Self.decodeXmlEntities(line)) }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// 兜底链路的 XML 实体解码（SAX 链路由 XMLParser 自动完成）。
+    private static func decodeXmlEntities(_ s: String) -> String {
+        var out = s
+        let pairs = [("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"),
+                     ("&quot;", "\""), ("&apos;", "'"), ("&nbsp;", " ")]
+        for (entity, ch) in pairs {
+            out = out.replacingOccurrences(of: entity, with: ch)
+        }
+        return out
     }
 
     /// DOCX 正文 SAX 解析器：只收集 <w:t> 文本（忽略 <w:rPr>/<w:rFonts> 等格式标签与结构标签），
@@ -229,14 +257,17 @@ struct LocalBookReader {
                     namespaceURI: String?, qualifiedName qName: String?,
                     attributes attributeDict: [String: String]) {
             let local = localName(elementName, qName)
+            // localName 已剥掉 "w:" 前缀，switch 必须用「本地名」比较。
+            // v34 误用 "w:t"/"w:p" 全名，所有分支永不命中 → SAX 采不到任何正文，
+            // 于是回退到宽松正则把 <w:tblBorders> 等标签属性当正文（阅读 / 导出满屏 XML）。
             switch local {
-            case "w:t": inText = true
-            case "w:instrtext": inInstrText = true
-            case "w:pstyle":
+            case "t": inText = true
+            case "instrtext", "deltext": inInstrText = true
+            case "pstyle":
                 paraStyle = attributeDict["w:val"]?.lowercased()
                           ?? attributeDict["val"]?.lowercased()
-            case "w:tab", "w:br", "w:cr":
-                if !inInstrText { paraText.append(local == "w:tab" ? "\t" : "\n") }
+            case "tab", "br", "cr":
+                if !inInstrText { paraText.append(local == "tab" ? "\t" : "\n") }
             default: break
             }
         }
@@ -249,11 +280,11 @@ struct LocalBookReader {
                     namespaceURI: String?, qualifiedName qName: String?) {
             let local = localName(elementName, qName)
             switch local {
-            case "w:t": inText = false
-            case "w:instrtext": inInstrText = false
-            case "w:p": flushParagraph()
-            case "w:tr": if !inInstrText { paraText.append("\n") }
-            case "w:tc": if !inInstrText { paraText.append("\t") }
+            case "t": inText = false
+            case "instrtext", "deltext": inInstrText = false
+            case "p": flushParagraph()
+            case "tr": if !inInstrText { paraText.append("\n") }
+            case "tc": if !inInstrText { paraText.append("\t") }
             default: break
             }
         }
