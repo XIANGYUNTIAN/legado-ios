@@ -158,6 +158,28 @@ struct BookSource: Codable, Identifiable, Equatable {
         }
     }
 
+    /// 是否应进入视频播放器。
+    /// 只看 bookSourceType==4 是不够的：真实流通的「在线视频网站」书源大量缺失该字段
+    /// （导入后按默认 .text 处理），于是被丢进文本阅读器，m3u8 地址经内容清洗后当正文显示。
+    /// 补两类强信号：正文规则写了 sourceRegex / webJs（仅音视频源才有），或名称含影视关键词。
+    /// 书源详情仍可手动改类型，作为自动识别漏判时的兜底。
+    var isVideoLike: Bool {
+        if bookSourceType == .video { return true }
+        if ruleContent?.sourceRegex?.isEmpty == false { return true }
+        if ruleContent?.webJs?.isEmpty == false { return true }
+        let hints = ["视频", "影视", "电影", "剧集", "m3u8", "video", "movie"]
+        let text = "\(bookSourceName) \(bookSourceGroup ?? "")".lowercased()
+        return hints.contains { text.contains($0) }
+    }
+
+    /// 书源地址规范化比较：导入时的首尾空白、末尾斜杠、大小写差异，
+    /// 都会让 book.sourceId 与 bookSourceUrl 的精确相等判定失败（表现为「书源不存在」）。
+    static func normalizedURL(_ s: String) -> String {
+        var t = s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        while t.hasSuffix("/") && t.count > 8 { t.removeLast() }
+        return t
+    }
+
     /// exploreUrl 是否为可直接请求的链接。
     /// legado 的 exploreUrl 大量是 `@js:` / 多行 / 带 {{}} 的规则串，
     /// 直接交给 URLSession 会抛 "unsupported URL"（打开已存书源即报错）。
@@ -280,8 +302,15 @@ struct BookSource: Codable, Identifiable, Equatable {
             return BookSourceType(rawValue: i) ?? .text
         }
         if let s = try? c.decodeIfPresent(String.self, forKey: .bookSourceType) {
-            let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
-            return BookSourceType(rawValue: Int(trimmed) ?? 0) ?? .text
+            let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let i = Int(t), let type = BookSourceType(rawValue: i) { return type }
+            switch t.lowercased() {
+            case "视频", "video": return .video
+            case "音频", "audio": return .audio
+            case "图片", "漫画", "image": return .image
+            case "文件", "file": return .file
+            default: return .text
+            }
         }
         return .text
     }

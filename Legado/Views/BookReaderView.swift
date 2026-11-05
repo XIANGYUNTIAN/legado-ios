@@ -174,11 +174,18 @@ struct BookReaderView: View {
         "\(settings.fontFamily.rawValue)|\(settings.customFontName)|\(settings.fontSize)|\(settings.letterSpacing)|\(settings.lineSpacing)|\(settings.justified)|\(settings.theme.rawValue)|\(settings.isNight)|\(settings.showChapterHeader)"
     }
 
+    /// 书源匹配改用规范化 URL，避免末尾斜杠 / 空白 / 大小写差异导致书源「找不到」。
+    private func matchedSource() -> BookSource? {
+        guard let sid = book.sourceId, !sid.isEmpty else { return nil }
+        let key = BookSource.normalizedURL(sid)
+        return sourceStore.sources.first { BookSource.normalizedURL($0.bookSourceUrl) == key }
+    }
+
     var body: some View {
         // 视频书源：整页走独立视频阅读器，不触碰文本引擎
         // （文本阅读器对 ruleContent 结果一律走文本清洗，会把播放地址当正文）
-        if let videoSource = sourceStore.sources.first(where: { $0.bookSourceUrl == book.sourceId }),
-           videoSource.bookSourceType == .video {
+        // isVideoLike 同时覆盖缺失 bookSourceType 的第三方视频站书源。
+        if let videoSource = matchedSource(), videoSource.isVideoLike {
             return AnyView(VideoReaderView(book: book, source: videoSource))
         }
         return AnyView(bodyContent)
@@ -1056,7 +1063,7 @@ struct BookReaderView: View {
     /// 用书源 ruleToc 抓取目录（纯函数，不修改 @State）。
     /// bookUrl 可能是相对路径（如 /book/12345.html），需拼接书源基准 URL。
     private func fetchRuleChapters() async throws -> [ReaderChapter] {
-        guard let source = sourceStore.sources.first(where: { $0.bookSourceUrl == book.sourceId }) else {
+        guard let source = matchedSource() else {
             throw RuleError.unsupportedMode("书源不存在或已删除（sourceId=\(book.sourceId ?? "nil")）")
         }
         guard let rules = source.ruleToc, !rules.isEmpty else {
@@ -1116,7 +1123,7 @@ struct BookReaderView: View {
         }
         // 章节 URL 可能是相对路径（如 /chapter/123.html），需拼接基准 URL。
         // 解析基准（对齐 legado）：书籍详情页 URL 优先，书源根兜底。
-        guard let source = sourceStore.sources.first(where: { $0.bookSourceUrl == book.sourceId }) else {
+        guard let source = matchedSource() else {
             return "书源不存在或已删除"
         }
         let bookURL = resolveURL(book.bookUrl ?? "", base: source.bookSourceURL)

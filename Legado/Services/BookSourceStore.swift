@@ -153,6 +153,14 @@ final class BookSourceStore: ObservableObject {
         persist()
     }
 
+    /// 手动指定书源类型（书源详情里切换）。第三方视频书源常缺 bookSourceType 字段，
+    /// 自动识别漏判时可在此强制设为「视频」，无需重新导入书源。
+    func setType(_ type: BookSourceType, for source: BookSource) {
+        guard let index = sources.firstIndex(where: { $0.id == source.id }) else { return }
+        sources[index].bookSourceType = type
+        persist()
+    }
+
     func delete(at offsets: IndexSet) {
         sources.remove(atOffsets: offsets)
         persist()

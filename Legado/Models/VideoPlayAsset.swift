@@ -53,6 +53,32 @@ struct VideoPlayAsset {
         activeURL != nil || (inlineM3U8?.isEmpty == false)
     }
 
+    /// 仅按明确后缀 / query 判定直链，用于「章节 URL 本身就是媒体文件」的场景。
+    /// 不做内容特征猜测，避免把 /video/123.html 这类播放页当媒体。
+    var isExplicitMediaURL: Bool {
+        guard let u = activeURL,
+              let comps = URLComponents(url: u, resolvingAgainstBaseURL: false) else { return false }
+        let path = comps.path.lowercased()
+        let query = (comps.query ?? "").lowercased()
+        let exts = [".m3u8", ".mp4", ".mpd", ".flv", ".ts", ".m4v", ".webm", ".mkv", ".mov", ".avi", ".m4a", ".mp3"]
+        return exts.contains(where: { path.hasSuffix($0) })
+            || query.contains(".m3u8") || query.contains(".mp4")
+    }
+
+    /// 是否为可直接交给播放器的媒体地址（而非需要 WebView 嗅探的播放页）。
+    /// 在线视频站书源的正文规则常返回 /play/123.html 这类页面 URL，旧实现把它
+    /// 一律猜成 .mp4、isPlayable 判 true → AVPlayer 播 HTML 黑屏，嗅探分支永不触发。
+    var isDirectMedia: Bool {
+        if inlineM3U8?.isEmpty == false { return true }
+        if isExplicitMediaURL { return true }
+        guard let u = activeURL,
+              let comps = URLComponents(url: u, resolvingAgainstBaseURL: false) else { return false }
+        let path = comps.path.lowercased()
+        let query = (comps.query ?? "").lowercased()
+        if path.hasSuffix(".html") || path.hasSuffix(".htm") { return false }
+        return path.contains("m3u8") || query.contains("m3u8")
+    }
+
     /// 原生 AVPlayer 不支持的类型（DASH / FLV）
     var needsUnsupportedEngine: Bool {
         type == .dash || type == .flv
@@ -128,12 +154,68 @@ struct VideoPlayAsset {
     }
 
     private static func guessType(from url: URL?) -> VideoStreamType {
-        guard let url, let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.path.lowercased() else {
+        guard let url, let comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             return .other
         }
-        if path.hasSuffix(".m3u8") { return .hls }
-        if path.hasSuffix(".mpd") { return .dash }
-        if path.hasSuffix(".flv") { return .flv }
+        let path = comps.path.lowercased()
+        let query = (comps.query ?? "").lowercased()
+        if path.contains(".m3u8") || query.contains("m3u8") { return .hls }
+        if path.hasSuffix(".mpd") || query.contains(".mpd") { return .dash }
+        if path.hasSuffix(".flv") || query.contains(".flv") { return .flv }
         return .mp4
+    }
+
+    /// 合并书源级防盗链头；规则 JSON 自带的 headers 优先。
+    func mergingHeaders(_ extra: [String: String]) -> VideoPlayAsset {
+        var merged = extra
+        for (k, v) in headers { merged[k] = v }
+        return VideoPlayAsset(url: url, type: type, headers: merged,
+                              qualities: qualities, subtitles: subtitles,
+                              inlineM3U8: inlineM3U8, raw: raw)
+    }
+
+    /// 把内联 m3u8 文本落地为本地 playlist（相对分片 / URI 属性按 base 补全），
+    /// 否则只有文本没有 URL，AVPlayer 拿到的是空白画面。
+    func materializeInlineM3U8(base: URL?) -> URL? {
+        guard let text = inlineM3U8, !text.isEmpty else { return nil }
+        var lines: [String] = []
+        for line in text.components(separatedBy: .newlines) {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.isEmpty { lines.append(line); continue }
+            if t.hasPrefix("#") {
+                lines.append(Self.resolveAttributeURIs(in: line, base: base))
+            } else if !t.lowercased().hasPrefix("http://") && !t.lowercased().hasPrefix("https://"),
+                      let abs = base.flatMap({ URL(string: t, relativeTo: $0)?.absoluteString }) {
+                lines.append(abs)
+            } else {
+                lines.append(line)
+            }
+        }
+        let payload = lines.joined(separator: "\n")
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("legado_\(UUID().uuidString.prefix(8)).m3u8")
+        do {
+            try payload.write(to: file, atomically: true, encoding: .utf8)
+            return file
+        } catch {
+            return nil
+        }
+    }
+
+    /// 补全 m3u8 中 #EXT-X-KEY / #EXT-X-MAP 的 URI="..." 相对地址。
+    private static func resolveAttributeURIs(in line: String, base: URL?) -> String {
+        guard let base = base,
+              let rx = try? NSRegularExpression(pattern: #"URI="([^"]+)""#, options: []) else { return line }
+        let ns = line as NSString
+        let matches = rx.matches(in: line, range: NSRange(location: 0, length: ns.length))
+        var out = line as NSString
+        for m in matches.reversed() {
+            let rel = ns.substring(with: m.range(at: 1))
+            if !rel.lowercased().hasPrefix("http"),
+               let abs = URL(string: rel, relativeTo: base)?.absoluteString {
+                out = out.replacingCharacters(in: m.range(at: 1), with: abs) as NSString
+            }
+        }
+        return out as String
     }
 }

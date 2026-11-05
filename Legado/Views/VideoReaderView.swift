@@ -159,10 +159,20 @@ struct VideoReaderView: View {
 
     private func loadToc() async {
         guard let rules = source.ruleToc, !rules.isEmpty else {
+            // 视频站书源大量没有 ruleToc：搜索结果的 bookUrl 本身就是播放页。
+            // 降级为「单集」直接解析播放地址，而不是报错退出。
+            guard let single = resolveURL(book.bookUrl ?? "", base: source.bookSourceURL) else {
+                await MainActor.run {
+                    errorMessage = "书源「\(source.bookSourceName)」缺少目录规则，且书籍没有可用的详情页地址"
+                    isLoading = false
+                }
+                return
+            }
             await MainActor.run {
-                errorMessage = "书源「\(source.bookSourceName)」缺少目录规则（ruleToc 为空），无法阅读"
+                chapters = [ReaderChapter(title: book.displayTitle, text: nil, url: single.absoluteString)]
                 isLoading = false
             }
+            await loadContent(index: 0)
             return
         }
         guard let bookUrlStr = book.bookUrl,
@@ -226,34 +236,51 @@ struct VideoReaderView: View {
                let ref = book.bookUrl.flatMap({ URLSanitizer.sanitize($0) })?.absoluteString {
                 headers["Referer"] = ref
             }
+            // 形态一：目录里直接给出媒体直链（视频站常见），无须抓页面。
+            let chapterAsset = VideoPlayAsset.parse(cleanURL, base: u)
+            if !useWebViewForChapter, chapterAsset.isExplicitMediaURL {
+                await setAsset(applySourceHeaders(to: chapterAsset), base: u)
+                return
+            }
             let html = try await NetworkService.shared.fetchText(from: u, headers: headers)
             let engine = RuleEngine()
             engine.setSource(source)
             engine.setBook(book)
-            engine.setBaseUrl(source.bookSourceUrl)
+            // 规则里的相对路径应以当前章节页为基准，而非书源首页。
+            engine.setBaseUrl(u.absoluteString)
             let contentRule = source.ruleContent?.content ?? ""
             let raw = (try? engine.getString(contentRule, content: html)) ?? ""
             // 正文规则结果也可能是「URL + ##$##,{webView:true}」形式（legado 同语义）
             let (rawURLCandidate, rawWebView) = Self.parseURLOption(raw)
             let parsed = VideoPlayAsset.parse(rawURLCandidate, base: u)
-            if parsed.isPlayable {
-                await setAsset(parsed)
-            } else if let sniffRule = source.ruleContent,
-                      (sniffRule.sourceRegex?.isEmpty == false
-                       || sniffRule.webJs?.isEmpty == false
-                       || useWebViewForChapter
-                       || rawWebView) {
-                await sniffAndResolve(chapterURL: u)
-            } else {
-                await setAsset(parsed)
+            if parsed.isDirectMedia {
+                await setAsset(applySourceHeaders(to: parsed), base: u)
+                return
             }
+            // 形态二：正文规则给出播放页 / 未给出直链。在线视频站多为 JS 动态加载，
+            // 此时无论书源是否显式写了 sourceRegex / webJs，都走 WebView 嗅探。
+            // 旧实现只在「解析不出任何 URL」时才嗅探，播放页 URL 被 isPlayable 误判成
+            // 可播放并直接丢给 AVPlayer（黑屏），嗅探分支实际不可达。
+            let sniffPage = (rawWebView || useWebViewForChapter)
+                ? (URLSanitizer.sanitize(rawURLCandidate) ?? u)
+                : u
+            await sniffAndResolve(chapterURL: sniffPage, fallback: parsed)
         } catch {
-            await MainActor.run {
-                asset = nil
-                errorMessage = "解析播放地址失败：\(error.localizedDescription)"
-                isLoadingContent = false
-            }
+            // 直连抓取被反爬拦下时，WebView 带完整浏览器环境仍可能拿到直链。
+            await sniffAndResolve(chapterURL: u, fallback: VideoPlayAsset.parse("", base: u))
         }
+    }
+
+    /// HLS 播放注入书源防盗链头。只对 HLS 启用：HeaderProxyLoader 会把每个请求
+    /// 完整下载后再切片返回，MP4 大文件走代理会严重拖慢播放，故 MP4 保持直连。
+    private func applySourceHeaders(to a: VideoPlayAsset) -> VideoPlayAsset {
+        guard a.type == .hls || a.inlineM3U8?.isEmpty == false else { return a }
+        let extra = sourceHeaders.filter { entry in
+            let k = entry.key.lowercased()
+            return k == "referer" || k == "origin" || k == "user-agent"
+                || k == "cookie" || k == "authorization"
+        }
+        return extra.isEmpty ? a : a.mergingHeaders(extra)
     }
 
     /// 目录解析（逐元素求值 chapterList → chapterName / chapterUrl）
@@ -310,17 +337,26 @@ struct VideoReaderView: View {
         player?.play()
     }
 
-    /// 设置播放资产并触发原生 AVPlayer 播放（软解格式由 SwiftUI 视图负责，此处跳过）
-    private func setAsset(_ a: VideoPlayAsset) async {
+    /// 设置播放资产并触发原生 AVPlayer 播放（软解格式由 SwiftUI 视图负责，此处跳过）。
+    /// 内联 m3u8 先落地为本地 playlist 再交给播放器，否则只有文本没有 URL → 空白画面。
+    private func setAsset(_ a: VideoPlayAsset, base: URL? = nil) async {
         await MainActor.run {
-            asset = a
+            var resolved = a
+            if resolved.activeURL == nil, let local = a.materializeInlineM3U8(base: base) {
+                // 本地 file:// playlist 不能再套自定义 scheme 代理，否则资源加载器会把
+                // 本地文件当远程请求改写；其中分片已补全为绝对 URL，直接播即可。
+                resolved = VideoPlayAsset(url: local, type: .hls, headers: [:],
+                                          qualities: [], subtitles: [], inlineM3U8: nil, raw: a.raw)
+            }
+            asset = resolved
             isLoadingContent = false
-            buildAndPlay(a)
+            buildAndPlay(resolved)
         }
     }
 
-    /// 正文规则未解析出直链、但书源配置了嗅探规则时，启动 WebView 嗅探章节页获取媒体直链
-    private func sniffAndResolve(chapterURL: URL) async {
+    /// 正文规则未给出直链时，启动 WebView 加载章节页嗅探媒体直链。
+    /// 不再要求书源显式配置 sourceRegex / webJs：在线视频站绝大多数靠 JS 动态插 video 标签。
+    private func sniffAndResolve(chapterURL: URL, fallback: VideoPlayAsset) async {
         await MainActor.run { isLoadingContent = true; errorMessage = nil }
         let candidates = await withCheckedContinuation { cont in
             sniffer.sniff(pageURL: chapterURL,
@@ -332,12 +368,13 @@ struct VideoReaderView: View {
         guard let first = candidates.first else {
             await MainActor.run {
                 asset = nil
-                errorMessage = "嗅探未找到可用的媒体直链（页面可能为纯文本、需登录，或视频由 JS 动态加载未被捕获）"
+                errorMessage = "嗅探未找到可用的媒体直链（页面可能需登录、有反爬，或视频由加密 JS 加载）。\n正文规则返回：\(fallback.raw.prefix(160))"
                 isLoadingContent = false
             }
             return
         }
-        await setAsset(VideoPlayAsset.parse(first.absoluteString, base: chapterURL))
+        await setAsset(applySourceHeaders(to: VideoPlayAsset.parse(first.absoluteString, base: chapterURL)),
+                       base: chapterURL)
     }
 
     /// 构造 AVPlayerItem：无防盗链头直接用 URL；否则经 HeaderProxyLoader 代理注入头。
@@ -457,6 +494,8 @@ final class HeaderProxyLoader: NSObject, AVAssetResourceLoaderDelegate {
     static let scheme = "legadohdr"
     private let headers: [String: String]
     private var tasks: [AVAssetResourceLoadingRequest: URLSessionDataTask] = [:]
+    /// 自定义 scheme 会抹掉原始协议，按 host 记下来，避免 HTTP 站点被强制改成 HTTPS。
+    private var schemeByHost: [String: String] = [:]
 
     init(headers: [String: String]) {
         self.headers = headers
@@ -465,6 +504,9 @@ final class HeaderProxyLoader: NSObject, AVAssetResourceLoaderDelegate {
     /// 把原始 URL 改写到自定义 scheme，触发资源加载代理
     func proxiedURL(for original: URL) -> URL? {
         guard var c = URLComponents(url: original, resolvingAgainstBaseURL: false) else { return nil }
+        if let host = original.host?.lowercased() {
+            schemeByHost[host] = original.scheme?.lowercased() ?? "https"
+        }
         c.scheme = HeaderProxyLoader.scheme
         return c.url
     }
@@ -546,7 +588,7 @@ final class HeaderProxyLoader: NSObject, AVAssetResourceLoaderDelegate {
 
     private func originalURL(_ custom: URL) -> URL? {
         guard var c = URLComponents(url: custom, resolvingAgainstBaseURL: false) else { return nil }
-        c.scheme = "https"
+        c.scheme = schemeByHost[custom.host?.lowercased() ?? ""] ?? "https"
         return c.url
     }
 
@@ -562,6 +604,9 @@ final class HeaderProxyLoader: NSObject, AVAssetResourceLoaderDelegate {
             let urlString = ns.substring(with: match.range)
             guard let u = URL(string: urlString),
                   var c = URLComponents(url: u, resolvingAgainstBaseURL: false) else { continue }
+            if let host = u.host?.lowercased() {
+                schemeByHost[host] = u.scheme?.lowercased() ?? "https"
+            }
             c.scheme = HeaderProxyLoader.scheme
             if let proxied = c.url?.absoluteString {
                 mutable.replaceCharacters(in: match.range, with: proxied)

@@ -24,7 +24,11 @@ final class WebViewSniffer: NSObject, WKNavigationDelegate, WKScriptMessageHandl
       function post(u){
         if(!u) return;
         u = String(u);
+        // video/src、fetch、XHR 里大量是相对地址或协议相对地址，先补全成绝对 URL，
+        // 否则以 'http' 开头的硬判断会直接丢掉绝大多数真实流地址。
+        try { u = new URL(u, location.href).href; } catch(e){}
         if(u.indexOf('http') !== 0) return;
+        if(!mediaExt(u)) return;
         window.webkit.messageHandlers.sniffer.postMessage(u);
       }
       function mediaExt(u){
@@ -156,12 +160,12 @@ final class WebViewSniffer: NSObject, WKNavigationDelegate, WKScriptMessageHandl
             let range = NSRange(key.startIndex..., in: key)
             if rx.firstMatch(in: key, range: range) == nil { return }
         } else {
-            let lower = key.lowercased()
-            let isMedia = lower.contains(".mp4") || lower.contains(".m3u8")
-                || lower.contains(".mpd") || lower.contains(".flv") || lower.contains(".ts")
-                || lower.contains(".webm") || lower.contains(".mkv")
-                || lower.contains("m3u8") || lower.contains("mpd")
-            if !isMedia { return }
+            // JS 侧已用 mediaExt 做过媒体特征初筛（含无扩展名的 play/media/video API）。
+            // 这里只排除静态资源，旧白名单会把 /api/play?token=… 这类直链误杀。
+            let path = URLComponents(string: key)?.path.lowercased() ?? key.lowercased()
+            let blocked = [".css", ".js", ".png", ".jpg", ".jpeg", ".gif",
+                           ".webp", ".svg", ".woff", ".woff2", ".ico"]
+            if blocked.contains(where: { path.hasSuffix($0) }) { return }
         }
         seen.insert(key)
         candidates.append(url)
@@ -183,10 +187,10 @@ final class WebViewSniffer: NSObject, WKNavigationDelegate, WKScriptMessageHandl
         if let js = webJs, !js.isEmpty {
             webView.evaluateJavaScript(js) { [weak self] result, _ in
                 self?.collectWebJsResult(result)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self?.finish() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4) { self?.finish() }
             }
         } else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
                 self?.finish()
             }
         }

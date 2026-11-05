@@ -9,7 +9,16 @@ struct SourceDetailView: View {
             Section("基本信息") {
                 LabeledContent("名称", value: source.bookSourceName.isEmpty ? "未命名" : source.bookSourceName)
                 LabeledContent("分组", value: source.bookSourceGroup ?? "未分组")
-                LabeledContent("类型", value: source.typeName)
+                Picker("类型", selection: Binding(
+                    get: { store.sources.first(where: { $0.id == source.id })?.bookSourceType ?? source.bookSourceType },
+                    set: { store.setType($0, for: source) }
+                )) {
+                    Text("文本").tag(BookSourceType.text)
+                    Text("音频").tag(BookSourceType.audio)
+                    Text("图片").tag(BookSourceType.image)
+                    Text("文件").tag(BookSourceType.file)
+                    Text("视频").tag(BookSourceType.video)
+                }
                 LabeledContent("地址", value: source.bookSourceUrl)
                 Toggle("启用", isOn: Binding(
                     get: { source.enabled },
