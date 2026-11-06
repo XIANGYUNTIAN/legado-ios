@@ -40,6 +40,14 @@ struct SiteShortcut: Identifiable {
     let searchURL: URL?
 }
 
+/// 站内搜索 0 命中时的保底结果行（纯值，可跨 detached Task 传递）
+struct SiteFallbackRow: Sendable {
+    let name: String
+    let url: String
+    let sourceId: String
+    let sourceName: String
+}
+
 /// 一个 sheet item 承载两种去向，避免两个 .sheet 同时争抢 presented 状态。
 enum SearchPlaybackRoute: Identifiable {
     case episodes(VodEpisodeList)
@@ -87,6 +95,8 @@ struct BookSearchView: View {
     @State private var siteSearching = false
     @State private var siteResults: [ExploredBook] = []
     @State private var siteTask: Task<Void, Never>?
+    /// 逐站站内搜索诊断：哪个站命中几条、哪个站连搜索页都没拿到
+    @State private var siteDiagnostics: [String] = []
 
     /// 可搜索的书源：配置了含 {{key}} 的 searchUrl 且具备 ruleSearch.bookList
     private var searchableSources: [BookSource] {
@@ -136,26 +146,39 @@ struct BookSearchView: View {
         }.prefix(12))
     }
 
-    /// 参与通用站内搜索的影视站点：优先影视词命中，最多 10 个控制并发量。
-    /// 与「站点直达」同源，保证黄果剧场这类名称带「剧场」的站一定被查。
+    /// 参与通用站内搜索的影视站点。
+    /// v46 缺陷：按书源名称排序取前 10，720 源里排在末尾但真正能用的影视站
+    /// 从未被查；且「站点直达」列出的站与被查的站不是同一批。现在以用户可见的
+    /// 站点直达列表为优先，再补其他影视源，上限 24。
     private var siteTargets: [SiteTarget] {
         let list = sourceStore.sources.filter { s in
-            guard s.enabled, s.siteURLs.first != nil else { return false }
+            guard s.enabled, !s.siteURLs.isEmpty else { return false }
             return !s.supportsSearch || s.isVideoLike || s.isComicLike
                 || BookSource.looksLikeMediaName(s.bookSourceName)
+                || BookSource.looksLikeMediaName(s.bookSourceComment)
         }
+        let visible = Set(siteShortcuts.compactMap { item -> String? in
+            guard let first = item.id.split(separator: "|", maxSplits: 1).first else {
+                return nil
+            }
+            return String(first)
+        })
         let sorted = list.sorted { a, b in
+            let av = visible.contains(a.bookSourceUrl) ? 1 : 0
+            let bv = visible.contains(b.bookSourceUrl) ? 1 : 0
+            if av != bv { return av > bv }
             let am = BookSource.looksLikeMediaName(a.bookSourceName) ? 1 : 0
             let bm = BookSource.looksLikeMediaName(b.bookSourceName) ? 1 : 0
             if am != bm { return am > bm }
             return a.bookSourceName < b.bookSourceName
         }
-        return Array(sorted.prefix(10).map { SiteSearchService.target(source: $0) })
+        return Array(sorted.prefix(24).map { SiteSearchService.target(source: $0) })
     }
 
     /// 站点直达区只在搜索结束后出现，避免搜索中列表抖动。
     private var hasSiteSection: Bool {
         !isSearching && progressSink.text == nil && !siteShortcuts.isEmpty
+            && siteResults.isEmpty
     }
 
     /// 无可用搜索书源时的可操作诊断：按条件逐层排查，告诉用户差在哪、怎么补
@@ -272,6 +295,16 @@ struct BookSearchView: View {
                     Text("站内搜索补回 \(siteResults.count) 条 · 点 ▶ 直接播放")
                         .font(.caption2)
                         .foregroundStyle(.green)
+                }
+                if !siteDiagnostics.isEmpty {
+                    DisclosureGroup("站内逐站诊断 · \(siteDiagnostics.count) 个站点") {
+                        ForEach(siteDiagnostics, id: \.self) { line in
+                            Text(line)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .font(.caption2)
                 }
 
                 // 关键词 + 搜索 / 停止
@@ -555,7 +588,18 @@ struct BookSearchView: View {
         siteSearching = runSite
         results = []
         siteResults = []
+        siteDiagnostics = []
         sourceErrors = []
+        // 一个站都抽不出剧名时的保底行：直接落在带关键词的站内搜索结果页，
+        // 就是公子已验证「网页里能搜到、能播」的那条路径。
+        let fallbackCopy: [SiteFallbackRow] = siteTargetsCopy.compactMap { t in
+            guard let u = SiteSearchService.preferredSearchURL(
+                    target: t, keyword: trimmedKeyword) else { return nil }
+            return SiteFallbackRow(name: t.name + " · 站内搜索「" + trimmedKeyword + "」",
+                                   url: u.absoluteString,
+                                   sourceId: t.sourceId,
+                                   sourceName: t.name)
+        }
         errorMessage = nil
         isSearching = true
         progressSink.text = "正在搜索 \(sources.count) 个书源…"
@@ -600,14 +644,14 @@ struct BookSearchView: View {
         // 结果单独写 siteResults，by design 不与规则搜索的 results 互相覆盖。
         if runSite, !siteTargetsCopy.isEmpty {
             siteTask = Task.detached(priority: .userInitiated) {
-                let hits = await SiteSearchService.search(targets: siteTargetsCopy,
-                                                          keyword: keywordCopy)
+                let report = await SiteSearchService.searchReport(targets: siteTargetsCopy,
+                                                                   keyword: keywordCopy)
                 await MainActor.run {
                     siteSearching = false
-                    guard !hits.isEmpty else { return }
+                    siteDiagnostics = report.lines
                     var seen = Set<String>()
                     var added: [ExploredBook] = []
-                    for h in hits {
+                    for h in report.hits {
                         let key = h.url.lowercased()
                         if seen.contains(key) { continue }
                         seen.insert(key)
@@ -621,6 +665,20 @@ struct BookSearchView: View {
                             sourceId: h.sourceId,
                             sourceName: h.sourceName
                         ))
+                    }
+                    if added.isEmpty {
+                        for row in fallbackCopy.prefix(12) {
+                            added.append(ExploredBook(
+                                name: row.name,
+                                author: "",
+                                intro: "站内搜索 · 影视",
+                                bookUrl: row.url,
+                                coverUrl: "",
+                                lastChapter: "",
+                                sourceId: row.sourceId,
+                                sourceName: row.sourceName
+                            ))
+                        }
                     }
                     guard !added.isEmpty else { return }
                     siteResults = added
