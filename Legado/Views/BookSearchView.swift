@@ -44,11 +44,14 @@ struct SiteShortcut: Identifiable {
 enum SearchPlaybackRoute: Identifiable {
     case episodes(VodEpisodeList)
     case browser(SearchPlayback)
+    /// v49：只有一集时直接进原生播放器，不再多一次选集点击
+    case direct(BrowserMedia)
 
     var id: String {
         switch self {
         case .episodes(let l): return "episodes-" + l.id.uuidString
         case .browser(let p): return "browser-" + p.id.uuidString
+        case .direct(let m): return "direct-" + m.id.uuidString
         }
     }
 }
@@ -87,6 +90,8 @@ struct BookSearchView: View {
     @State private var siteSearching = false
     @State private var siteResults: [ExploredBook] = []
     @State private var siteTask: Task<Void, Never>?
+    /// v49：站内结果对应的剧集直链（纯值 Sendable，主线程再还原成 VodEpisode）
+    @State private var sitePlaylists: [String: [SiteEpisode]] = [:]
     /// 逐站站内搜索诊断：哪个站命中几条、哪个站连搜索页都没拿到
     @State private var siteDiagnostics: [String] = []
 
@@ -232,6 +237,8 @@ struct BookSearchView: View {
                         VodEpisodeSheet(list: list)
                     case .browser(let target):
                         SourceBrowserView(title: target.title, initialURL: target.url)
+                    case .direct(let media):
+                        BrowserPlayerSheet(media: media)
                     }
                 }
             }
@@ -356,6 +363,14 @@ struct BookSearchView: View {
                 }
             } else {
                 List {
+                    if resultKind == .media && !allResults.isEmpty
+                        && !allResults.contains(where: { isMediaResult($0) }) {
+                        Section {
+                            Text("本轮未识别出视频结果，已显示全部 \(allResults.count) 条")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     ForEach(displayedResults) { book in
                         HStack(alignment: .top, spacing: 12) {
                             if !book.coverUrl.isEmpty, let coverURL = URLSanitizer.sanitize(book.coverUrl) {
@@ -396,7 +411,9 @@ struct BookSearchView: View {
                             Spacer()
                             if let target = playbackTarget(for: book) {
                                 Button {
-                                    Task { await resolvePlayback(target: target, name: book.name) }
+                                    Task { await resolvePlayback(target: target,
+                                                                 name: book.name,
+                                                                 key: book.bookUrl) }
                                 } label: {
                                     if resolvingTarget == target {
                                         ProgressView()
@@ -507,10 +524,13 @@ struct BookSearchView: View {
     }
 
     private var displayedResults: [ExploredBook] {
-        let base: [ExploredBook]
+        var base: [ExploredBook] = []
         switch resultKind {
         case .all: base = allResults
-        case .media: base = allResults.filter { isMediaResult($0) }
+        case .media:
+            let matched = allResults.filter { isMediaResult($0) }
+            // v49：视频范围不再出现「当前范围没有匹配项」的空白页
+            base = matched.isEmpty ? allResults : matched
         case .book: base = allResults.filter { !isMediaResult($0) }
         }
         let k = searchKeyword.lowercased()
@@ -580,6 +600,7 @@ struct BookSearchView: View {
         results = []
         siteResults = []
         siteDiagnostics = []
+        sitePlaylists = [:]
         sourceErrors = []
         errorMessage = nil
         isSearching = true
@@ -632,10 +653,13 @@ struct BookSearchView: View {
                     siteDiagnostics = report.lines
                     var seen = Set<String>()
                     var added: [ExploredBook] = []
+                    var playlists: [String: [SiteEpisode]] = [:]
                     for h in report.hits {
                         let key = h.url.lowercased()
                         if seen.contains(key) { continue }
                         seen.insert(key)
+                        // 纯值结构可安全跨 actor；VodEpisode 在主线程还原
+                        if !h.episodes.isEmpty { playlists[h.url] = h.episodes }
                         added.append(ExploredBook(
                             name: h.name,
                             author: "",
@@ -648,6 +672,7 @@ struct BookSearchView: View {
                         ))
                     }
                     guard !added.isEmpty else { return }
+                    sitePlaylists = playlists
                     siteResults = added
                     errorMessage = nil
                 }
@@ -715,6 +740,10 @@ struct BookSearchView: View {
         let low = book.bookUrl.lowercased()
         let pageOnly = ["vodsearch", "/search", "?wd=", "&wd=", "keyword=", "?url=&"]
         if pageOnly.contains(where: { low.contains($0) }) { return nil }
+        // v49：站内结果已是真实播放直链，不再要求匹配到书源
+        if book.intro.hasPrefix("站内搜索") {
+            return URLSanitizer.sanitize(book.bookUrl)
+        }
         let matchedSource: BookSource? = videoSource(for: book) ?? sourceStore.sources.first(where: {
             BookSource.normalizedURL($0.bookSourceUrl) == BookSource.normalizedURL(book.sourceId)
         })
@@ -730,11 +759,37 @@ struct BookSearchView: View {
     /// 点 ▶ 三级兜底：HTTP/JSON 直链 → 隐藏 WebView 嗅探 → 详情页网页。
     /// v48：不再把「站内搜索页」当成兜底目标，用户点结果不该再落回搜索页。
     @MainActor
-    private func resolvePlayback(target: URL, name: String) async {
+    private func resolvePlayback(target: URL, name: String, key: String) async {
         guard resolvingTarget == nil else { return }
         resolvingTarget = target
         defer { resolvingTarget = nil }
         let headers = ["Referer": target.absoluteString]
+
+        // ⓪ v49：站内搜索已把 vod_play_url 拆成剧集直链，点 ▶ 直接进播放器，
+        // 不再二次抓网页 / 跑 WebView 嗅探。key 用结果行原始 bookUrl，
+        // 避免 URL 规范化后与字典键对不上。
+        if let stored = sitePlaylists[key] ?? sitePlaylists[target.absoluteString],
+           !stored.isEmpty {
+            let eps: [VodEpisode] = stored.compactMap { item in
+                guard let u = URLSanitizer.sanitize(item.url) else { return nil }
+                return VodEpisode(name: item.name, url: u)
+            }
+            if !eps.isEmpty {
+                // 防盗链用直链所在站点根，别把 m3u8 自身当 Referer
+                var playHeaders = headers
+                if let scheme = target.scheme, let host = target.host {
+                    playHeaders["Referer"] = scheme + "://" + host + "/"
+                }
+                if eps.count == 1 {
+                    playback = .direct(BrowserMedia(url: eps[0].url, headers: playHeaders))
+                } else {
+                    playback = .episodes(VodEpisodeList(title: name, episodes: eps,
+                                                        headers: playHeaders,
+                                                        referer: target.absoluteString))
+                }
+                return
+            }
+        }
 
         // ① 采集接口 JSON / 页面明文直链
         if let text = try? await NetworkService.shared.fetchText(

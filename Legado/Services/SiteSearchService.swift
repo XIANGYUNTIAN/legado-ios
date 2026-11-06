@@ -3,17 +3,19 @@ import SwiftSoup
 
 // MARK: - 影视站点「通用站内搜索」
 //
-// v47：公子第四轮反馈 v46 仍 0 结果，但点「站点直达」在网页里能搜到、能播。
-// 复查确认三处确定性缺陷（都不是「分类」问题）：
-//   ① siteTargets 按书源名称排序取前 10，720 源里真正可用的「黄果剧场」被
-//      一堆 📺 / 资源采集站挤出，站内搜索查的全是别的站；
-//   ② 站点类书源 bookSourceUrl 是中文名，siteURLs.first 取的是 comment 里
-//      第一个采集 API 域名，拼 CMS 搜索路径必然 404；应遍历全部候选域名；
-//   ③ 搜索结果由页面 JS 渲染 / 非 WebView 请求被拦截，纯 HTTP 抓 HTML 永远
-//      拿不到链接。用隐藏 WKWebView 渲染后读 DOM（v44 漫画已真机验证）。
+// v49（公子第五轮反馈「结果区仍是站内搜索，不是直接进播放器」）：
+// 用样本 shareBookSource.json 精确复现 v47/v48 的请求清单，确认三个硬缺陷：
+//   ① 「资源采集」书源的 bookSourceComment 里有 12 个采集域名，$=[["站名","http://域名"],…]，
+//      但 SiteTarget.baseURLs 只取 prefix(4)，candidateURLs 又只对 origins[0] 拼
+//      api.php/provide/vod —— 11 个域名一个 API 都没请求；
+//   ② 6 个请求里 4 个是同一个采集域名上的 HTML 猜测路径（采集站根本没有网页），
+//      纯 HTTP 抓不到、WebView 渲染也 404，于是 24 站全 0 命中；
+//   ③ 即便 JSON 拿到，旧 collectVod 丢弃了已经写在里面的 vod_play_url，
+//      改去再请求一次 ?ac=detail&ids=，点 ▶ 还要抓网页、再选集。
 //
-// 另外：即使一个站都没抽出剧名，也给出「可直接点开的站内搜索结果页」结果行，
-// 保证搜索页不是空的，且点的就是用户已验证能播的那条路径。
+// 现在：采集类源逐个域名并发查苹果 CMS；返回 JSON 里的 vod_play_url 当场拆成
+// 可播放剧集，结果行的 bookUrl 就是真实直链 —— 点 ▶ 直接进播放器。
+// 有网页的影视站仍保留 HTTP + 隐藏 WebView DOM 兜底。
 
 /// 纯值目标，可安全跨 Task 传递（BookSource 不是 Sendable）。
 struct SiteTarget: Sendable {
@@ -24,14 +26,24 @@ struct SiteTarget: Sendable {
     /// 书源 comment / searchUrl 里出现的全部站点根，逐个尝试
     let baseURLs: [String]
     let searchTemplate: String?
+    /// searchUrl 是 @js: 且含 api.php/provide/vod：按苹果 CMS 采集协议直查
+    let isCollector: Bool
+}
+
+/// 一条剧集直链（String 保证 Sendable，URL 在 MainActor 侧还原）
+struct SiteEpisode: Sendable {
+    let name: String
+    let url: String
 }
 
 struct SiteSearchHit: Sendable {
     let name: String
-    /// 绝对 URL 字符串（用 String 而非 URL，保证 Sendable 无跨版本歧义）
+    /// 绝对 URL 字符串。可直接播放时是真实 m3u8/mp4 直链
     let url: String
     let sourceId: String
     let sourceName: String
+    /// 该剧的全部剧集。非空时点 ▶ 直接进播放器，不再二次抓网页。
+    let episodes: [SiteEpisode] = []
 }
 
 /// 每站 HTTP 抓取结果 + 该站可用于 WebView 兜底的页面地址
@@ -40,6 +52,8 @@ private struct SiteOneResult: Sendable {
     let name: String
     let hits: [SiteSearchHit]
     let domURL: String?
+    let apiTried: Int
+    let isCollector: Bool
 }
 
 /// 逐站诊断：搜索页可见，下一轮一张截图就能定位是哪个站、哪一步失败
@@ -51,7 +65,7 @@ struct SiteSearchReport: Sendable {
 enum SiteSearchService {
 
     /// 记下「实际返回过内容」的站内搜索页：站点直达优先用它，
-    /// 避免打开 0 结果的猜测地址（公子截图里 66yy / silidm 都是这种）。
+    /// 避免打开 0 结果的猜测地址。缓存按「书源 + 关键词」，换词不串页。
     private static let cacheLock = NSLock()
     private static var goodSearchURLs: [String: String] = [:]
 
@@ -73,12 +87,18 @@ enum SiteSearchService {
 
     static func target(source: BookSource) -> SiteTarget {
         let urls = source.siteURLs.map { $0.absoluteString }
-        let all = urls.isEmpty ? [source.bookSourceUrl] : Array(urls.prefix(4))
+        // v49：采集类源的可用域名散在 comment 的 JS 数组里，不能只留前 4 个
+        let all = urls.isEmpty ? [source.bookSourceUrl] : urls
+        let tpl = source.searchUrl ?? ""
+        let low = tpl.lowercased()
+        let collector = (low.contains("@js:") || low.contains("<js>"))
+            && low.contains("api.php/provide/vod")
         return SiteTarget(sourceId: source.bookSourceUrl,
                           name: source.bookSourceName,
                           baseURL: all.first ?? source.bookSourceUrl,
                           baseURLs: all,
-                          searchTemplate: source.searchUrl)
+                          searchTemplate: source.searchUrl,
+                          isCollector: collector)
     }
 
     /// 「站点直达」用：一键打开站内搜索结果页，不再让用户进首页手动输关键词。
@@ -94,7 +114,6 @@ enum SiteSearchService {
     }
 
     /// 候选搜索页：书源自带 searchUrl 优先，其余为苹果 CMS / 通用影视站常见路径。
-    /// 对「bookSourceUrl 是中文名」的采集类源，逐个尝试 comment 里的候选域名。
     static func candidateURLs(target: SiteTarget, keyword: String) -> [URL] {
         let k = keyword.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? keyword
         var out: [URL] = []
@@ -122,11 +141,22 @@ enum SiteSearchService {
             out.append(u)
         }
 
+        // v49：采集类源把「每个候选域名」都试一遍 ac=detail（返回体自带 vod_play_url）。
+        // 旧实现只试 origins[0]，第一个域名失效就整站 0 命中。
+        if target.isCollector {
+            for origin in origins.prefix(12) {
+                add(origin + "/api.php/provide/vod/?ac=detail&wd=" + k + "&pg=1")
+            }
+            for origin in origins.prefix(3) {
+                add(origin + "/api.php/provide/vod/?ac=list&wd=" + k + "&pg=1")
+            }
+            add("/index.php/vod/search.html?wd=" + k)
+            return Array(out.prefix(24))
+        }
+
         if let tpl = target.searchTemplate, !tpl.isEmpty {
             let lower = tpl.lowercased()
             if lower.contains("@js:") || lower.contains("<js>") {
-                // @js: 型采集接口：JS 拼出的地址无法静态还原，但路径形态明确，
-                // 按苹果 CMS 采集协议直接构造（样本实证：?ac=detail&wd=）。
                 if lower.contains("api.php/provide/vod") {
                     add("/api.php/provide/vod/?ac=detail&wd=" + k)
                     add("/api.php/provide/vod/?ac=list&wd=" + k)
@@ -144,8 +174,7 @@ enum SiteSearchService {
                 urlPart = urlPart.replacingOccurrences(of: "{{page}}", with: "1")
                 urlPart = urlPart.replacingOccurrences(of: "{{", with: "%7B%7B")
                 urlPart = urlPart.replacingOccurrences(of: "}}", with: "%7D%7D")
-                // 苹果 CMS 伪静态：/vodsearch/-------------.html?wd={{key}}
-                // 关键词其实要放在路径里，query 的 wd 站点并不读（实测 0 结果）。
+                // 苹果 CMS 伪静态：关键词要放路径，query 的 wd 站点并不读
                 if urlPart.contains("-------------") {
                     urlPart = urlPart.replacingOccurrences(of: "-------------",
                                                           with: k + "-------------")
@@ -153,7 +182,6 @@ enum SiteSearchService {
                         urlPart = String(urlPart[urlPart.startIndex..<q.lowerBound])
                     }
                 }
-                // 没有关键词占位符的采集接口：补 wd 参数
                 if !urlPart.contains(k) && !urlPart.contains(keyword) {
                     urlPart += (urlPart.contains("?") ? "&" : "?") + "wd=" + k
                 }
@@ -172,12 +200,11 @@ enum SiteSearchService {
         ]
         for c in common { add(c) }
 
-        // 其余候选域名只试两个最通用的路径，控制请求量
-        for origin in origins.dropFirst().prefix(2) {
+        for origin in origins.dropFirst().prefix(3) {
             add(origin + "/index.php/vod/search.html?wd=" + k)
             add(origin + "/search.php?searchword=" + k)
         }
-        return Array(out.prefix(10))
+        return Array(out.prefix(20))
     }
 
     /// 兼容旧调用：只返回结果列表。
@@ -185,27 +212,39 @@ enum SiteSearchService {
         await searchReport(targets: targets, keyword: keyword).hits
     }
 
-    /// 先并行 HTTP 抓取；0 命中的站点再串行用隐藏 WebView 渲染 DOM 兜底。
-    /// WebView 不能并发十几个（内存 / 主线程），故限制 8 个并串行执行。
+    /// 先并行 HTTP 抓取；0 命中的「有网页」站点再串行用隐藏 WebView 渲染 DOM 兜底。
     static func searchReport(targets: [SiteTarget], keyword: String) async -> SiteSearchReport {
         guard !keyword.isEmpty, !targets.isEmpty else {
             return SiteSearchReport(hits: [], lines: [])
         }
-        let results: [SiteOneResult] = await withTaskGroup(
-            of: SiteOneResult.self, returning: [SiteOneResult].self) { group in
-            for t in targets {
-                group.addTask { await searchOne(target: t, keyword: keyword) }
+        // 分批并发：24 个站点 × 每站十几个采集域名会瞬间发起几百个请求，
+        // 按 8 站一批控制峰值（每站最多 10 个域名 → 峰值约 80 个请求）。
+        var results: [SiteOneResult] = []
+        var cursor = 0
+        while cursor < targets.count {
+            let end = min(cursor + 8, targets.count)
+            let slice = Array(targets[cursor..<end])
+            let part: [SiteOneResult] = await withTaskGroup(
+                of: SiteOneResult.self, returning: [SiteOneResult].self) { group in
+                for t in slice {
+                    group.addTask { await searchOne(target: t, keyword: keyword) }
+                }
+                var all: [SiteOneResult] = []
+                for await one in group { all.append(one) }
+                return all
             }
-            var all: [SiteOneResult] = []
-            for await one in group { all.append(one) }
-            return all
+            results.append(contentsOf: part)
+            cursor = end
         }
 
         var hits: [SiteSearchHit] = []
         for one in results { hits.append(contentsOf: one.hits) }
 
-        // 浏览器渲染兜底：只对 HTTP 0 命中的站做，最多 8 个，串行
-        let pending = results.filter { $0.hits.isEmpty && $0.domURL != nil }.prefix(8)
+        // 浏览器渲染兜底：只给「有网页」且 HTTP 0 命中的站，最多 10 个，串行。
+        // 采集 API 域名没有网页，跑 WebView 只会白等 7s。
+        let pending = results.filter {
+            $0.hits.isEmpty && $0.domURL != nil && !$0.isCollector
+        }.prefix(10)
         for one in pending {
             guard let raw = one.domURL, let url = URL(string: raw),
                   let t = targets.first(where: { $0.sourceId == one.sourceId }) else { continue }
@@ -215,9 +254,17 @@ enum SiteSearchService {
             if !got.isEmpty { hits.append(contentsOf: got) }
         }
 
+        // 去重：可播放结果按「剧名 + 来源」收敛，保留集数最多的那份；
+        // 其余按链接去重。不同采集域名常返回同一部剧，避免结果区刷屏。
         var seen = Set<String>()
+        var playableSeen = Set<String>()
         var out: [SiteSearchHit] = []
-        for h in hits {
+        for h in hits.sorted(by: { $0.episodes.count > $1.episodes.count }) {
+            if !h.episodes.isEmpty {
+                let key = h.name.lowercased() + "|" + h.sourceName.lowercased()
+                if playableSeen.contains(key) { continue }
+                playableSeen.insert(key)
+            }
             let key = h.url.lowercased()
             if seen.contains(key) { continue }
             seen.insert(key)
@@ -226,9 +273,12 @@ enum SiteSearchService {
 
         var lines: [String] = []
         for one in results {
-            let count = out.filter { $0.sourceId == one.sourceId }.count
-            if count > 0 {
-                lines.append("\(one.name)：命中 \(count) 条")
+            let mine = out.filter { $0.sourceId == one.sourceId }
+            let epCount = mine.reduce(0) { $0 + $1.episodes.count }
+            if !mine.isEmpty {
+                lines.append("\(one.name)：命中 \(mine.count) 部 / \(epCount) 集直链")
+            } else if one.isCollector {
+                lines.append("\(one.name)：\(one.apiTried) 个采集接口均无结果")
             } else if one.domURL == nil {
                 lines.append("\(one.name)：站点地址不可用")
             } else {
@@ -240,37 +290,38 @@ enum SiteSearchService {
 
     private static func searchOne(target: SiteTarget, keyword: String) async -> SiteOneResult {
         let urls = candidateURLs(target: target, keyword: keyword)
-        let domURL = candidateURLs(target: target, keyword: keyword)
-            .first { !$0.absoluteString.lowercased().contains("api.php") }?.absoluteString
+        let domURL = urls.first {
+            !$0.absoluteString.lowercased().contains("api.php")
+        }?.absoluteString
         guard let first = urls.first else {
             return SiteOneResult(sourceId: target.sourceId, name: target.name,
-                                 hits: [], domURL: nil)
+                                 hits: [], domURL: nil, apiTried: 0,
+                                 isCollector: target.isCollector)
         }
-        let firstHits = await fetchHits(url: first, target: target, keyword: keyword)
-        if !firstHits.isEmpty {
-            return SiteOneResult(sourceId: target.sourceId, name: target.name,
-                                 hits: Array(firstHits.prefix(12)), domURL: domURL)
-        }
-        let rest = Array(urls.dropFirst().prefix(5))
-        guard !rest.isEmpty else {
-            return SiteOneResult(sourceId: target.sourceId, name: target.name,
-                                 hits: [], domURL: domURL)
+        // v49：采集类源把全部候选域名的 API 并发跑完，任一域名可用就能出结果。
+        let batch: [URL]
+        if target.isCollector {
+            batch = Array(urls.prefix(10))
+        } else {
+            batch = [first] + Array(urls.dropFirst().prefix(7))
         }
         let got: [SiteSearchHit] = await withTaskGroup(
             of: [SiteSearchHit].self, returning: [SiteSearchHit].self) { group in
-            for u in rest {
+            for u in batch {
                 group.addTask { await fetchHits(url: u, target: target, keyword: keyword) }
             }
-            var out: [SiteSearchHit] = []
+            var all: [SiteSearchHit] = []
             for await part in group {
-                for h in part where !out.contains(where: { $0.url == h.url }) {
-                    out.append(h)
+                for h in part where !all.contains(where: { $0.url == h.url }) {
+                    all.append(h)
                 }
             }
-            return out
+            return all
         }
         return SiteOneResult(sourceId: target.sourceId, name: target.name,
-                             hits: Array(got.prefix(12)), domURL: domURL)
+                             hits: Array(got.prefix(20)), domURL: domURL,
+                             apiTried: batch.count,
+                             isCollector: target.isCollector)
     }
 
     private static func fetchHits(url: URL, target: SiteTarget, keyword: String) async -> [SiteSearchHit] {
@@ -353,10 +404,29 @@ enum SiteSearchService {
         guard let dict = value as? [String: Any] else { return }
         let rawName = (dict["vod_name"] as? String) ?? (dict["name"] as? String) ?? ""
         let name = clean(rawName)
-        if !name.isEmpty, name.lowercased().contains(keyword.lowercased()),
-           let link = detailURL(dict: dict, pageURL: pageURL) {
-            out.append(SiteSearchHit(name: name, url: link.absoluteString,
-                                     sourceId: target.sourceId, sourceName: target.name))
+        if !name.isEmpty, name.lowercased().contains(keyword.lowercased()) {
+            // v49：苹果 CMS 的 ac=detail 已经把 vod_play_url 写在每部剧里。
+            // 只序列化这一部剧再交给 VodPlaylistParser，避免多部剧的集混在一起。
+            if let data = try? JSONSerialization.data(withJSONObject: dict),
+               let one = String(data: data, encoding: .utf8),
+               VodPlaylistParser.isPlaylistPayload(one) {
+                let eps = VodPlaylistParser.episodes(from: one, base: pageURL).map {
+                    SiteEpisode(name: $0.name, url: $0.url.absoluteString)
+                }
+                if let first = eps.first {
+                    out.append(SiteSearchHit(name: name, url: first.url,
+                                             sourceId: target.sourceId,
+                                             sourceName: target.name,
+                                             episodes: eps))
+                    return
+                }
+            }
+            // 没有直链的采集源：退回 ?ac=detail&ids= 详情页，点 ▶ 再解析一次
+            if let link = detailURL(dict: dict, pageURL: pageURL) {
+                out.append(SiteSearchHit(name: name, url: link.absoluteString,
+                                         sourceId: target.sourceId, sourceName: target.name))
+                return
+            }
         }
         for (_, v) in dict where v is [Any] || v is [String: Any] {
             collectVod(v, pageURL: pageURL, target: target, keyword: keyword,
@@ -364,7 +434,7 @@ enum SiteSearchService {
         }
     }
 
-    /// 苹果 CMS：`?ac=detail&ids=<vod_id>` 返回单部剧的 vod_play_url，选集最干净。
+    /// 苹果 CMS：`?ac=detail&ids=<vod_id>` 返回单部剧的 vod_play_url。
     private static func detailURL(dict: [String: Any], pageURL: URL) -> URL? {
         let id: String?
         if let s = dict["vod_id"] as? String { id = s }
@@ -391,13 +461,10 @@ enum SiteSearchService {
                    ".js", ".css", "/upload/", "/static/", "api.php", "/m3u8/",
                    "/parse/", "/jiexi/", "?wd=", "&wd=", "keyword=", "?url="]
         if bad.contains(where: { h.contains($0) }) { return false }
-        // v46 过窄：很多影视站用 ?m=vod-detail-id-123 / /detail/123 / ?id=123
-        // 这类地址不带 .html 也不带 /vod/，全被丢掉。
         let hints = ["/vod/", "/detail/", "/video/", "/movie/", "/play/", "/show/",
                      "/d/", "/b/", "/html/", ".html", "id=", "ids=", "ac=detail",
                      "vod-detail", "/index.php/vod/", "/watch/", "/drama/"]
         if hints.contains(where: { h.contains($0) }) { return true }
-        // 纯数字 id 结尾的详情路径
         let tail: String
         if let first = h.split(separator: "?").first {
             tail = String(first)
