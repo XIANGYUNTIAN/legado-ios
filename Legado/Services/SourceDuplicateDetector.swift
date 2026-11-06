@@ -60,7 +60,9 @@ enum SourceDuplicateDetector {
         for fp in fingerprints {
             buckets[fp.key, default: []].append(fp)
         }
-        let result: [SourceDuplicateGroup] = buckets.compactMap { key, members in
+        let result: [SourceDuplicateGroup] = buckets.compactMap { entry -> SourceDuplicateGroup? in
+            let key = entry.key
+            let members = entry.value
             guard members.count > 1 else { return nil }
             // enumerated 的 offset 作最终 tie-breaker，保证排序结果稳定
             let ordered = members.enumerated().sorted { a, b in
