@@ -77,7 +77,7 @@ enum SourceDuplicateDetector {
                 label: key.hasPrefix("name:") ? keeper.name : key,
                 keepID: keeper.id,
                 keepName: keeper.name,
-                duplicateIDs: ordered.dropFirst().map { $0.id }
+                duplicateIDs: ordered.dropFirst().map { $0.element.id }
             )
         }
         return result.sorted { $0.label < $1.label }
