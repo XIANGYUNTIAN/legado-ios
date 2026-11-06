@@ -22,7 +22,7 @@ enum ComicPageDetector {
     /// 三条通道合并去重：① 全文带图片扩展名的 URL；② HTML 图片属性值（可无扩展名）；
     /// ③ JSON / JS 里的 url / src / img 字段值（可无扩展名）。
     /// 支持 https:\/\/ 转义、&amp;、协议相对 //、.jpg!w800、.jpg@webp、query。
-    static func imageURLs(from raw: String, base: URL) -> [URL] {
+    static func imageURLs(from raw: String, base: URL, looseLines: Bool = false) -> [URL] {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, text.count < 300_000 else { return [] }
         let normalized = text
@@ -31,9 +31,13 @@ enum ComicPageDetector {
 
         var out: [URL] = []
         var seen = Set<String>()
+        // 漫画章节页侧栏有几十张「推荐漫画封面」，无扩展名图床地址会被 ② 通道
+        // 一并收走；不排掉就会把封面当成正文页铺满整屏。
         let noise = ["logo", "icon", "avatar", "banner", "/ad/", "ads.",
                      "qrcode", "qr_code", "loading", "placeholder", "sprite",
-                     "/btn", "button", "favicon", "share.", "blank.gif", "1x1"]
+                     "/btn", "button", "favicon", "share.", "blank.gif", "1x1",
+                     "/cover/", "cover/", "/covers/", "/thumb", "thumb/",
+                     "load.gif", "loading.gif", "small_", "/avatar/"]
 
         func append(_ candidate: String) {
             let s = candidate.trimmingCharacters(
@@ -53,10 +57,31 @@ enum ComicPageDetector {
                   scheme == "http" || scheme == "https" else { return }
             let key = url.absoluteString
             if seen.contains(key) { return }
+            // ② 通道会连带命中 <script src> / <link href> / data-original="/"，
+            // 不排掉就会把几十个 JS/CSS 或站点根当漫画页铺出来。
+            let pathLower = url.path.lowercased()
+            guard pathLower != "/" && !pathLower.isEmpty else { return }
+            let nonImage = [".js", ".css", ".html", ".htm", ".php", ".asp",
+                            ".aspx", ".ico", ".woff", ".woff2", ".ttf",
+                            ".svg", ".mp4", ".m3u8", ".mp3", ".json", ".xml"]
+            guard !nonImage.contains(where: { pathLower.hasSuffix($0) }) else { return }
             let lower = key.lowercased()
             guard !noise.contains(where: { lower.contains($0) }) else { return }
             seen.insert(key)
             out.append(url)
+        }
+
+        // 输入已是「候选 URL 列表」（WebView DOM 收集结果）时不做 HTML/JSON 正则，
+        // 只按行取绝对地址，避免把页面里的 CSS/JS/推荐位链接误当成图片。
+        if looseLines {
+            for line in normalized.components(separatedBy: .newlines) {
+                let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard t.hasPrefix("http://") || t.hasPrefix("https://") || t.hasPrefix("//"),
+                      t.count < 500, !t.contains(" ") else { continue }
+                append(t)
+                if out.count >= 200 { break }
+            }
+            return out
         }
 
         func collect(_ pattern: String, group: Int = 0) {

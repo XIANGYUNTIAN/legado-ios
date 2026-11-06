@@ -15,6 +15,14 @@ enum SearchMode: String, CaseIterable {
     case precise
 }
 
+/// 结果范围：全部 / 只看视频漫画 / 只看书籍。公子反馈「按名称搜视频总搜不到」，
+/// 给一个显式筛选，避免视频结果被几百条小说命中淹没。
+enum SearchResultKind: String, CaseIterable {
+    case all = "全部"
+    case media = "视频"
+    case book = "书籍"
+}
+
 /// 视频类搜索结果的直达播放目标：优先解析成剧集进原生播放器，失败才回退站点浏览器。
 struct SearchPlayback: Identifiable {
     let id = UUID()
@@ -50,6 +58,7 @@ struct BookSearchView: View {
 
     @State private var keyword = ""
     @State private var mode: SearchMode = .fuzzy
+    @State private var resultKind: SearchResultKind = .all
     @State private var results: [ExploredBook] = []
     @State private var isSearching = false
     @StateObject private var progressSink = SearchProgressSink()
@@ -115,7 +124,7 @@ struct BookSearchView: View {
                     searchContent
                 }
             }
-            .navigationTitle("搜索书籍")
+            .navigationTitle("搜索")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -159,13 +168,26 @@ struct BookSearchView: View {
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 200)
                 }
-                Text("将遍历全部 \(searchableSources.count) 个可搜索书源；视频源结果点 ▶ 直接进站播放 · build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?")")
+                HStack {
+                    Text("结果范围")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Picker("结果范围", selection: $resultKind) {
+                        ForEach(SearchResultKind.allCases, id: \.self) { kind in
+                            Text(kind.rawValue).tag(kind)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 200)
+                }
+                Text("视频 / 漫画源优先搜索；视频结果点 ▶ 直接进站播放 · build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?")")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
                 // 关键词 + 搜索 / 停止
                 HStack(spacing: 8) {
-                    TextField("书名 / 作者 / 主角名", text: $keyword)
+                    TextField("书名 / 视频名 / 作者", text: $keyword)
                         .textFieldStyle(.roundedBorder)
                         .submitLabel(.search)
                         .onSubmit(of: .text) { if !isSearching { runSearch() } }
@@ -209,11 +231,17 @@ struct BookSearchView: View {
                 ContentUnavailableView {
                     Label("输入关键词开始搜索", systemImage: "text.magnifyingglass")
                 } description: {
-                    Text("将遍历全部可搜索书源，按书名 / 作者 / 主角名匹配")
+                    Text("将遍历全部可搜索书源，按书名 / 视频名 / 作者匹配")
+                }
+            } else if displayedResults.isEmpty && !isSearching && progressSink.text == nil {
+                ContentUnavailableView {
+                    Label("当前范围没有结果", systemImage: "line.3.horizontal.decrease.circle")
+                } description: {
+                    Text("本轮共搜到 \(results.count) 条，切到「全部」查看")
                 }
             } else {
                 List {
-                    ForEach(results) { book in
+                    ForEach(displayedResults) { book in
                         HStack(alignment: .top, spacing: 12) {
                             if !book.coverUrl.isEmpty, let coverURL = URLSanitizer.sanitize(book.coverUrl) {
                                 AsyncImage(url: coverURL)
@@ -307,6 +335,25 @@ struct BookSearchView: View {
         }
     }
 
+    // MARK: - 结果范围筛选
+
+    /// 搜索结果本身不带类型字段，用来源书源的 isVideoLike / isComicLike 判定。
+    private var displayedResults: [ExploredBook] {
+        switch resultKind {
+        case .all: return results
+        case .media: return results.filter { isMediaResult($0) }
+        case .book: return results.filter { !isMediaResult($0) }
+        }
+    }
+
+    private func isMediaResult(_ book: ExploredBook) -> Bool {
+        guard !book.sourceId.isEmpty else { return false }
+        return sourceStore.sources.contains {
+            BookSource.normalizedURL($0.bookSourceUrl) == BookSource.normalizedURL(book.sourceId)
+                && ($0.isVideoLike || $0.isComicLike)
+        }
+    }
+
     // MARK: - 多源搜索逻辑
 
     /// 启动全源并发搜索：委托 SearchCoordinator 在后台线程执行（避免主线程死锁），
@@ -314,7 +361,10 @@ struct BookSearchView: View {
     private func runSearch() {
         let trimmedKeyword = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedKeyword.isEmpty else { return }
-        let sources = searchableSources
+        let allSources = searchableSources
+        // 视频 / 图片源优先入队：命中达标停止入队时不会被整批跳过
+        let sources = allSources.filter { $0.isVideoLike || $0.isComicLike }
+            + allSources.filter { !($0.isVideoLike || $0.isComicLike) }
         guard !sources.isEmpty else {
             errorMessage = "没有可搜索的书源"
             return

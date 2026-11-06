@@ -1204,8 +1204,16 @@ struct BookReaderView: View {
                 url: u, engine: engine, contentRule: contentRule,
                 headers: headers, index: index, title: chapter.title
             )
-        } catch NetworkError.badStatus(404) {
-            // 章节 URL 可能被解析到了错误的基准。404 时换基准重新解析重试。
+        } catch let netError as NetworkError {
+            // 403 / 404 常见于章节 URL 拼错或防盗链：换基准重新解析重试。
+            // v44 起 403 也纳入——漫画站 WAF 对畸形路径直接回 403（公子截图实证）。
+            var retryCode: Int? = nil
+            if case .badStatus(let status) = netError, status == 403 || status == 404 {
+                retryCode = status
+            }
+            guard let code = retryCode else {
+                return "加载失败：\(netError.localizedDescription)（\(u.absoluteString)）"
+            }
             for base in retryBases {
                 if let candidate = resolveURL(url, base: base),
                    candidate != u, !retried.contains(candidate) {
@@ -1220,7 +1228,7 @@ struct BookReaderView: View {
                     }
                 }
             }
-            return "加载失败：HTTP 404（\(u.absoluteString)）"
+            return "加载失败：HTTP \(code)（\(u.absoluteString)）"
         } catch {
             return "加载失败：\(error.localizedDescription)（\(u.absoluteString)）"
         }
@@ -1245,13 +1253,31 @@ struct BookReaderView: View {
             await MainActor.run { forceVideoPlayback = true }
             return ""
         }
-        // 漫画 / 图片书源：ruleContent 返回的是图片地址列表（HTML <img> / JSON 数组 /
-        // 一行一个 URL / 懒加载属性）。文本清洗会把这些地址当正文显示，必须切成图片页。
-        // ≥2 张直接切；只有 1 张（长图 / 单页章节）时，正文若无可读中文也切，
-        // 避免小说正文里偶发的封面图被误判成漫画。
-        let images = ComicPageDetector.imageURLs(from: raw, base: url)
+        // 漫画 / 图片书源三级兜底（v44，公子 11-06 三张截图实证）：
+        // ① ruleContent 结果；② 章节页原始 HTML——规则只取到 textContent 或失配时，
+        //    图片地址其实还留在页面里；③ 隐藏 WebView 真实执行页面 JS 后的 DOM——
+        //    卡拉漫画这类站点把图片地址加密（player_aaaa encrypt=3），由 JS 解密后
+        //    才插入 <img>，纯 HTML 里一张图都没有，只靠前两级必然显示「本章无内容」。
+        var images = ComicPageDetector.imageURLs(from: raw, base: url)
+        let textOnlyRule = raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let comicChapter = Self.looksLikeComicChapter(title: title, raw: raw)
+        if images.count < 2 {
+            let fromHTML = ComicPageDetector.imageURLs(from: html, base: url)
+            if fromHTML.count > images.count { images = fromHTML }
+        }
+        if images.count < 2 && (textOnlyRule || comicChapter) {
+            let probed = await ComicPageProbe.imageURLStrings(from: url, headers: headers)
+            if !probed.isEmpty {
+                let fromDOM = ComicPageDetector.imageURLs(
+                    from: probed.joined(separator: "\n"), base: url, looseLines: true)
+                if fromDOM.count > images.count { images = fromDOM }
+            }
+        }
         let imageOnly = !images.isEmpty && ComicPageDetector.isImageOnlyPayload(raw)
-        if images.count >= 2 || imageOnly {
+        let comicSignal = imageOnly || textOnlyRule || comicChapter
+        let manyImages = images.count >= 2 && (comicSignal || ComicPageDetector.isImageOnlyPayload(html))
+        let singleLongImage = images.count == 1 && comicSignal
+        if manyImages || singleLongImage {
             await MainActor.run {
                 comicPages = images
                 comicHeaders = headers
@@ -1277,6 +1303,20 @@ struct BookReaderView: View {
     }
 
     // MARK: - 内容清洗
+
+    /// 章节名 / 正文是否呈现漫画特征（卷、话、页、p、集、chapter…），
+    /// 用于放宽「只有一张图也切图片页」的条件，覆盖长图 / 单页章节。
+    static func looksLikeComicChapter(title: String, raw: String) -> Bool {
+        let t = title.lowercased()
+        let marks = ["卷", "话", "页", "p)", "p）", "集", "chapter", "episode", "page"]
+        if marks.contains(where: { t.contains($0) }) { return true }
+        let r = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !r.isEmpty, r.count < 800 {
+            let lower = r.lowercased()
+            if lower.contains("<img") || lower.contains("data-original") { return true }
+        }
+        return false
+    }
 
     /// 判断正文规则结果是否为「视频载荷」（播放地址而非可读正文）。
     /// 判定条件刻意收紧：必须含媒体特征，且主体是单个 / 少量 URL 或 JSON 行，
@@ -1413,11 +1453,47 @@ struct BookReaderView: View {
         return result
     }
 
+    /// 规则求值可能把多个候选值用换行拼成一个字符串（RuleEngine.stringValue 对数组
+    /// join("\n")）。整串交给 URL(string:) 会把换行编码成 %0A，请求
+    /// `https://…/67213.html%0A/comic/67213.html` 这样的畸形路径 → HTTP 403
+    /// （公子 11-06 截图逐字实证）。这里按行拆开，优先挑「不是目录页」的章节链接。
+    private func urlFieldCandidates(_ raw: String, avoiding page: String?) -> [String] {
+        let lines = raw.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        var seen = Set<String>()
+        var unique: [String] = []
+        for line in lines where !seen.contains(line) {
+            seen.insert(line)
+            unique.append(line)
+        }
+        guard unique.count > 1, let page else { return unique }
+        let chapterMarks = ["chapter", "/read", "read/", "/page", "episode",
+                            "-1-", "-2-", "话", "卷", "页", "/p/"]
+        func score(_ s: String) -> Int {
+            let lower = s.lowercased()
+            var v = 0
+            if chapterMarks.contains(where: { lower.contains($0) }) { v += 2 }
+            if lower == page.lowercased() || lower.hasSuffix(page.lowercased()) { v -= 3 }
+            if lower.contains("/comic/") && !lower.contains("chapter") { v -= 1 }
+            return v
+        }
+        // 稳定排序：分数降序，同分保持原顺序
+        return unique.enumerated()
+            .sorted { a, b in
+                let sa = score(a.element), sb = score(b.element)
+                return sa == sb ? a.offset < b.offset : sa > sb
+            }
+            .map { $0.element }
+    }
+
     private func resolveURL(_ relative: String, base: URL?) -> URL? {
         guard !relative.isEmpty else { return nil }
-        if let url = URLSanitizer.sanitize(relative) { return url }
-        guard let base else { return nil }
-        return URL(string: relative, relativeTo: base)?.absoluteURL
+        for candidate in urlFieldCandidates(relative, avoiding: base?.absoluteString) {
+            if let url = URLSanitizer.sanitize(candidate) { return url }
+            if let base, let u = URL(string: candidate, relativeTo: base)?.absoluteURL { return u }
+        }
+        return nil
     }
 }
 

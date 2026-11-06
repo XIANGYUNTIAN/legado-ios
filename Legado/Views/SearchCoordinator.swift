@@ -76,7 +76,13 @@ enum SearchCoordinator {
         JsJavaBridge.suppressWebViewUI = true
         defer { JsJavaBridge.suppressWebViewUI = false }
         var outcome = SearchOutcome()
-        let total = sources.count
+        // v44：视频 / 图片书源优先入队。公子反馈「按名称搜视频总搜不到」——
+        // 全量书源里视频源往往排在末尾，而 hitTarget 命中 50 本即停止入队新源，
+        // 前排文本源一命中就把所有视频源跳过了，搜索结果里自然永远没有视频。
+        let mediaSources = sources.filter { $0.isVideoLike || $0.isComicLike }
+        let textSources = sources.filter { !($0.isVideoLike || $0.isComicLike) }
+        let orderedSources = mediaSources + textSources
+        let total = orderedSources.count
         let startTime = Date()
         // 共享可变聚合容器（引用类型，供 OperationQueue 自备线程并发写入；
         // 不能让 BlockOperation 闭包直接改外部的 struct outcome——struct 会被值捕获，写入失效）
@@ -94,11 +100,12 @@ enum SearchCoordinator {
         workerLock.lock(); currentWorker = worker; workerLock.unlock()
         defer { workerLock.lock(); currentWorker = nil; workerLock.unlock() }
 
-        for source in sources {
+        for source in orderedSources {
             if Task.isCancelled { break }
             // 命中达标 / 全局预算到期：不再入队新源（在途请求自然收尾，尾部有界）。
+            // 但视频 / 图片源必须全部入队，否则「搜视频」永远看不到结果。
             agg.lock.lock(); let shouldStop = agg.stopEnqueue; agg.lock.unlock()
-            if shouldStop { break }
+            if shouldStop && !(source.isVideoLike || source.isComicLike) { break }
             if Date().timeIntervalSince(startTime) > globalBudget { break }
             enqueued += 1
             // 入队即回传：用「已入队」计数给用户即时反馈，消除「长时间无进展」的假死观感
@@ -499,7 +506,9 @@ enum SearchCoordinator {
         // 同时仍剔除「开局签到诛仙神剑」这类关键词仅作书名片段的无关书（书名既不等全
         // 也不以前缀开头）；模糊模式保留书名/作者/简介包含关键词的结果。
         // 过滤后的结果按相关度排序，让最匹配的书置顶。
-        let kept = extracted.filter { shouldKeep($0, keyword: keyword, mode: mode) }
+        let mediaSource = source.isVideoLike || source.isComicLike
+        let kept = extracted.filter { shouldKeep($0, keyword: keyword, mode: mode,
+                                                 mediaSource: mediaSource) }
         let ranked = kept
             .map { book in (book, relevanceScore(book, keyword: keyword, mode: mode)) }
             .sorted { $0.1 > $1.1 }
@@ -567,7 +576,8 @@ enum SearchCoordinator {
     /// - 模糊模式：legado 官方不做关键词二次过滤，全部保留（仅空条目已在上方丢弃）；
     ///   用户原话「模糊可以、精确需限定」，故仅在精确模式做相关性收敛。
     /// 始终丢弃「书名与详情链接皆为空」的无效条目。
-    private static func shouldKeep(_ book: ExploredBook, keyword: String, mode: SearchMode) -> Bool {
+    private static func shouldKeep(_ book: ExploredBook, keyword: String, mode: SearchMode,
+                                   mediaSource: Bool = false) -> Bool {
         let name = book.name.trimmingCharacters(in: .whitespacesAndNewlines)
         let author = book.author.trimmingCharacters(in: .whitespacesAndNewlines)
         let url = book.bookUrl.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -581,6 +591,9 @@ enum SearchCoordinator {
             // 主干须以关键词为主、不得夹带其他中文字（剔除「诛仙诀」「诛仙传」等无关书）。
             // 书名空无法判断时保留（避免误删）。
             if name.isEmpty { return true }
+            // 视频 / 漫画结果名常带「第01集 / 1080P / 第1卷 (104p) / 完结」等后缀，
+            // 严格书名匹配会把它们全部剔掉，表现为「搜视频永远 0 命中」。
+            if mediaSource { return name.lowercased().contains(k.lowercased()) }
             return strictMatchName(name, k)
         }
         // 模糊：legado 官方不做二次过滤，全部保留（仅空条目已在上方丢弃）
@@ -705,8 +718,8 @@ enum SearchCoordinator {
         for item in items {
             let name = BookListAnalyzer.field(rules.name, item: item, engine: engine)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            let bookUrlRaw = BookListAnalyzer.field(rules.bookUrl, item: item, engine: engine)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let bookUrlRaw = Self.firstURLField(
+                BookListAnalyzer.field(rules.bookUrl, item: item, engine: engine))
             // legado 不按书名为空丢弃搜索结果：书名提取为空但详情链接有效时仍可进书架/阅读，
             // 应保留；仅当书名与详情链接皆为空才跳过（无效条目）。
             guard !(name.isEmpty && bookUrlRaw.isEmpty) else { continue }
@@ -728,6 +741,14 @@ enum SearchCoordinator {
         // 不再因「name 全空」抛错：与 legado 官方搜索「返回搜索页解析出的全部书」语义一致，
         // 书名提取为空但详情链接有效的书已在上循环保留；无有效条目时返回空数组（计为 0 命中，不判失败）。
         return result
+    }
+
+    /// 详情链接字段同样可能被规则求值拼成多行（数组 → "\n" join），
+    /// 取第一行，避免生成含 %0A 的畸形 URL（与章节页同一个坑）。
+    private static func firstURLField(_ raw: String) -> String {
+        raw.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty }) ?? ""
     }
 
     private static func resolveURL(_ relative: String, base: URL?) -> URL? {
