@@ -43,7 +43,8 @@ struct SiteSearchHit: Sendable {
     let sourceId: String
     let sourceName: String
     /// 该剧的全部剧集。非空时点 ▶ 直接进播放器，不再二次抓网页。
-    let episodes: [SiteEpisode] = []
+    /// 必须是 var：let + 默认值会让 Swift 的 memberwise init 省略该参数。
+    var episodes: [SiteEpisode] = []
 }
 
 /// 每站 HTTP 抓取结果 + 该站可用于 WebView 兜底的页面地址
