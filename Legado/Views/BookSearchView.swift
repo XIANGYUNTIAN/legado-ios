@@ -36,6 +36,8 @@ struct SiteShortcut: Identifiable {
     let id: String
     let name: String
     let url: URL
+    /// 带关键词的站内搜索结果页；点直达直接落在结果上，不必再手动输一次。
+    let searchURL: URL?
 }
 
 /// 一个 sheet item 承载两种去向，避免两个 .sheet 同时争抢 presented 状态。
@@ -81,6 +83,10 @@ struct BookSearchView: View {
     @State private var playback: SearchPlaybackRoute?
     /// 正在做直链解析的目标，用来显示进度并防止重复点击
     @State private var resolvingTarget: URL?
+    /// 影视站点通用站内搜索（不依赖书源规则），与规则搜索并行
+    @State private var siteSearching = false
+    @State private var siteResults: [ExploredBook] = []
+    @State private var siteTask: Task<Void, Never>?
 
     /// 可搜索的书源：配置了含 {{key}} 的 searchUrl 且具备 ruleSearch.bookList
     private var searchableSources: [BookSource] {
@@ -99,7 +105,10 @@ struct BookSearchView: View {
         for s in sourceStore.sources where s.enabled && !s.supportsSearch {
             guard let u = s.siteURLs.first else { continue }
             let name = s.bookSourceName.isEmpty ? (u.host ?? u.absoluteString) : s.bookSourceName
-            out.append(SiteShortcut(id: s.bookSourceUrl + "|" + name, name: name, url: u))
+            let target = SiteSearchService.target(source: s)
+            out.append(SiteShortcut(id: s.bookSourceUrl + "|" + name, name: name, url: u,
+                                    searchURL: SiteSearchService.preferredSearchURL(
+                                        target: target, keyword: searchKeyword)))
         }
         // 有搜索规则的影视站点源也留一个进站出口：规则失效 / 站点改版时
         // 规则搜索会返回 0 命中，但站内仍能搜到并播放（公子实测的场景）。
@@ -109,7 +118,10 @@ struct BookSearchView: View {
             let name = s.bookSourceName.isEmpty ? (u.host ?? u.absoluteString) : s.bookSourceName
             let key = s.bookSourceUrl + "|" + name
             if out.contains(where: { $0.id == key }) { continue }
-            out.append(SiteShortcut(id: key, name: name, url: u))
+            let target = SiteSearchService.target(source: s)
+            out.append(SiteShortcut(id: key, name: name, url: u,
+                                    searchURL: SiteSearchService.preferredSearchURL(
+                                        target: target, keyword: searchKeyword)))
         }
         guard !out.isEmpty else { return [] }
         let k = searchKeyword.lowercased()
@@ -122,6 +134,23 @@ struct BookSearchView: View {
             if ak != bk { return ak > bk }
             return a.name < b.name
         }.prefix(12))
+    }
+
+    /// 参与通用站内搜索的影视站点：优先影视词命中，最多 10 个控制并发量。
+    /// 与「站点直达」同源，保证黄果剧场这类名称带「剧场」的站一定被查。
+    private var siteTargets: [SiteTarget] {
+        let list = sourceStore.sources.filter { s in
+            guard s.enabled, s.siteURLs.first != nil else { return false }
+            return !s.supportsSearch || s.isVideoLike || s.isComicLike
+                || BookSource.looksLikeMediaName(s.bookSourceName)
+        }
+        let sorted = list.sorted { a, b in
+            let am = BookSource.looksLikeMediaName(a.bookSourceName) ? 1 : 0
+            let bm = BookSource.looksLikeMediaName(b.bookSourceName) ? 1 : 0
+            if am != bm { return am > bm }
+            return a.bookSourceName < b.bookSourceName
+        }
+        return Array(sorted.prefix(10).map { SiteSearchService.target(source: $0) })
     }
 
     /// 站点直达区只在搜索结束后出现，避免搜索中列表抖动。
@@ -234,6 +263,16 @@ struct BookSearchView: View {
                 Text("精确模式遍历全部书源；视频结果点 ▶ 直达播放，找不到可试「站点直达」 · build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?")")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if siteSearching {
+                    Text("正在影视站点内搜索同名剧集…")
+                        .font(.caption2)
+                        .foregroundStyle(.tint)
+                }
+                if !siteResults.isEmpty {
+                    Text("站内搜索补回 \(siteResults.count) 条 · 点 ▶ 直接播放")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                }
 
                 // 关键词 + 搜索 / 停止
                 HStack(spacing: 8) {
@@ -271,13 +310,13 @@ struct BookSearchView: View {
                 .padding(.bottom, 6)
             }
 
-            if let error = errorMessage {
+            if let error = errorMessage, !hasSiteSection, siteResults.isEmpty {
                 ContentUnavailableView {
                     Label("搜索结束", systemImage: "exclamationmark.magnifyingglass")
                 } description: {
                     Text(error)
                 }
-            } else if results.isEmpty && sourceErrors.isEmpty && searchSummary.isEmpty
+            } else if results.isEmpty && siteResults.isEmpty && sourceErrors.isEmpty && searchSummary.isEmpty
                         && !isSearching && progressSink.text == nil {
                 ContentUnavailableView {
                     Label("输入关键词开始搜索", systemImage: "text.magnifyingglass")
@@ -289,7 +328,7 @@ struct BookSearchView: View {
                 ContentUnavailableView {
                     Label("当前范围没有结果", systemImage: "line.3.horizontal.decrease.circle")
                 } description: {
-                    Text("本轮共搜到 \(results.count) 条，切到「全部」查看")
+                    Text("本轮共搜到 \(allResults.count) 条，切到「全部」查看")
                 }
             } else {
                 List {
@@ -345,20 +384,22 @@ struct BookSearchView: View {
                                 .buttonStyle(.borderless)
                                 .disabled(resolvingTarget != nil)
                             }
-                            Button {
-                                addToShelf(book)
-                            } label: {
-                                Image(systemName: "plus.circle.fill")
-                                    .foregroundStyle(.tint)
+                            if !book.intro.hasPrefix("站内搜索") {
+                                Button {
+                                    addToShelf(book)
+                                } label: {
+                                    Image(systemName: "plus.circle.fill")
+                                        .foregroundStyle(.tint)
+                                }
+                                .buttonStyle(.borderless)
                             }
-                            .buttonStyle(.borderless)
                         }
                         .padding(.vertical, 4)
                     }
 
                     if hasSiteSection && displayedResults.isEmpty {
                         Section {
-                            Text("本轮规则搜索共 \(results.count) 条，当前范围没有匹配项。以下书源没有搜索规则，需进站查找：")
+                            Text("本轮规则搜索共 \(allResults.count) 条，当前范围没有匹配项。以下书源没有搜索规则，需进站查找：")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -367,8 +408,9 @@ struct BookSearchView: View {
                         Section("站点直达 · 规则搜索覆盖不到这些源") {
                             ForEach(siteShortcuts) { shortcut in
                                 Button {
-                                    playback = .browser(SearchPlayback(url: shortcut.url,
-                                                                       title: shortcut.name))
+                                    playback = .browser(SearchPlayback(
+                                        url: shortcut.searchURL ?? shortcut.url,
+                                        title: shortcut.name))
                                 } label: {
                                     HStack {
                                         Image(systemName: "safari")
@@ -426,12 +468,26 @@ struct BookSearchView: View {
     /// 搜索结果本身不带类型字段。v45 前只靠「来源书源 isVideoLike」这一个启发式，
     /// 判错一次就全链路失效：结果被「视频」范围筛掉、精确模式剔掉、▶ 也不给。
     /// 改为「书源 + 结果文本 + 链接路径」三通道，任一命中即按媒体处理。
+    /// 规则结果与站内结果合并（按详情链接去重）。两路写入不同 @State，
+    /// 规则搜索的流式刷新不会把先到的站内结果冲掉。
+    private var allResults: [ExploredBook] {
+        var seen = Set(results.map { $0.bookUrl.lowercased() })
+        var out = results
+        for b in siteResults {
+            let k = b.bookUrl.lowercased()
+            if seen.contains(k) { continue }
+            seen.insert(k)
+            out.append(b)
+        }
+        return out
+    }
+
     private var displayedResults: [ExploredBook] {
         let base: [ExploredBook]
         switch resultKind {
-        case .all: base = results
-        case .media: base = results.filter { isMediaResult($0) }
-        case .book: base = results.filter { !isMediaResult($0) }
+        case .all: base = allResults
+        case .media: base = allResults.filter { isMediaResult($0) }
+        case .book: base = allResults.filter { !isMediaResult($0) }
         }
         let k = searchKeyword.lowercased()
         guard !k.isEmpty else { return base }
@@ -450,6 +506,8 @@ struct BookSearchView: View {
     }
 
     private func isMediaResult(_ book: ExploredBook) -> Bool {
+        // 通用站内搜索产出的结果本来就来自影视站点，不再走名称 / 路径启发式。
+        if book.intro.hasPrefix("站内搜索") { return true }
         if sourceLooksLikeMedia(book) { return true }
         let text = "\(book.name) \(book.intro) \(book.lastChapter) \(book.sourceName)".lowercased()
         let patterns = ["第[0-9]+集", "共[0-9]+集", "全[0-9]+集", "更新至", "连载中",
@@ -490,7 +548,13 @@ struct BookSearchView: View {
         }
 
         searchTask?.cancel()
+        siteTask?.cancel()
+        // 「书籍」范围不跑站内搜索；其余范围与规则搜索并行发起。
+        let runSite = resultKind != .book
+        let siteTargetsCopy = runSite ? siteTargets : []
+        siteSearching = runSite
         results = []
+        siteResults = []
         sourceErrors = []
         errorMessage = nil
         isSearching = true
@@ -532,6 +596,40 @@ struct BookSearchView: View {
                 progressSink.text = nil
             }
         }
+        // 精确模式全源遍历可能要几分钟，站内搜索必须并行跑，几秒内就能出视频结果。
+        // 结果单独写 siteResults，by design 不与规则搜索的 results 互相覆盖。
+        if runSite, !siteTargetsCopy.isEmpty {
+            siteTask = Task.detached(priority: .userInitiated) {
+                let hits = await SiteSearchService.search(targets: siteTargetsCopy,
+                                                          keyword: keywordCopy)
+                await MainActor.run {
+                    siteSearching = false
+                    guard !hits.isEmpty else { return }
+                    var seen = Set<String>()
+                    var added: [ExploredBook] = []
+                    for h in hits {
+                        let key = h.url.lowercased()
+                        if seen.contains(key) { continue }
+                        seen.insert(key)
+                        added.append(ExploredBook(
+                            name: h.name,
+                            author: "",
+                            intro: "站内搜索 · 影视",
+                            bookUrl: h.url,
+                            coverUrl: "",
+                            lastChapter: "",
+                            sourceId: h.sourceId,
+                            sourceName: h.sourceName
+                        ))
+                    }
+                    guard !added.isEmpty else { return }
+                    siteResults = added
+                    errorMessage = nil
+                }
+            }
+        } else {
+            siteSearching = false
+        }
     }
 
     /// 随时停止：取消任务 + 取消在途网络与已入队 Operation，实现「点停止马上停」
@@ -541,7 +639,10 @@ struct BookSearchView: View {
         // 立即终止搜索会话：cancelAllOperations 让未开始的源不再执行，
         // cancelActiveRequests 让在途网络请求立即抛错收尾，无需等 20s 超时。
         SearchCoordinator.stopCurrent()
+        siteTask?.cancel()
+        siteTask = nil
         isSearching = false
+        siteSearching = false
         progressSink.text = nil
     }
 
