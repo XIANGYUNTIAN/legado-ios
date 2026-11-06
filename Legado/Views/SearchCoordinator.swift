@@ -76,6 +76,10 @@ enum SearchCoordinator {
         JsJavaBridge.suppressWebViewUI = true
         defer { JsJavaBridge.suppressWebViewUI = false }
         var outcome = SearchOutcome()
+        // v45：精确模式要找的是「这一个名字」，命中 N 本就停止入队会让排在
+        // 末尾的影视站点源永远不被查询（720 源里视频站常排在后面）。精确模式
+        // 全源查完，不提前停止；模糊模式只是随便翻翻，保留命中即停。
+        let effectiveTarget = (mode == .precise) ? 0 : hitTarget
         // v44：视频 / 图片书源优先入队。公子反馈「按名称搜视频总搜不到」——
         // 全量书源里视频源往往排在末尾，而 hitTarget 命中 50 本即停止入队新源，
         // 前排文本源一命中就把所有视频源跳过了，搜索结果里自然永远没有视频。
@@ -105,7 +109,8 @@ enum SearchCoordinator {
             // 命中达标 / 全局预算到期：不再入队新源（在途请求自然收尾，尾部有界）。
             // 但视频 / 图片源必须全部入队，否则「搜视频」永远看不到结果。
             agg.lock.lock(); let shouldStop = agg.stopEnqueue; agg.lock.unlock()
-            if shouldStop && !(source.isVideoLike || source.isComicLike) { break }
+            if effectiveTarget > 0 && shouldStop
+                && !(source.isVideoLike || source.isComicLike) { break }
             if Date().timeIntervalSince(startTime) > globalBudget { break }
             enqueued += 1
             // 入队即回传：用「已入队」计数给用户即时反馈，消除「长时间无进展」的假死观感
@@ -159,7 +164,7 @@ enum SearchCoordinator {
                 let curCompleted = agg.completed
                 agg.lock.unlock()
                 // 命中达标：通知入队循环停止拉新源
-                if hitTarget > 0, curResults.count >= hitTarget {
+                if effectiveTarget > 0, curResults.count >= effectiveTarget {
                     agg.lock.lock(); agg.stopEnqueue = true; agg.lock.unlock()
                 }
                 // 立即推进度 + 流式命中，UI 边搜边出
@@ -204,8 +209,8 @@ enum SearchCoordinator {
             summary += "\n失败样例：\n" + sampled.joined(separator: "\n")
         }
         if timedOut {
-            let reason = (hitTarget > 0 && outcome.results.count >= hitTarget)
-                ? "🎯 命中 \(hitTarget) 本达标，提前停止（完成 \(completed)/\(total)）"
+            let reason = (effectiveTarget > 0 && outcome.results.count >= effectiveTarget)
+                ? "🎯 命中 \(effectiveTarget) 本达标，提前停止（完成 \(completed)/\(total)）"
                 : "⏱ 已达 \(Int(globalBudget))s 全局预算，提前结束（完成 \(completed)/\(total)）"
             summary = reason + "\n" + summary
         }
@@ -623,6 +628,17 @@ enum SearchCoordinator {
         n = n.replacingOccurrences(of: #"[卷册部篇章][0-9一二三四五六七八九十百千零]+"#, with: "", options: .regularExpression)
         n = n.replacingOccurrences(of: #"[卷册部篇章]$"#, with: "", options: .regularExpression)
         n = n.replacingOccurrences(of: #"(上|下|上册|下册|上卷|下卷|第一部|第二部|第三部)"#, with: "", options: .regularExpression)
+        // v45：影视结果名常带「第01集 / 1080P / 第1季 / (2024) / 完结」等后缀。
+        // 原判据要求「去掉关键词后残余不含中文」，会把它们全部剔掉，表现为
+        // 「按名称搜视频永远 0 命中」。先剥剧集装饰，再走原来的严格判据；
+        // 「开局签到诛仙神剑」这类无关书残余仍含中文，照旧剔除。
+        n = n.replacingOccurrences(of: #"第[0-9一二三四五六七八九十百千零]+[集季部话期]"#, with: "", options: .regularExpression)
+        n = n.replacingOccurrences(of: #"[0-9]{1,4}[pPkK]|20[0-9]{2}"#, with: "", options: .regularExpression)
+        for d in ["完结", "连载中", "连载", "更新至", "全集", "正片", "预告",
+                  "剧场版", "高清", "蓝光", "国语", "中字", "未删减", "粤语",
+                  "普通话", "HD", "BD", "EP", "OVA", "DVD"] {
+            n = n.replacingOccurrences(of: d, with: "")
+        }
         // ③ 去掉末尾罗马数字 / 圈码 / 数字
         n = n.replacingOccurrences(of: #"[Ⅰ-Ⅻ①②③④⑤⑥⑦⑧⑨⑩0-9]+$"#, with: "", options: .regularExpression)
         // 必须包含关键词

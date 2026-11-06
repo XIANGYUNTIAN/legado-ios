@@ -218,10 +218,20 @@ struct BookSource: Codable, Identifiable, Equatable {
         // 明确的非文本类型：图片 / 音频 / 文件都不该进视频播放器
         if bookSourceType == .image || bookSourceType == .audio
             || bookSourceType == .file { return false }
-        let text = "\(bookSourceName) \(bookSourceGroup ?? "")".lowercased()
+        let text = "\(bookSourceName) \(bookSourceGroup ?? "") \(bookSourceUrl)".lowercased()
         let comicHints = ["漫画", "画集", "本子", "图片", "comic", "manga",
                           "manhua", "cartoon", "📚"]
         if comicHints.contains(where: { text.contains($0) }) { return false }
+        // v45：站点名不含「视频/影视」二字的影视站（「黄果剧场」「XX 剧吧」等）
+        // 此前一律漏判。规则串里的播放写法比名称更可靠：只要搜索/正文规则出现
+        // vod / m3u8 / mp4 / startBrowser 之类，就按视频源处理。
+        let ruleText = [
+            ruleContent?.content, ruleContent?.webJs, ruleContent?.sourceRegex,
+            ruleSearch?.bookList, ruleSearch?.bookUrl, searchUrl, exploreUrl
+        ].compactMap { $0?.lowercased() }.joined(separator: "\n")
+        let playSignals = ["m3u8", "vod_play_url", "api.php/provide/vod",
+                           "startbrowser", ".mp4", "vod/?ac=detail", "play_url"]
+        if playSignals.contains(where: { ruleText.contains($0) }) { return true }
         // 明确的播放写法优先于下面所有弱信号
         if let content = ruleContent?.content?.lowercased(),
            content.contains("startbrowser") || content.contains("m3u8") {
@@ -236,9 +246,18 @@ struct BookSource: Codable, Identifiable, Equatable {
         }
         if ruleContent?.sourceRegex?.isEmpty == false { return true }
         if ruleContent?.webJs?.isEmpty == false { return true }
+        return Self.looksLikeMediaName(text)
+    }
+
+    /// 名称 / 分组 / 站点地址里是否带影视特征。搜索结果分类与「站点直达」排序共用，
+    /// 避免「黄果剧场」「XX 剧吧」这类不含「视频」二字的站点被整条链路漏掉。
+    static func looksLikeMediaName(_ raw: String) -> Bool {
+        let t = raw.lowercased()
         let hints = ["视频", "影视", "电影", "剧集", "影院", "影音", "短剧",
-                     "资源采集", "📺", "📽", "m3u8", "video", "movie"]
-        return hints.contains { text.contains($0) }
+                     "剧场", "剧吧", "追剧", "看剧", "片库", "影库",
+                     "资源采集", "📺", "📽", "🎬", "m3u8", "video", "movie",
+                     "vod", "drama", "cinema", "film", "series"]
+        return hints.contains { t.contains($0) }
     }
 
     /// 是否为漫画 / 图片书源：正文只有 1 张图（长图、单页章节）时也应切图片页。

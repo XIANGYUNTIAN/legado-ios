@@ -30,6 +30,14 @@ struct SearchPlayback: Identifiable {
     let title: String
 }
 
+/// 无搜索规则、但有可浏览站点的书源：规则搜索遍历不到它们，给一个
+/// 「进站查找」出口，覆盖「网页里能搜到能播、搜索页却没有」的影视站点源。
+struct SiteShortcut: Identifiable {
+    let id: String
+    let name: String
+    let url: URL
+}
+
 /// 一个 sheet item 承载两种去向，避免两个 .sheet 同时争抢 presented 状态。
 enum SearchPlaybackRoute: Identifiable {
     case episodes(VodEpisodeList)
@@ -77,6 +85,48 @@ struct BookSearchView: View {
     /// 可搜索的书源：配置了含 {{key}} 的 searchUrl 且具备 ruleSearch.bookList
     private var searchableSources: [BookSource] {
         sourceStore.sources.filter { $0.supportsSearch && $0.enabled }
+    }
+
+    private var searchKeyword: String {
+        keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 没有 searchUrl / ruleSearch.bookList 的书源根本不进搜索队列。
+    /// 站点类影视源（书源详情能进站、站内能搜能播）正属于这一类。
+    private var siteShortcuts: [SiteShortcut] {
+        guard !searchKeyword.isEmpty else { return [] }
+        var out: [SiteShortcut] = []
+        for s in sourceStore.sources where s.enabled && !s.supportsSearch {
+            guard let u = s.siteURLs.first else { continue }
+            let name = s.bookSourceName.isEmpty ? (u.host ?? u.absoluteString) : s.bookSourceName
+            out.append(SiteShortcut(id: s.bookSourceUrl + "|" + name, name: name, url: u))
+        }
+        // 有搜索规则的影视站点源也留一个进站出口：规则失效 / 站点改版时
+        // 规则搜索会返回 0 命中，但站内仍能搜到并播放（公子实测的场景）。
+        for s in sourceStore.sources where s.enabled && s.supportsSearch
+            && (s.isVideoLike || BookSource.looksLikeMediaName(s.bookSourceName)) {
+            guard let u = s.siteURLs.first else { continue }
+            let name = s.bookSourceName.isEmpty ? (u.host ?? u.absoluteString) : s.bookSourceName
+            let key = s.bookSourceUrl + "|" + name
+            if out.contains(where: { $0.id == key }) { continue }
+            out.append(SiteShortcut(id: key, name: name, url: u))
+        }
+        guard !out.isEmpty else { return [] }
+        let k = searchKeyword.lowercased()
+        return Array(out.sorted { a, b -> Bool in
+            let am = BookSource.looksLikeMediaName(a.name) ? 1 : 0
+            let bm = BookSource.looksLikeMediaName(b.name) ? 1 : 0
+            if am != bm { return am > bm }
+            let ak = a.name.lowercased().contains(k) ? 1 : 0
+            let bk = b.name.lowercased().contains(k) ? 1 : 0
+            if ak != bk { return ak > bk }
+            return a.name < b.name
+        }.prefix(12))
+    }
+
+    /// 站点直达区只在搜索结束后出现，避免搜索中列表抖动。
+    private var hasSiteSection: Bool {
+        !isSearching && progressSink.text == nil && !siteShortcuts.isEmpty
     }
 
     /// 无可用搜索书源时的可操作诊断：按条件逐层排查，告诉用户差在哪、怎么补
@@ -181,7 +231,7 @@ struct BookSearchView: View {
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 200)
                 }
-                Text("视频 / 漫画源优先搜索；视频结果点 ▶ 直接进站播放 · build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?")")
+                Text("精确模式遍历全部书源；视频结果点 ▶ 直达播放，找不到可试「站点直达」 · build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?")")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -227,13 +277,15 @@ struct BookSearchView: View {
                 } description: {
                     Text(error)
                 }
-            } else if results.isEmpty && sourceErrors.isEmpty && !isSearching && progressSink.text == nil {
+            } else if results.isEmpty && sourceErrors.isEmpty && searchSummary.isEmpty
+                        && !isSearching && progressSink.text == nil {
                 ContentUnavailableView {
                     Label("输入关键词开始搜索", systemImage: "text.magnifyingglass")
                 } description: {
                     Text("将遍历全部可搜索书源，按书名 / 视频名 / 作者匹配")
                 }
-            } else if displayedResults.isEmpty && !isSearching && progressSink.text == nil {
+            } else if displayedResults.isEmpty && !hasSiteSection
+                        && !isSearching && progressSink.text == nil {
                 ContentUnavailableView {
                     Label("当前范围没有结果", systemImage: "line.3.horizontal.decrease.circle")
                 } description: {
@@ -304,6 +356,40 @@ struct BookSearchView: View {
                         .padding(.vertical, 4)
                     }
 
+                    if hasSiteSection && displayedResults.isEmpty {
+                        Section {
+                            Text("本轮规则搜索共 \(results.count) 条，当前范围没有匹配项。以下书源没有搜索规则，需进站查找：")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if hasSiteSection {
+                        Section("站点直达 · 规则搜索覆盖不到这些源") {
+                            ForEach(siteShortcuts) { shortcut in
+                                Button {
+                                    playback = .browser(SearchPlayback(url: shortcut.url,
+                                                                       title: shortcut.name))
+                                } label: {
+                                    HStack {
+                                        Image(systemName: "safari")
+                                            .foregroundStyle(.tint)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(shortcut.name)
+                                                .font(.subheadline)
+                                            Text("在站点内查找「\(searchKeyword)」")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        Image(systemName: "chevron.right")
+                                            .font(.caption)
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
                     if !sourceErrors.isEmpty {
                         Section("以下书源未返回结果或失败") {
                             ForEach(sourceErrors) { err in
@@ -337,16 +423,49 @@ struct BookSearchView: View {
 
     // MARK: - 结果范围筛选
 
-    /// 搜索结果本身不带类型字段，用来源书源的 isVideoLike / isComicLike 判定。
+    /// 搜索结果本身不带类型字段。v45 前只靠「来源书源 isVideoLike」这一个启发式，
+    /// 判错一次就全链路失效：结果被「视频」范围筛掉、精确模式剔掉、▶ 也不给。
+    /// 改为「书源 + 结果文本 + 链接路径」三通道，任一命中即按媒体处理。
     private var displayedResults: [ExploredBook] {
+        let base: [ExploredBook]
         switch resultKind {
-        case .all: return results
-        case .media: return results.filter { isMediaResult($0) }
-        case .book: return results.filter { !isMediaResult($0) }
+        case .all: base = results
+        case .media: base = results.filter { isMediaResult($0) }
+        case .book: base = results.filter { !isMediaResult($0) }
         }
+        let k = searchKeyword.lowercased()
+        guard !k.isEmpty else { return base }
+        // 全源并发的完成顺序不等于相关度；把精确命中提到最前面，免得要找的剧
+        // 被几十条小说命中压在列表底部。
+        return base.sorted { relevance($0, k) > relevance($1, k) }
+    }
+
+    private func relevance(_ book: ExploredBook, _ k: String) -> Int {
+        let n = book.name.lowercased()
+        if n == k { return 4 }
+        if n.hasPrefix(k) { return 3 }
+        if n.contains(k) { return 2 }
+        if book.author.lowercased().contains(k) { return 1 }
+        return 0
     }
 
     private func isMediaResult(_ book: ExploredBook) -> Bool {
+        if sourceLooksLikeMedia(book) { return true }
+        let text = "\(book.name) \(book.intro) \(book.lastChapter) \(book.sourceName)".lowercased()
+        let patterns = ["第[0-9]+集", "共[0-9]+集", "全[0-9]+集", "更新至", "连载中",
+                        "1080p", "720p", "2160p", "4k", "蓝光", "正片", "剧场版",
+                        "预告片", "国语版", "未删减", "第[0-9]+季", "ep[0-9]+", "ova"]
+        for p in patterns {
+            if text.range(of: p, options: .regularExpression) != nil { return true }
+        }
+        let link = book.bookUrl.lowercased()
+        let pathHints = ["/series/", "/vod/", "/video/", "/play/", "/movie/",
+                         "/drama/", "/watch/", "/bangumi/", "m3u8", ".mp4",
+                         "vod_play_url", "provide/vod"]
+        return pathHints.contains { link.contains($0) }
+    }
+
+    private func sourceLooksLikeMedia(_ book: ExploredBook) -> Bool {
         guard !book.sourceId.isEmpty else { return false }
         return sourceStore.sources.contains {
             BookSource.normalizedURL($0.bookSourceUrl) == BookSource.normalizedURL(book.sourceId)
@@ -463,7 +582,13 @@ struct BookSearchView: View {
     /// 它们的 bookUrl 是 `/api.php/provide/vod/?ac=detail&ids=…`，返回的 JSON 里
     /// `vod_play_url` 已经写好 m3u8 列表，解析后能直接播，不必再进网页。
     private func playbackTarget(for book: ExploredBook) -> URL? {
-        guard let source = videoSource(for: book), !book.bookUrl.isEmpty else { return nil }
+        // v45：只要结果被判为媒体就给 ▶，不再要求来源书源 isVideoLike。
+        // 站点名不含影视词的源此前连「点开进网页播放」这条路都没有。
+        guard isMediaResult(book), !book.bookUrl.isEmpty else { return nil }
+        let matchedSource: BookSource? = videoSource(for: book) ?? sourceStore.sources.first(where: {
+            BookSource.normalizedURL($0.bookSourceUrl) == BookSource.normalizedURL(book.sourceId)
+        })
+        guard let source = matchedSource else { return nil }
         if let absolute = URLSanitizer.sanitize(book.bookUrl) { return absolute }
         for base in source.siteURLs {
             if let u = URL(string: book.bookUrl, relativeTo: base)?.absoluteURL { return u }
