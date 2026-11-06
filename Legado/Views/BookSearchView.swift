@@ -40,14 +40,6 @@ struct SiteShortcut: Identifiable {
     let searchURL: URL?
 }
 
-/// 站内搜索 0 命中时的保底结果行（纯值，可跨 detached Task 传递）
-struct SiteFallbackRow: Sendable {
-    let name: String
-    let url: String
-    let sourceId: String
-    let sourceName: String
-}
-
 /// 一个 sheet item 承载两种去向，避免两个 .sheet 同时争抢 presented 状态。
 enum SearchPlaybackRoute: Identifiable {
     case episodes(VodEpisodeList)
@@ -178,7 +170,6 @@ struct BookSearchView: View {
     /// 站点直达区只在搜索结束后出现，避免搜索中列表抖动。
     private var hasSiteSection: Bool {
         !isSearching && progressSink.text == nil && !siteShortcuts.isEmpty
-            && siteResults.isEmpty
     }
 
     /// 无可用搜索书源时的可操作诊断：按条件逐层排查，告诉用户差在哪、怎么补
@@ -292,7 +283,7 @@ struct BookSearchView: View {
                         .foregroundStyle(.tint)
                 }
                 if !siteResults.isEmpty {
-                    Text("站内搜索补回 \(siteResults.count) 条 · 点 ▶ 直接播放")
+                    Text("站内命中 \(siteResults.count) 条 · 点 ▶ 直接播放")
                         .font(.caption2)
                         .foregroundStyle(.green)
                 }
@@ -438,7 +429,7 @@ struct BookSearchView: View {
                         }
                     }
                     if hasSiteSection {
-                        Section("站点直达 · 规则搜索覆盖不到这些源") {
+                        Section("站点直达 · 打开站内搜索页手动点选") {
                             ForEach(siteShortcuts) { shortcut in
                                 Button {
                                     playback = .browser(SearchPlayback(
@@ -451,7 +442,7 @@ struct BookSearchView: View {
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(shortcut.name)
                                                 .font(.subheadline)
-                                            Text("在站点内查找「\(searchKeyword)」")
+                                            Text("打开站内搜索页，手动点选影片播放")
                                                 .font(.caption2)
                                                 .foregroundStyle(.secondary)
                                         }
@@ -590,16 +581,6 @@ struct BookSearchView: View {
         siteResults = []
         siteDiagnostics = []
         sourceErrors = []
-        // 一个站都抽不出剧名时的保底行：直接落在带关键词的站内搜索结果页，
-        // 就是公子已验证「网页里能搜到、能播」的那条路径。
-        let fallbackCopy: [SiteFallbackRow] = siteTargetsCopy.compactMap { t in
-            guard let u = SiteSearchService.preferredSearchURL(
-                    target: t, keyword: trimmedKeyword) else { return nil }
-            return SiteFallbackRow(name: t.name + " · 站内搜索「" + trimmedKeyword + "」",
-                                   url: u.absoluteString,
-                                   sourceId: t.sourceId,
-                                   sourceName: t.name)
-        }
         errorMessage = nil
         isSearching = true
         progressSink.text = "正在搜索 \(sources.count) 个书源…"
@@ -666,20 +647,6 @@ struct BookSearchView: View {
                             sourceName: h.sourceName
                         ))
                     }
-                    if added.isEmpty {
-                        for row in fallbackCopy.prefix(12) {
-                            added.append(ExploredBook(
-                                name: row.name,
-                                author: "",
-                                intro: "站内搜索 · 影视",
-                                bookUrl: row.url,
-                                coverUrl: "",
-                                lastChapter: "",
-                                sourceId: row.sourceId,
-                                sourceName: row.sourceName
-                            ))
-                        }
-                    }
                     guard !added.isEmpty else { return }
                     siteResults = added
                     errorMessage = nil
@@ -744,6 +711,10 @@ struct BookSearchView: View {
         // v45：只要结果被判为媒体就给 ▶，不再要求来源书源 isVideoLike。
         // 站点名不含影视词的源此前连「点开进网页播放」这条路都没有。
         guard isMediaResult(book), !book.bookUrl.isEmpty else { return nil }
+        // v48：搜索页、列表接口、空参数解析接口不是播放目标，不给 ▶。
+        let low = book.bookUrl.lowercased()
+        let pageOnly = ["vodsearch", "/search", "?wd=", "&wd=", "keyword=", "?url=&"]
+        if pageOnly.contains(where: { low.contains($0) }) { return nil }
         let matchedSource: BookSource? = videoSource(for: book) ?? sourceStore.sources.first(where: {
             BookSource.normalizedURL($0.bookSourceUrl) == BookSource.normalizedURL(book.sourceId)
         })
@@ -756,14 +727,16 @@ struct BookSearchView: View {
         return URL(string: book.bookUrl, relativeTo: base)?.absoluteURL
     }
 
-    /// 点 ▶ 先把目标页内容取回来解析直链；命中就直接进原生播放器（无网页、无广告），
-    /// 没命中才回退到可浏览的站点页面。
+    /// 点 ▶ 三级兜底：HTTP/JSON 直链 → 隐藏 WebView 嗅探 → 详情页网页。
+    /// v48：不再把「站内搜索页」当成兜底目标，用户点结果不该再落回搜索页。
     @MainActor
     private func resolvePlayback(target: URL, name: String) async {
         guard resolvingTarget == nil else { return }
         resolvingTarget = target
         defer { resolvingTarget = nil }
         let headers = ["Referer": target.absoluteString]
+
+        // ① 采集接口 JSON / 页面明文直链
         if let text = try? await NetworkService.shared.fetchText(
             from: target, headers: headers, timeout: 12
         ) {
@@ -776,6 +749,24 @@ struct BookSearchView: View {
                 return
             }
         }
+
+        // ② JS 渲染详情页：从真实发起的媒体请求里拿直链
+        let probed = await PlaybackProbe.mediaURLs(from: target,
+                                                   referer: target.absoluteString)
+        if !probed.isEmpty {
+            var episodes: [VodEpisode] = []
+            for (idx, u) in probed.enumerated() {
+                let label = probed.count == 1 ? "播放" : "第\(idx + 1)集"
+                episodes.append(VodEpisode(name: label, url: u))
+            }
+            playback = .episodes(VodEpisodeList(title: name,
+                                                episodes: episodes,
+                                                headers: headers,
+                                                referer: target.absoluteString))
+            return
+        }
+
+        // ③ 仍拿不到直链：落到详情页本身（不是搜索页），网页里点播放即可
         playback = .browser(SearchPlayback(url: target, title: name))
     }
 

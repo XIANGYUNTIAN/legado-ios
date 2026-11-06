@@ -50,6 +50,27 @@ struct SiteSearchReport: Sendable {
 
 enum SiteSearchService {
 
+    /// 记下「实际返回过内容」的站内搜索页：站点直达优先用它，
+    /// 避免打开 0 结果的猜测地址（公子截图里 66yy / silidm 都是这种）。
+    private static let cacheLock = NSLock()
+    private static var goodSearchURLs: [String: String] = [:]
+
+    private static func remember(_ sourceId: String, _ url: URL, keyword: String) {
+        let s = url.absoluteString
+        guard !s.lowercased().contains("api.php") else { return }
+        cacheLock.lock()
+        goodSearchURLs[sourceId + "|" + keyword] = s
+        cacheLock.unlock()
+    }
+
+    private static func remembered(_ sourceId: String, keyword: String) -> URL? {
+        cacheLock.lock()
+        let raw = goodSearchURLs[sourceId + "|" + keyword]
+        cacheLock.unlock()
+        guard let raw = raw else { return nil }
+        return URLSanitizer.sanitize(raw)
+    }
+
     static func target(source: BookSource) -> SiteTarget {
         let urls = source.siteURLs.map { $0.absoluteString }
         let all = urls.isEmpty ? [source.bookSourceUrl] : Array(urls.prefix(4))
@@ -62,9 +83,14 @@ enum SiteSearchService {
 
     /// 「站点直达」用：一键打开站内搜索结果页，不再让用户进首页手动输关键词。
     static func preferredSearchURL(target: SiteTarget, keyword: String) -> URL? {
+        if let cached = remembered(target.sourceId, keyword: keyword) { return cached }
         let urls = candidateURLs(target: target, keyword: keyword)
-        // 采集接口返回的是 JSON，WebView 里只是一坨文本；直达优先落在可见的 HTML 搜索页。
-        return urls.first { !$0.absoluteString.lowercased().contains("api.php") } ?? urls.first
+        // 采集接口返回 JSON，WebView 里只是一坨文本；解析接口域名也没有可浏览页面。
+        let bad = ["api.php", "/m3u8/", "/parse/", "/jiexi/"]
+        return urls.first { u in
+            let s = u.absoluteString.lowercased()
+            return !bad.contains(where: { s.contains($0) })
+        }
     }
 
     /// 候选搜索页：书源自带 searchUrl 优先，其余为苹果 CMS / 通用影视站常见路径。
@@ -118,6 +144,15 @@ enum SiteSearchService {
                 urlPart = urlPart.replacingOccurrences(of: "{{page}}", with: "1")
                 urlPart = urlPart.replacingOccurrences(of: "{{", with: "%7B%7B")
                 urlPart = urlPart.replacingOccurrences(of: "}}", with: "%7D%7D")
+                // 苹果 CMS 伪静态：/vodsearch/-------------.html?wd={{key}}
+                // 关键词其实要放在路径里，query 的 wd 站点并不读（实测 0 结果）。
+                if urlPart.contains("-------------") {
+                    urlPart = urlPart.replacingOccurrences(of: "-------------",
+                                                          with: k + "-------------")
+                    if let q = urlPart.range(of: "?wd=") {
+                        urlPart = String(urlPart[urlPart.startIndex..<q.lowerBound])
+                    }
+                }
                 // 没有关键词占位符的采集接口：补 wd 参数
                 if !urlPart.contains(k) && !urlPart.contains(keyword) {
                     urlPart += (urlPart.contains("?") ? "&" : "?") + "wd=" + k
@@ -129,8 +164,10 @@ enum SiteSearchService {
         let common = [
             "/index.php/vod/search.html?wd=" + k,
             "/vodsearch.html?wd=" + k,
+            "/vodsearch/" + k + "-------------.html",
             "/search.php?searchword=" + k,
-            "/search?keyword=" + k,
+            "/search?wd=" + k,
+            "/search.html?wd=" + k,
             "/?s=" + k
         ]
         for c in common { add(c) }
@@ -203,7 +240,8 @@ enum SiteSearchService {
 
     private static func searchOne(target: SiteTarget, keyword: String) async -> SiteOneResult {
         let urls = candidateURLs(target: target, keyword: keyword)
-        let domURL = preferredSearchURL(target: target, keyword: keyword)?.absoluteString
+        let domURL = candidateURLs(target: target, keyword: keyword)
+            .first { !$0.absoluteString.lowercased().contains("api.php") }?.absoluteString
         guard let first = urls.first else {
             return SiteOneResult(sourceId: target.sourceId, name: target.name,
                                  hits: [], domURL: nil)
@@ -243,6 +281,7 @@ enum SiteSearchService {
         guard let text = try? await NetworkService.shared.fetchText(
             from: url, headers: headers, timeout: 6
         ), !text.isEmpty else { return [] }
+        if text.count > 400 { remember(target.sourceId, url, keyword: keyword) }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("{") || trimmed.hasPrefix("[") {
             return jsonHits(text: text, pageURL: url, target: target, keyword: keyword)
@@ -281,6 +320,7 @@ enum SiteSearchService {
                 absolute = u.absoluteString
             }
             guard let u = URLSanitizer.sanitize(absolute) else { continue }
+            if u.absoluteString.lowercased() == pageURL.absoluteString.lowercased() { continue }
             if out.contains(where: { $0.url == u.absoluteString }) { continue }
             out.append(SiteSearchHit(name: title, url: u.absoluteString,
                                      sourceId: target.sourceId, sourceName: target.name))
@@ -347,8 +387,9 @@ enum SiteSearchService {
 
     private static func looksLikeDetail(_ h: String) -> Bool {
         if h.hasPrefix("javascript") || h == "#" || h.hasPrefix("mailto") { return false }
-        let bad = ["/search", "/login", "/register", "/tag/", "/topic/",
-                   ".js", ".css", "/upload/", "/static/"]
+        let bad = ["/search", "vodsearch", "/login", "/register", "/tag/", "/topic/",
+                   ".js", ".css", "/upload/", "/static/", "api.php", "/m3u8/",
+                   "/parse/", "/jiexi/", "?wd=", "&wd=", "keyword=", "?url="]
         if bad.contains(where: { h.contains($0) }) { return false }
         // v46 过窄：很多影视站用 ?m=vod-detail-id-123 / /detail/123 / ?id=123
         // 这类地址不带 .html 也不带 /vod/，全被丢掉。

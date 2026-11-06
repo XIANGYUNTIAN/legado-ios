@@ -151,14 +151,34 @@ enum VodPlaylistParser {
         return URL(string: s, relativeTo: base)?.absoluteURL
     }
 
-    /// 只认媒体地址，避免把封面 jpg、详情 API、普通页面链接当剧集。
-    private static func isMedia(_ url: URL) -> Bool {
+    /// 只认「能真正交给播放器」的地址。
+    /// v48：旧的宽泛 "m3u8" 子串匹配会把 `api.xxx.com/m3u8/?url=`（参数为空）
+    /// 判成播放地址，选集面板显示「第1集」却点不动；搜索页 URL 同样不能当剧集。
+    /// 改为 internal，供 PlaybackProbe / BookSearchView 复用同一套判据。
+    static func isMedia(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https" else { return false }
         let s = url.absoluteString.lowercased()
-        for mark in [".m3u8", ".mp4", ".mpd", ".flv", ".m4v", ".mkv", ".webm", "m3u8"] {
-            if s.contains(mark) { return true }
+        // 搜索 / 列表 / 采集接口页面本身不是播放地址
+        let pageMarks = ["vodsearch", "/search", "?wd=", "&wd=", "keyword=",
+                         "?s=", "api.php", "/index.php/vod/", "/list/", "/tag/"]
+        if pageMarks.contains(where: { s.contains($0) }) { return false }
+        // 明确媒体后缀，允许后跟 query / fragment / 路径续段
+        let suffixes = [".m3u8", ".mp4", ".mpd", ".flv", ".m4v", ".mkv", ".webm", ".ts"]
+        for ext in suffixes {
+            guard let r = s.range(of: ext) else { continue }
+            let rest = s[r.upperBound...]
+            if rest.isEmpty || rest.hasPrefix("?") || rest.hasPrefix("#")
+                || rest.hasPrefix("&") || rest.hasPrefix("/") { return true }
         }
-        return false
+        // 解析接口：必须带完整目标参数；?url= 后为空一律排除
+        let parserMarks = ["/m3u8/", "/parse/", "/jiexi/", "/player/", "?url=", "&url="]
+        guard parserMarks.contains(where: { s.contains($0) }),
+              let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let items = comps.queryItems else { return false }
+        return items.contains {
+            ["url", "u", "vid", "v", "playurl"].contains($0.name.lowercased())
+                && ($0.value ?? "").count >= 8
+        }
     }
 }
