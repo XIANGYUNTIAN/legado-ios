@@ -216,20 +216,15 @@ struct BookReaderView: View {
                             Text(error)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        HStack(spacing: 14) {
-                            Button("返回书架") { dismiss() }
-                                .buttonStyle(.borderedProminent)
-                            Button("重试") { load() }
-                                .buttonStyle(.bordered)
-                        }
-                        .padding(.bottom, 40)
+                        Button("重试") { load() }
+                            .buttonStyle(.borderedProminent)
+                            .padding(.bottom, 40)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if !comicPages.isEmpty {
                     ComicPagesView(pages: comicPages,
                                    headers: comicHeaders,
-                                   title: currentChapter?.title ?? book.displayTitle,
-                                   onClose: { dismiss() })
+                                   title: currentChapter?.title ?? book.displayTitle)
                 } else {
                     // 正文区：按翻页模式渲染。沉浸模式下用 GeometryReader 包裹以获取尺寸，
                     // 通过 SpatialTapGesture 识别「单击中央」切换控制层显隐（沉浸式交互）。
@@ -273,9 +268,10 @@ struct BookReaderView: View {
             .navigationTitle(currentChapter?.title ?? book.displayTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar(.hidden, for: .tabBar)
+            // 全阅读器只保留一个退出入口：隐藏系统返回按钮，由下面唯一的「返回」承担。
+            // 加载 / 错误 / 漫画态 chromeVisible 强制为 true，保证该按钮始终可见可用。
+            .navigationBarBackButtonHidden(true)
             .toolbar {
-                // 阅读器自建 NavigationStack，外层 navigationDestination 的系统返回按钮
-                // 不会出现在这一层；必须自带明确的退出入口，否则漫画 / 错误页会被卡死。
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button {
                         dismiss()   // 阅读位置由 .onDisappear 统一保存
