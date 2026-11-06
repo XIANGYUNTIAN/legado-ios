@@ -208,17 +208,45 @@ struct BookSource: Codable, Identifiable, Equatable {
     /// v38 实证：shareBookSource.json 的 6 个影视源 bookSourceType 全为 0，名称仅含 📺，
     /// 播放地址由 `java.startBrowser(url,title)` 副作用传出，正文返回值是提示 HTML。
     /// 旧判据全部落空 → 永远停在文本阅读器，改播放层无效。
+    ///
+    /// v43 修正：BookReaderView.body 只要这里为 true 就整页切视频阅读器，漫画解析代码
+    /// 根本不会执行。而漫画源常用 `webJs` 加载动态图页、也可能写 `sourceRegex`，
+    /// 若无条件把它们当视频强信号，图片书源会被直接送进播放器。故先做漫画排除。
     var isVideoLike: Bool {
+        // 用户手动指定的视频类型优先
         if bookSourceType == .video { return true }
-        if ruleContent?.sourceRegex?.isEmpty == false { return true }
-        if ruleContent?.webJs?.isEmpty == false { return true }
+        // 明确的非文本类型：图片 / 音频 / 文件都不该进视频播放器
+        if bookSourceType == .image || bookSourceType == .audio
+            || bookSourceType == .file { return false }
+        let text = "\(bookSourceName) \(bookSourceGroup ?? "")".lowercased()
+        let comicHints = ["漫画", "画集", "本子", "图片", "comic", "manga",
+                          "manhua", "cartoon", "📚"]
+        if comicHints.contains(where: { text.contains($0) }) { return false }
+        // 明确的播放写法优先于下面所有弱信号
         if let content = ruleContent?.content?.lowercased(),
            content.contains("startbrowser") || content.contains("m3u8") {
             return true
         }
+        // 正文规则在取图片（img@src / 图片后缀）不是视频源
+        if let content = ruleContent?.content?.lowercased(),
+           content.contains(".jpg") || content.contains(".jpeg")
+            || content.contains(".png") || content.contains(".webp")
+            || content.contains("img@") || content.contains("<img") {
+            return false
+        }
+        if ruleContent?.sourceRegex?.isEmpty == false { return true }
+        if ruleContent?.webJs?.isEmpty == false { return true }
         let hints = ["视频", "影视", "电影", "剧集", "影院", "影音", "短剧",
                      "资源采集", "📺", "📽", "m3u8", "video", "movie"]
+        return hints.contains { text.contains($0) }
+    }
+
+    /// 是否为漫画 / 图片书源：正文只有 1 张图（长图、单页章节）时也应切图片页。
+    var isComicLike: Bool {
+        if bookSourceType == .image { return true }
         let text = "\(bookSourceName) \(bookSourceGroup ?? "")".lowercased()
+        let hints = ["漫画", "画集", "本子", "图片", "comic", "manga",
+                     "manhua", "cartoon"]
         return hints.contains { text.contains($0) }
     }
 

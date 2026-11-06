@@ -29,6 +29,7 @@ struct SourceCheckView: View {
     /// 用户手动改过的行：自动勾选重算时不覆盖这些行
     @State private var manualOverrides: Set<String> = []
     @State private var doneCount = 0
+    @State private var elapsedSeconds = 0
     @State private var isRunning = false
     @State private var failedFirst = true
     @State private var showDeleteConfirm = false
@@ -127,6 +128,11 @@ struct SourceCheckView: View {
                 Text("已检测 \(doneCount) / \(targets.count)")
                     .font(.subheadline.weight(.medium))
                 Spacer()
+                if elapsedSeconds > 0 {
+                    Text("已用 \(elapsedSeconds) 秒")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 if isRunning { ProgressView().scaleEffect(0.8) }
             }
             Text("失效 \(failedCount) · 重复 \(duplicateCount) · 可用 \(okCount) · 无法检测 \(unknownCount)")
@@ -263,8 +269,10 @@ struct SourceCheckView: View {
 
     // MARK: - 检测调度
 
-    /// 分批并发（每批 5 个），避免上百个书源同时打满 URLSession；
-    /// 结果先收进局部数组再统一写 @State，检测过程中列表不会逐条跳动。
+    /// 滑动窗口并发：每完成一个书源立刻补位下一个，慢源不再阻塞整批（原来固定
+    /// 5 个一批且要等全批齐活，一个 18 秒的失效源会拖住另外 4 个）。
+    /// 无地址的源直接本地判「无法检测」，不占并发名额。
+    /// 结果攒够一批再统一写 @State：列表不逐条跳动，判重也不必每个结果重算一次。
     private func start() {
         guard !isRunning else { return }
         stop()
@@ -272,40 +280,67 @@ struct SourceCheckView: View {
         results = [:]
         checked = []
         manualOverrides = []
-        doneCount = 0
         isRunning = true
+        elapsedSeconds = 0
+        let begun = Date()
         // 检测前先按「启用 / 规则完整 / 原顺序」给出保留项；检测中随结果重算
         fingerprints = SourceDuplicateDetector.fingerprints(from: sources)
         duplicateGroups = SourceDuplicateDetector.groups(from: fingerprints, health: [:])
         let list = targets
         let prints = fingerprints
+
+        // 零成本出结果：书源没写可请求地址，无需网络请求
+        var pending: [SourceCheckTarget] = []
+        var immediate = 0
+        for target in list where target.candidates.isEmpty {
+            results[target.id] = SourceCheckResult(
+                id: target.id,
+                state: .unknown,
+                detail: SourceCheckText.noAddress,
+                milliseconds: 0)
+            immediate += 1
+        }
+        for target in list where !target.candidates.isEmpty {
+            pending.append(target)
+        }
+        doneCount = immediate
+
         runTask = Task { @MainActor in
-            let batchSize = 5
-            var index = 0
-            while index < list.count {
-                if Task.isCancelled { break }
-                let end = min(index + batchSize, list.count)
-                let slice = Array(list[index..<end])
-                let batch = await withTaskGroup(
-                    of: SourceCheckResult.self,
-                    returning: [SourceCheckResult].self
-                ) { group in
-                    for target in slice {
-                        group.addTask { await SourceHealthChecker.check(target) }
-                    }
-                    var collected: [SourceCheckResult] = []
-                    for await item in group { collected.append(item) }
-                    return collected
+            let window = SourceHealthChecker.concurrency
+            let total = pending.count
+            var next = 0
+            var buffer: [SourceCheckResult] = []
+            await withTaskGroup(of: SourceCheckResult.self, returning: Void.self) { group in
+                // 先填满窗口
+                while next < min(window, total) {
+                    let target = pending[next]
+                    group.addTask { await SourceHealthChecker.check(target) }
+                    next += 1
                 }
-                if Task.isCancelled { break }
-                for item in batch { results[item.id] = item }
-                doneCount += batch.count
-                index = end
-                duplicateGroups = SourceDuplicateDetector.groups(
-                    from: prints, health: results.mapValues { $0.state })
-                // 失效 + 重复自动勾选；保留项与用户手动改过的行不覆盖
-                syncAutoSelection()
+                // group.next() 逐个取结果并即时补位；不用 for-await 是为了避免在
+                // 迭代期间对 inout group 的潜在重叠访问。
+                while let item = await group.next() {
+                    if Task.isCancelled { group.cancelAll(); break }
+                    buffer.append(item)
+                    if next < total {
+                        let target = pending[next]
+                        group.addTask { await SourceHealthChecker.check(target) }
+                        next += 1
+                    }
+                    if buffer.count >= 12 || next >= total {
+                        for record in buffer { results[record.id] = record }
+                        doneCount += buffer.count
+                        buffer.removeAll()
+                        duplicateGroups = SourceDuplicateDetector.groups(
+                            from: prints, health: results.mapValues { $0.state })
+                        // 失效 + 重复自动勾选；保留项与用户手动改过的行不覆盖
+                        syncAutoSelection()
+                        elapsedSeconds = Int(Date().timeIntervalSince(begun))
+                    }
+                }
+                return
             }
+            elapsedSeconds = Int(Date().timeIntervalSince(begun))
             isRunning = false
         }
     }

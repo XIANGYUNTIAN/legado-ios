@@ -102,6 +102,8 @@ struct BookReaderView: View {
     /// 漫画 / 图片书源正文（ruleContent 返回的是图片地址列表）
     @State private var comicPages: [URL] = []
     @State private var comicHeaders: [String: String] = [:]
+    /// 章节页地址：漫画图片下载时的 Referer 兜底（图床白名单认源站，不认图片自己的域名）
+    @State private var comicReferer: String?
 
     @State private var chapters: [ReaderChapter] = []
     /// 已连续加载的章节段（首尾由 firstLoadedIndex / lastLoadedIndex 定位）
@@ -195,7 +197,8 @@ struct BookReaderView: View {
         // 视频书源：整页走独立视频阅读器，不触碰文本引擎
         // （文本阅读器对 ruleContent 结果一律走文本清洗，会把播放地址当正文）
         // isVideoLike 同时覆盖缺失 bookSourceType 的第三方视频站书源。
-        if let videoSource = matchedSource(), forceVideoPlayback || videoSource.isVideoLike {
+        if let videoSource = matchedSource(), !videoSource.isComicLike,
+           forceVideoPlayback || videoSource.isVideoLike {
             return AnyView(VideoReaderView(book: book, source: videoSource))
         }
         return AnyView(bodyContent)
@@ -224,7 +227,8 @@ struct BookReaderView: View {
                 } else if !comicPages.isEmpty {
                     ComicPagesView(pages: comicPages,
                                    headers: comicHeaders,
-                                   title: currentChapter?.title ?? book.displayTitle)
+                                   title: currentChapter?.title ?? book.displayTitle,
+                                   referer: comicReferer)
                 } else {
                     // 正文区：按翻页模式渲染。沉浸模式下用 GeometryReader 包裹以获取尺寸，
                     // 通过 SpatialTapGesture 识别「单击中央」切换控制层显隐（沉浸式交互）。
@@ -1242,17 +1246,23 @@ struct BookReaderView: View {
             return ""
         }
         // 漫画 / 图片书源：ruleContent 返回的是图片地址列表（HTML <img> / JSON 数组 /
-        // 一行一个 URL）。文本清洗会把这些地址当正文显示，必须切成图片页渲染。
-        // 要求 ≥2 张才切换，避免小说正文里偶发的封面图被误判成漫画。
+        // 一行一个 URL / 懒加载属性）。文本清洗会把这些地址当正文显示，必须切成图片页。
+        // ≥2 张直接切；只有 1 张（长图 / 单页章节）时，正文若无可读中文也切，
+        // 避免小说正文里偶发的封面图被误判成漫画。
         let images = ComicPageDetector.imageURLs(from: raw, base: url)
-        if images.count >= 2 {
+        let imageOnly = !images.isEmpty && ComicPageDetector.isImageOnlyPayload(raw)
+        if images.count >= 2 || imageOnly {
             await MainActor.run {
                 comicPages = images
                 comicHeaders = headers
+                comicReferer = url.absoluteString
             }
             return ""
         }
-        await MainActor.run { comicPages = [] }
+        await MainActor.run {
+            comicPages = []
+            comicReferer = nil
+        }
         // 内容清洗：部分书源（如 dbxsd）ruleContent 抽取到的是原始 HTML（含 <div> 开标签 /
         // <script> 防爬脚本 / <p> 标签），须对齐 legado 标准「内容清洗」——去 script/style、
         // 块标签转换行、去残余标签、解码实体，否则正文混入标签。
