@@ -10,6 +10,9 @@ struct BrowserMedia: Identifiable {
     let id = UUID()
     let url: URL
     let headers: [String: String]
+    /// v52：原生播放失败时自动降级到详情页网页播放。必须是 var + 默认值，
+    /// 否则带默认值的 let 不进 memberwise init，调用点无法传入。
+    var fallbackURL: URL? = nil
 }
 
 /// 浏览器内弹出的面板：候选列表 / 播放器。用同一个 sheet item 切换，避免两个 sheet 抢 presented 状态。
@@ -158,7 +161,7 @@ struct BrowserCandidateSheet: View {
 // MARK: - 原生播放器
 
 /// 独立播放一个媒体直链：HLS/MP4 走 AVPlayer，DASH/FLV 走 VLC 软解。
-/// 复用 VideoReaderView 的 HeaderProxyLoader 注入 HLS 防盗链头（Referer）。
+/// v52：原生播放拿不到分片时自动降级到可见网页内联播放，不再让用户对着黑屏。
 struct BrowserPlayerSheet: View {
     let media: BrowserMedia
 
@@ -166,22 +169,33 @@ struct BrowserPlayerSheet: View {
     @State private var player = AVPlayer()
     /// delegate 为 weak，必须强引用，否则自定义 scheme 的请求无人接管
     @State private var loader: HeaderProxyLoader?
+    @StateObject private var state = PlaybackState()
+    @State private var monitor: PlaybackMonitor?
 
     private var needsSoftDecoder: Bool {
         VideoPlayAsset.parse(media.url.absoluteString).needsUnsupportedEngine
     }
 
+    private func fallbackURL() -> URL? {
+        if let f = media.fallbackURL { return f }
+        guard let scheme = media.url.scheme, let host = media.url.host else { return nil }
+        return URL(string: scheme + "://" + host + "/")
+    }
+
     var body: some View {
         NavigationStack {
             Group {
-                if needsSoftDecoder {
+                if state.failed, let fallback = fallbackURL() {
+                    FallbackWebView(url: fallback, headers: media.headers)
+                } else if needsSoftDecoder {
                     SoftPlayerView(url: media.url, headers: media.headers)
                 } else {
                     VideoPlayer(player: player)
                 }
             }
             .background(Color.black)
-            .navigationTitle(media.url.lastPathComponent.isEmpty ? "播放" : media.url.lastPathComponent)
+            .navigationTitle(state.failed ? "网页播放" :
+                (media.url.lastPathComponent.isEmpty ? "播放" : media.url.lastPathComponent))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -190,7 +204,7 @@ struct BrowserPlayerSheet: View {
             }
         }
         .onAppear { start() }
-        .onDisappear { player.pause() }
+        .onDisappear { player.pause(); monitor = nil }
     }
 
     private func start() {
@@ -211,7 +225,120 @@ struct BrowserPlayerSheet: View {
             player.replaceCurrentItem(with: AVPlayerItem(url: media.url))
         }
         player.play()
+        // 捕获列表只能捕获局部变量，不能直接捕获 self 的属性
+        let box = state
+        monitor = PlaybackMonitor(player: player) { [weak box] in
+            box?.failed = true
+        }
     }
+}
+
+/// @State 是值类型，闭包里改不动；用引用类型承接播放失败状态。
+final class PlaybackState: ObservableObject {
+    @Published var failed = false
+}
+
+/// v52：截图实证症状是「原生播放器黑屏、进度条 --:--」，即拿到了直链却
+/// 一个分片都取不到。旧实现完全没有失败监听，用户只能手动关闭。
+final class PlaybackMonitor: NSObject {
+    private let player: AVPlayer
+    private let onFail: () -> Void
+    private var statusObs: NSKeyValueObservation?
+    private var timer: Timer?
+    private var fired = false
+    private var elapsed = 0
+
+    init(player: AVPlayer, onFail: @escaping () -> Void) {
+        self.player = player
+        self.onFail = onFail
+        super.init()
+        statusObs = player.observe(\.status, options: [.initial, .new]) { [weak self] p, _ in
+            if p.status == .failed { Task { @MainActor in self?.fire() } }
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.tick() }
+        }
+    }
+
+    deinit {
+        timer?.invalidate()
+        statusObs?.invalidate()
+    }
+
+    private func tick() {
+        guard !fired else { return }
+        let item = player.currentItem
+        let duration = item?.duration.seconds ?? 0
+        let current = player.currentTime().seconds
+        if duration.isFinite, duration > 0, current > 0.15 {
+            fired = true
+            timer?.invalidate()
+            return
+        }
+        elapsed += 1
+        if elapsed >= 10 { fire() }
+    }
+
+    private func fire() {
+        guard !fired else { return }
+        fired = true
+        timer?.invalidate()
+        statusObs?.invalidate()
+        onFail()
+    }
+}
+
+/// 降级用的可见网页：页面自己的鉴权 / Referer / JS 天然正确，
+/// 注入脚本再主动点一次「开始观看 / 第1集」，复刻用户手动路径。
+struct FallbackWebView: UIViewRepresentable {
+    let url: URL
+    let headers: [String: String]
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.allowsInlineMediaPlayback = true
+        config.mediaTypesRequiringUserActionForPlayback = []
+        config.userContentController = WKUserContentController()
+        let wv = WKWebView(frame: .zero, configuration: config)
+        wv.navigationDelegate = context.coordinator
+        if let ua = headers["User-Agent"] ?? headers["user-agent"] {
+            wv.customUserAgent = ua
+        }
+        var request = URLRequest(url: url)
+        for (k, v) in headers where k.lowercased() != "user-agent" {
+            request.setValue(v, forHTTPHeaderField: k)
+        }
+        wv.load(request)
+        return wv
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                webView.evaluateJavaScript(FallbackWebView.autoPlayJS) { _, _ in }
+            }
+        }
+    }
+
+    /// 用普通字符串数组拼接，避免 raw 多行字符串把 JS 花括号计入 Swift 词法自检
+    fileprivate static let autoPlayJS = [
+        "(function(){",
+        "  var words = /开始观看|立即播放|播放正片|点击播放|马上观看|在线播放|观看正片|立即观看|^播放$|^第?0?1集?$|^1$/i;",
+        "  var els = Array.from(document.querySelectorAll('a,button,span,div,li'));",
+        "  for (var i=0;i<els.length;i++){",
+        "    var t = (els[i].innerText||els[i].textContent||'').trim();",
+        "    if (t.length<=12 && words.test(t)) {",
+        "      try { els[i].click(); return 'clicked'; } catch(e){}",
+        "    }",
+        "  }",
+        "  return 'none';",
+        "})()"
+    ].joined(separator: "\n")
 }
 
 // MARK: - WKWebView 封装

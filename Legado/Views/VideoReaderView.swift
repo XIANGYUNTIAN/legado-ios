@@ -560,6 +560,8 @@ final class HeaderProxyLoader: NSObject, AVAssetResourceLoaderDelegate {
     private var tasks: [AVAssetResourceLoadingRequest: URLSessionDataTask] = [:]
     /// 自定义 scheme 会抹掉原始协议，按 host 记下来，避免 HTTP 站点被强制改成 HTTPS。
     private var schemeByHost: [String: String] = [:]
+    /// v52：URLSession 完成回调在后台线程并发访问字典，必须加锁。
+    private let lock = NSLock()
 
     init(headers: [String: String]) {
         self.headers = headers
@@ -569,7 +571,7 @@ final class HeaderProxyLoader: NSObject, AVAssetResourceLoaderDelegate {
     func proxiedURL(for original: URL) -> URL? {
         guard var c = URLComponents(url: original, resolvingAgainstBaseURL: false) else { return nil }
         if let host = original.host?.lowercased() {
-            schemeByHost[host] = original.scheme?.lowercased() ?? "https"
+            lock.lock(); schemeByHost[host] = original.scheme?.lowercased() ?? "https"; lock.unlock()
         }
         c.scheme = HeaderProxyLoader.scheme
         return c.url
@@ -578,12 +580,16 @@ final class HeaderProxyLoader: NSObject, AVAssetResourceLoaderDelegate {
     func resourceLoader(_ rl: AVAssetResourceLoader,
                         shouldWaitForLoadingOfRequestedResource req: AVAssetResourceLoadingRequest) -> Bool {
         guard let customURL = req.request.url, let original = originalURL(customURL) else {
-            req.finishLoading(with: NSError(domain: "legado", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效的资源 URL"]))
+            req.finishLoading(with: NSError(domain: "legado", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "无效的资源 URL"]))
             return true
         }
         var request = URLRequest(url: original)
         for (k, v) in headers where k.lowercased() != "range" {
             request.setValue(v, forHTTPHeaderField: k)
+        }
+        if request.value(forHTTPHeaderField: "User-Agent") == nil {
+            request.setValue(NetworkService.iPhoneUA, forHTTPHeaderField: "User-Agent")
         }
         if let range = req.request.allHTTPHeaderFields?["Range"] {
             request.setValue(range, forHTTPHeaderField: "Range")
@@ -592,10 +598,11 @@ final class HeaderProxyLoader: NSObject, AVAssetResourceLoaderDelegate {
             guard let self else { return }
             if let response {
                 if let http = response as? HTTPURLResponse {
-                    // 透传 Content-Type，帮助 AVFoundation 识别 playlist 与媒体
                     let ct = (http.allHeaderFields["Content-Type"] as? String) ?? ""
+                    // v52：response 的 URL 必须保持自定义 scheme。用还原后的 https
+                    // URL 会让 AVFoundation 据此解析相对 variant / segment，绕过代理。
                     let newResp = HTTPURLResponse(
-                        url: original, statusCode: http.statusCode, httpVersion: nil,
+                        url: customURL, statusCode: http.statusCode, httpVersion: nil,
                         headerFields: ct.isEmpty ? nil : ["Content-Type": ct]
                     ) ?? response
                     req.response = newResp
@@ -605,37 +612,50 @@ final class HeaderProxyLoader: NSObject, AVAssetResourceLoaderDelegate {
             }
             if let error {
                 req.finishLoading(with: error)
-                self.tasks[req] = nil
+                self.setTask(nil, for: req)
                 return
             }
             guard let data, !data.isEmpty else {
                 req.finishLoading()
-                self.tasks[req] = nil
+                self.setTask(nil, for: req)
                 return
             }
             let ct = (response as? HTTPURLResponse)?.allHeaderFields["Content-Type"] as? String ?? ""
             let isPlaylist = ct.contains("mpegurl") || ct.contains("vnd.apple.mpegurl")
                 || data.prefix(20).starts(with: Data("#EXTM3U".utf8))
+            var payload = data
             if isPlaylist, let text = String(data: data, encoding: .utf8) {
-                let rewritten = self.rewritePlaylist(text)
-                if let rdata = rewritten.data(using: .utf8) {
-                    self.respondData(rdata, for: req)
-                } else {
-                    req.finishLoading()
-                }
-            } else {
-                self.respondData(data, for: req)
+                let rewritten = self.rewritePlaylist(text, base: original)
+                if let rdata = rewritten.data(using: .utf8) { payload = rdata }
             }
-            self.tasks[req] = nil
+            // v52：AVFoundation 需要 contentInformationRequest 才稳定发起后续请求；
+            // contentLength 必须是改写后的长度，否则 playlist 会被截断。
+            if let info = req.contentInformationRequest {
+                info.contentType = ct.isEmpty
+                    ? (isPlaylist ? "application/vnd.apple.mpegurl" : "application/octet-stream")
+                    : ct
+                info.contentLength = Int64(payload.count)
+                info.isByteRangeAccessSupported = true
+            }
+            self.respondData(payload, for: req)
+            self.setTask(nil, for: req)
         }
-        tasks[req] = task
+        setTask(task, for: req)
         task.resume()
         return true
     }
 
     func resourceLoader(_ rl: AVAssetResourceLoader, didCancel req: AVAssetResourceLoadingRequest) {
-        tasks[req]?.cancel()
+        lock.lock()
+        let t = tasks[req]
         tasks[req] = nil
+        lock.unlock()
+        t?.cancel()
+    }
+
+    private func setTask(_ t: URLSessionDataTask?, for req: AVAssetResourceLoadingRequest) {
+        lock.lock(); defer { lock.unlock() }
+        tasks[req] = t
     }
 
     private func respondData(_ data: Data, for req: AVAssetResourceLoadingRequest) {
@@ -652,30 +672,66 @@ final class HeaderProxyLoader: NSObject, AVAssetResourceLoaderDelegate {
 
     private func originalURL(_ custom: URL) -> URL? {
         guard var c = URLComponents(url: custom, resolvingAgainstBaseURL: false) else { return nil }
-        c.scheme = schemeByHost[custom.host?.lowercased() ?? ""] ?? "https"
+        lock.lock()
+        let scheme = schemeByHost[custom.host?.lowercased() ?? ""] ?? "https"
+        lock.unlock()
+        c.scheme = scheme
         return c.url
     }
 
-    /// 把 playlist 文本中的 https? URL 改写为自定义 scheme，使下级请求也被代理拦截并带头。
-    /// 逆序替换以保证低位 range 在多次替换后仍有效（自定义 scheme 与原 scheme 长度不同）。
-    private func rewritePlaylist(_ text: String) -> String {
-        let pattern = #"https?://[^\s"']+"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
-        let ns = text as NSString
-        let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
-        let mutable = NSMutableString(string: text)
-        for match in matches.reversed() {
-            let urlString = ns.substring(with: match.range)
-            guard let u = URL(string: urlString),
-                  var c = URLComponents(url: u, resolvingAgainstBaseURL: false) else { continue }
-            if let host = u.host?.lowercased() {
-                schemeByHost[host] = u.scheme?.lowercased() ?? "https"
+    /// v52：逐行改写 playlist。旧实现只替换绝对 https?:// URL，master.m3u8 里的
+    /// 相对 variant / ts 会被按真实 https 解析，绕过代理丢掉 Referer → 黑屏 --:--。
+    private func rewritePlaylist(_ text: String, base: URL) -> String {
+        var lines: [String] = []
+        for raw in text.components(separatedBy: .newlines) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty { lines.append(raw); continue }
+            if line.hasPrefix("#") {
+                lines.append(rewriteAttributeURIs(line, base: base))
+                continue
             }
-            c.scheme = HeaderProxyLoader.scheme
-            if let proxied = c.url?.absoluteString {
-                mutable.replaceCharacters(in: match.range, with: proxied)
+            let abs: String
+            let low = line.lowercased()
+            if low.hasPrefix("http://") || low.hasPrefix("https://")
+                || low.hasPrefix(Self.scheme + "://") {
+                abs = line
+            } else if let u = URL(string: line, relativeTo: base)?.absoluteURL {
+                abs = u.absoluteString
+            } else {
+                lines.append(raw); continue
             }
+            lines.append(proxyURLString(abs))
         }
-        return mutable as String
+        return lines.joined(separator: "\n")
+    }
+
+    private func proxyURLString(_ s: String) -> String {
+        guard let u = URL(string: s),
+              var c = URLComponents(url: u, resolvingAgainstBaseURL: false) else { return s }
+        // 已经是自定义 scheme 时别把 legadohdr 记成原始协议
+        if let host = u.host?.lowercased(), (u.scheme?.lowercased() ?? "") != Self.scheme {
+            lock.lock(); schemeByHost[host] = u.scheme?.lowercased() ?? "https"; lock.unlock()
+        }
+        c.scheme = Self.scheme
+        return c.url?.absoluteString ?? s
+    }
+
+    /// #EXT-X-KEY / #EXT-X-MAP 的 URI="..." 里也可能是相对 key / init 段
+    private func rewriteAttributeURIs(_ line: String, base: URL) -> String {
+        guard let rx = try? NSRegularExpression(pattern: "URI=\"([^\"]+)\"", options: []) else { return line }
+        let ns = line as NSString
+        let matches = rx.matches(in: line, range: NSRange(location: 0, length: ns.length))
+        var out = line as NSString
+        for m in matches.reversed() {
+            let rel = ns.substring(with: m.range(at: 1))
+            let abs: String
+            if rel.lowercased().hasPrefix("http") || rel.lowercased().hasPrefix(Self.scheme) {
+                abs = rel
+            } else if let u = URL(string: rel, relativeTo: base)?.absoluteURL {
+                abs = u.absoluteString
+            } else { continue }
+            out = out.replacingCharacters(in: m.range(at: 1), with: proxyURLString(abs)) as NSString
+        }
+        return out as String
     }
 }

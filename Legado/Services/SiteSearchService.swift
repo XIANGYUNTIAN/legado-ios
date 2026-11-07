@@ -274,10 +274,12 @@ enum SiteSearchService {
                         // v51：base 必须是表单提交后真正落地的页面，v50 传首页
                         // 导致相对链接解析与「排除页面自身」的基准全错。
                         let landed = URLSanitizer.sanitize(out.landedURL) ?? home
+                        // v52：pageHasKeyword 只是 document.body 是否提到关键词
+                        // （搜索框回显也算），绝不能豁免标题判据。v51 用它跳过
+                        // 全部过滤，4 站各收满 12 条导航/公告链接，49 条里 48 条是假结果。
                         let got = SiteSearchService.hitsFromPairs(
                             pairs, pageURL: landed, target: t,
-                            keyword: keyword, relaxed: true,
-                            looseTitle: out.pageHasKeyword)
+                            keyword: keyword, relaxed: true)
                         return FormOutcome(sourceId: one.sourceId,
                                            note: out.note + " · 命中 " + String(got.count) + " 条",
                                            hits: got)
@@ -315,12 +317,16 @@ enum SiteSearchService {
         for one in results {
             let mine = out.filter { $0.sourceId == one.sourceId }
             let epCount = mine.reduce(0) { $0 + $1.episodes.count }
-            if !mine.isEmpty {
-                lines.append("\(one.name)：命中 \(mine.count) 部 / \(epCount) 集直链")
+            // v52：过程数据永远显示。v51 在「有命中」时只显示命中数、把表单 note
+            // （落地 URL / 页面含关键词）吞掉，恰恰是假命中最多的 4 站零线索。
+            let summary = mine.isEmpty ? ""
+                : "命中 \(mine.count) 部 / \(epCount) 集直链 · "
+            if let note = formNotes[one.sourceId] {
+                lines.append("\(one.name)：\(summary)表单搜索 \(note)")
             } else if one.isCollector {
-                lines.append("\(one.name)：\(one.apiTried) 个采集接口均无结果")
-            } else if let note = formNotes[one.sourceId] {
-                lines.append("\(one.name)：表单搜索 \(note)")
+                lines.append("\(one.name)：\(summary)\(one.apiTried) 个采集接口均无结果")
+            } else if !mine.isEmpty {
+                lines.append("\(one.name)：\(summary)HTTP 命中")
             } else if one.domURL == nil {
                 lines.append("\(one.name)：站点地址不可用")
             } else {
@@ -395,8 +401,7 @@ enum SiteSearchService {
     /// HTTP 与 WebView 两条通道共用的过滤逻辑
     private static func hitsFromPairs(_ pairs: [(String, String)], pageURL: URL,
                                       target: SiteTarget, keyword: String,
-                                      relaxed: Bool = false,
-                                      looseTitle: Bool = false) -> [SiteSearchHit] {
+                                      relaxed: Bool = false) -> [SiteSearchHit] {
         let k = keyword.lowercased()
         var out: [SiteSearchHit] = []
         for (rawTitle, href) in pairs {
@@ -404,8 +409,10 @@ enum SiteSearchService {
             guard title.count >= 2 else { continue }
             let lowerTitle = title.lowercased()
             guard !isNavTitle(lowerTitle) else { continue }
-            // 落地页正文已含关键词 ⇒ 搜索确实出结果，锚文本被截断也收
-            guard titleMatches(lowerTitle, keyword: k) || looseTitle else { continue }
+            // v52：锚文本必须真的像剧名。页面正文含关键词（搜索框回显也算）
+            // 不能当作「页面有结果」的许可证 —— v51 因此收进 48 条导航垃圾。
+            guard !isJunkTitle(lowerTitle) else { continue }
+            guard titleMatches(lowerTitle, keyword: k) else { continue }
             let h = href.lowercased()
             if relaxed {
                 guard relaxedDetailOK(h) else { continue }
@@ -513,12 +520,32 @@ enum SiteSearchService {
                    "/m3u8/", "/parse/", "/jiexi/", "?wd=", "&wd=", "keyword=",
                    "vodsearch", "/search", "/tag/", "/topic/"]
         if bad.contains(where: { h.contains($0) }) { return false }
+        // v52：频道 / 分类 / 列表 / 首页不是详情页
+        let navPaths = ["/movie", "/tv/", "/list", "/category", "/type/",
+                        "/sort", "/channel", "/index.html", "/index.php", "/home"]
+        if navPaths.contains(where: { h.contains($0) }) { return false }
+        let path = URLComponents(string: h)?.path ?? h
+        let parts = path.split(separator: "/").filter { !$0.isEmpty }
+        guard let last = parts.last, last.count >= 3 else { return false }
         return h.count >= 8
     }
 
     /// v51：搜索结果页的剧名常被截断 / 带前后缀（「更新至第10集」「HD」「详情」），
     /// v50 要求锚文本包含**完整关键词**，15 个站渲染出 25–59 个链接仍 0 命中。
     /// 改为关键词 2 字滑窗命中任一即算，并先排掉导航类锚文本。
+    /// v52：站点首页/搜索页里混着大量与剧集无关的锚文本。它们本会被
+    /// titleMatches 的 2 字滑窗拦掉，但 v51 的宽松通道放行后每站收满 12 条。
+    /// 这里显式拉黑，给后续任何放宽加一道保险。
+    private static func isJunkTitle(_ t: String) -> Bool {
+        let bad = [">>>", "<<<", "http://", "https://", "www.", "t.me/",
+                   "点击进入", "替换", "有求必应", "域名", "公告", "群组",
+                   "加群", "捐赠", "赞助", "电影", "电视剧", "动作片",
+                   "喜剧片", "爱情片", "科幻片", "恐怖片", "动画片",
+                   "纪录片", "综艺", "动漫", "国产剧", "日韩剧", "欧美剧",
+                   "伦理片", "福利", "专题", "合集", "友情链接"]
+        return bad.contains { t.contains($0) }
+    }
+
     private static func isNavTitle(_ title: String) -> Bool {
         let navWords = ["首页", "分类", "排行", "最新", "登录", "注册", "更多",
                         "下一页", "上一页", "搜索", "下载", "app", "会员",

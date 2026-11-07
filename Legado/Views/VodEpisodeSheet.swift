@@ -52,6 +52,13 @@ struct VodEpisodeSheet: View {
         if h["Referer"] == nil && h["referer"] == nil {
             h["Referer"] = list.referer
         }
-        media = BrowserMedia(url: ep.url, headers: h)
+        // v52：原生播放失败时自动降级到详情页网页内联播放。
+        // list.referer 在探针分支就是详情页；若是直链则交给播放器回退到站点根。
+        var fallback: URL? = nil
+        if let r = URL(string: list.referer),
+           !VideoPlayAsset.parse(r.absoluteString).isExplicitMediaURL {
+            fallback = r
+        }
+        media = BrowserMedia(url: ep.url, headers: h, fallbackURL: fallback)
     }
 }

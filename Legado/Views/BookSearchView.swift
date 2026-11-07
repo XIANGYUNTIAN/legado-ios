@@ -438,6 +438,17 @@ struct BookSearchView: View {
                                 }
                                 .buttonStyle(.borderless)
                                 .disabled(resolvingTarget != nil)
+                            } else if book.intro.hasPrefix("站内搜索"),
+                                      let page = URLSanitizer.sanitize(book.bookUrl) {
+                                // v52：详情页结果明确标成网页入口，不再伪装成可播 ▶
+                                Button {
+                                    playback = .browser(SearchPlayback(url: page,
+                                                                       title: book.name))
+                                } label: {
+                                    Image(systemName: "safari")
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.borderless)
                             }
                             if !book.intro.hasPrefix("站内搜索") {
                                 Button {
@@ -754,9 +765,13 @@ struct BookSearchView: View {
         let low = book.bookUrl.lowercased()
         let pageOnly = ["vodsearch", "/search", "?wd=", "&wd=", "keyword=", "?url=&"]
         if pageOnly.contains(where: { low.contains($0) }) { return nil }
-        // v49：站内结果已是真实播放直链，不再要求匹配到书源
+        // v52：站内结果只有「已拆出剧集直链」或「URL 本身就是媒体文件」才给 ▶。
+        // 其余是详情页 / 导航链接，给 ▶ 只会再打开一次网页，属假播放按钮。
         if book.intro.hasPrefix("站内搜索") {
-            return URLSanitizer.sanitize(book.bookUrl)
+            guard let u = URLSanitizer.sanitize(book.bookUrl) else { return nil }
+            let hasEpisodes = sitePlaylists[book.bookUrl]?.isEmpty == false
+            let isMedia = VideoPlayAsset.parse(book.bookUrl).isExplicitMediaURL
+            return (hasEpisodes || isMedia) ? u : nil
         }
         let matchedSource: BookSource? = videoSource(for: book) ?? sourceStore.sources.first(where: {
             BookSource.normalizedURL($0.bookSourceUrl) == BookSource.normalizedURL(book.sourceId)
@@ -777,7 +792,14 @@ struct BookSearchView: View {
         guard resolvingTarget == nil else { return }
         resolvingTarget = target
         defer { resolvingTarget = nil }
-        let headers = ["Referer": target.absoluteString]
+        // v52：防盗链常同时校验 Referer / Origin / UA，只有 Referer 会被 CDN 拒。
+        var headers: [String: String] = [
+            "Referer": target.absoluteString,
+            "User-Agent": NetworkService.iPhoneUA
+        ]
+        if let scheme = target.scheme, let host = target.host {
+            headers["Origin"] = scheme + "://" + host
+        }
 
         // ⓪ v49：站内搜索已把 vod_play_url 拆成剧集直链，点 ▶ 直接进播放器，
         // 不再二次抓网页 / 跑 WebView 嗅探。key 用结果行原始 bookUrl，
@@ -822,10 +844,13 @@ struct BookSearchView: View {
         // ② JS 渲染详情页：从真实发起的媒体请求里拿直链
         let probed = await PlaybackProbe.mediaURLs(from: target,
                                                    referer: target.absoluteString)
-        if !probed.isEmpty {
+        // v52：探针把 master.m3u8 与 /720p/index.m3u8 清晰度变体当成「2 集」
+        //（截图「共 2 集」但剧名是「更新至第 10 集」），有 master 时只留它。
+        let cleaned = collapseVariants(probed)
+        if !cleaned.isEmpty {
             var episodes: [VodEpisode] = []
-            for (idx, u) in probed.enumerated() {
-                let label = probed.count == 1 ? "播放" : "第\(idx + 1)集"
+            for (idx, u) in cleaned.enumerated() {
+                let label = cleaned.count == 1 ? "播放" : "第\(idx + 1)集"
                 episodes.append(VodEpisode(name: label, url: u))
             }
             playback = .episodes(VodEpisodeList(title: name,
@@ -837,6 +862,21 @@ struct BookSearchView: View {
 
         // ③ 仍拿不到直链：落到详情页本身（不是搜索页），网页里点播放即可
         playback = .browser(SearchPlayback(url: target, title: name))
+    }
+
+    /// v52：苹果 CMS 的 master.m3u8 与 /720p/index.m3u8 是同一部剧的主列表与
+    /// 清晰度变体，不是两集。有 master 时只保留它，避免选集面板显示假集数。
+    private func collapseVariants(_ urls: [URL]) -> [URL] {
+        guard urls.count > 1 else { return urls }
+        let lower = urls.map { $0.absoluteString.lowercased() }
+        let hasVariant = lower.contains {
+            $0.contains("/720p/") || $0.contains("/1080p/") || $0.contains("/480p/")
+        }
+        guard hasVariant else { return urls }
+        if let master = urls.first(where: { $0.lastPathComponent.lowercased().contains("master") }) {
+            return [master]
+        }
+        return urls
     }
 
     private func videoSource(for book: ExploredBook) -> BookSource? {
