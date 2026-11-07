@@ -46,15 +46,56 @@ jobs:
             -archivePath build/Legado.xcarchive \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="-"
+            CODE_SIGN_IDENTITY="-" \
+            SWIFT_OPTIMIZATION_LEVEL=-Osize \
+            SWIFT_COMPILATION_MODE=wholemodule \
+            DEAD_CODE_STRIPPING=YES \
+            DEPLOYMENT_POSTPROCESSING=YES \
+            STRIP_INSTALLED_PRODUCT=YES \
+            COPY_PHASE_STRIP=YES \
+            ENABLE_PREVIEWS=NO
+
+      - name: Trim unused 32-bit slices
+        run: |
+          APP="build/Legado.xcarchive/Products/Applications/Legado.app"
+          echo "=== app size before trim ==="
+          du -sh "$APP"
+          # 最低部署目标 iOS 17 = arm64 only。部分预编译 xcframework 会把
+          # armv7 / armv7s / arm64 三份 slice 一起打进 .app，前两份永远
+          # 不会被加载，却占下载体积并让 dyld 多映射几十 MB 无用代码页。
+          find "$APP/Frameworks" -type f 2>/dev/null | while read -r f; do
+            file "$f" | grep -q "universal binary" || continue
+            before=$(stat -f%z "$f")
+            echo "FAT: $f ($before bytes)"
+            lipo -info "$f"
+            if lipo -thin arm64 -output "${f}.arm64" "$f"; then
+              chmod 755 "${f}.arm64"
+              # 改过字节后原签名即失效，补一个 ad-hoc 签名保持"有签名"状态；
+              # 用户侧重签 IPA 时仍会按原流程覆盖。
+              codesign --force --sign - "${f}.arm64" 2>/dev/null || true
+              mv "${f}.arm64" "$f"
+              after=$(stat -f%z "$f")
+              echo "  -> arm64 only: $after bytes (saved $((before - after)))"
+            else
+              echo "::warning::lipo failed, keep original: $f"
+              rm -f "${f}.arm64"
+            fi
+          done
+          echo "=== app size after trim ==="
+          du -sh "$APP"
+          echo "=== main binary ==="
+          lipo -info "$APP/Legado" || true
 
       - name: Package IPA
         run: |
           rm -rf Payload Legado-IOS.ipa
           mkdir -p Payload
           cp -R "build/Legado.xcarchive/Products/Applications/Legado.app" Payload/
-          zip -qry Legado-IOS.ipa Payload
+          zip -9 -qry Legado-IOS.ipa Payload
           ls -lh Legado-IOS.ipa
+          echo "=== largest payload entries (KB) ==="
+          du -ak Payload | sort -rn | head -15
+          echo "=== ipa entries ==="
           unzip -l Legado-IOS.ipa | head -20
 
       - name: Upload IPA artifact
