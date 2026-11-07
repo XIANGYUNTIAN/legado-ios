@@ -28,6 +28,10 @@ struct SearchPlayback: Identifiable {
     let id = UUID()
     let url: URL
     let title: String
+    /// v53：非空时可见浏览器会在站点首页自动填词并原生提交搜索表单。
+    var autoSearchKeyword: String? = nil
+    /// v53：导航到影片详情页后主动点「开始观看 / 第1集」。
+    var autoPlayOnDetail: Bool = false
 }
 
 /// 无搜索规则、但有可浏览站点的书源：规则搜索遍历不到它们，给一个
@@ -250,7 +254,10 @@ struct BookSearchView: View {
                     case .episodes(let list):
                         VodEpisodeSheet(list: list)
                     case .browser(let target):
-                        SourceBrowserView(title: target.title, initialURL: target.url)
+                        SourceBrowserView(title: target.title,
+                                          initialURL: target.url,
+                                          autoSearchKeyword: target.autoSearchKeyword,
+                                          autoPlayOnDetail: target.autoPlayOnDetail)
                     case .direct(let media):
                         BrowserPlayerSheet(media: media)
                     }
@@ -380,9 +387,19 @@ struct BookSearchView: View {
                     if resultKind == .media && !allResults.isEmpty
                         && !allResults.contains(where: { isMediaResult($0) }) {
                         Section {
-                            Text("本轮未识别出视频结果，已显示全部 \(allResults.count) 条")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            // v53：第 10 轮真机里站内搜索仍在后台跑、UI 却已宣告
+                            // 「未识别出视频结果」，把「还在搜」伪装成「彻底失败」。
+                            // 用 if 分支而非 Text(condition ? a : b)，避免插值字符串
+                            // 在 LocalizedStringKey / String 重载间产生歧义。
+                            if siteSearching {
+                                Text("影视站点搜索进行中…下方站点可点进去直接搜并播放")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Text("本轮未识别出视频结果，已显示全部 \(allResults.count) 条")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                     ForEach(displayedResults) { book in
@@ -471,20 +488,26 @@ struct BookSearchView: View {
                         }
                     }
                     if hasSiteSection {
-                        Section("备用网页入口 · 站内手动点选") {
+                        Section("影视站点 · 进站自动搜索并播放") {
                             ForEach(siteShortcuts) { shortcut in
                                 Button {
+                                    // v53 换架构：不再打开 preferredSearchURL 拼出来的
+                                    // CMS 猜测搜索页（v50 逐站诊断证明一个都不命中）。
+                                    // 打开站点首页，让可见 WebView 在完整 Cookie /
+                                    // Referer / JS 会话里自动完成表单搜索与播放。
                                     playback = .browser(SearchPlayback(
-                                        url: shortcut.searchURL ?? shortcut.url,
-                                        title: shortcut.name))
+                                        url: shortcut.url,
+                                        title: shortcut.name,
+                                        autoSearchKeyword: searchKeyword,
+                                        autoPlayOnDetail: true))
                                 } label: {
                                     HStack {
-                                        Image(systemName: "safari")
+                                        Image(systemName: "play.rectangle")
                                             .foregroundStyle(.tint)
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(shortcut.name)
                                                 .font(.subheadline)
-                                            Text("打开站内搜索页，手动点选影片播放")
+                                            Text("自动搜「\(searchKeyword)」· 点开影片即播")
                                                 .font(.caption2)
                                                 .foregroundStyle(.secondary)
                                         }

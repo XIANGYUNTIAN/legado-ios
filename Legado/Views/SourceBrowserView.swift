@@ -41,6 +41,10 @@ struct SourceBrowserView: View {
     let title: String
     let initialURL: URL
     let headers: [String: String]
+    /// v53：非空时在首次落地页自动填词并原生提交站内搜索表单。
+    var autoSearchKeyword: String? = nil
+    /// v53：影片详情页自动点播放入口。
+    var autoPlayOnDetail: Bool = false
 
     @Environment(\.dismiss) private var dismiss
     @State private var address: String
@@ -49,10 +53,13 @@ struct SourceBrowserView: View {
     @State private var sheetState: BrowserSheetState?
     @State private var reloadTick = 0
 
-    init(title: String, initialURL: URL, headers: [String: String] = [:]) {
+    init(title: String, initialURL: URL, headers: [String: String] = [:],
+         autoSearchKeyword: String? = nil, autoPlayOnDetail: Bool = false) {
         self.title = title
         self.initialURL = initialURL
         self.headers = headers
+        self.autoSearchKeyword = autoSearchKeyword
+        self.autoPlayOnDetail = autoPlayOnDetail
         _address = State(initialValue: initialURL.absoluteString)
     }
 
@@ -62,6 +69,8 @@ struct SourceBrowserView: View {
                 BrowserWebView(initialURL: initialURL,
                                headers: headers,
                                reloadTick: reloadTick,
+                               autoSearchKeyword: autoSearchKeyword,
+                               autoPlayOnDetail: autoPlayOnDetail,
                                address: $address,
                                isLoading: $isLoading,
                                candidates: $candidates,
@@ -347,6 +356,8 @@ struct BrowserWebView: UIViewRepresentable {
     let initialURL: URL
     let headers: [String: String]
     let reloadTick: Int
+    var autoSearchKeyword: String? = nil
+    var autoPlayOnDetail: Bool = false
     @Binding var address: String
     @Binding var isLoading: Bool
     @Binding var candidates: [URL]
@@ -355,6 +366,8 @@ struct BrowserWebView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator(initialURL: initialURL,
                     headers: headers,
+                    autoSearchKeyword: autoSearchKeyword,
+                    autoPlayOnDetail: autoPlayOnDetail,
                     address: $address,
                     isLoading: $isLoading,
                     candidates: $candidates,
@@ -424,17 +437,24 @@ struct BrowserWebView: UIViewRepresentable {
         @Binding private var sheetState: BrowserSheetState?
 
         private let headers: [String: String]
+        private let autoSearchKeyword: String?
+        private let autoPlayOnDetail: Bool
+        private var searchSubmitted = false
         private var currentPage: URL?
         var lastInitialURL: URL
         var lastReloadTick: Int
 
         init(initialURL: URL,
              headers: [String: String],
+             autoSearchKeyword: String?,
+             autoPlayOnDetail: Bool,
              address: Binding<String>,
              isLoading: Binding<Bool>,
              candidates: Binding<[URL]>,
              sheetState: Binding<BrowserSheetState?>) {
             self.headers = headers
+            self.autoSearchKeyword = autoSearchKeyword
+            self.autoPlayOnDetail = autoPlayOnDetail
             self.lastInitialURL = initialURL
             self.lastReloadTick = 0
             self.currentPage = initialURL
@@ -501,6 +521,8 @@ struct BrowserWebView: UIViewRepresentable {
             isLoading = false
             currentPage = webView.url
             address = webView.url?.absoluteString ?? address
+            // v53：可见浏览器里复刻用户手动路径（首页提交表单 → 详情页点播放）
+            injectAutomation(into: webView)
             // 采集站 `api.php/provide/vod/?ac=detail` 返回的是 JSON 播放列表而非网页。
             // 落到这种页面时直接解析成剧集 → 原生播放器，避免用户面对一屏 JSON
             // 或被迫回到带广告的网页里找播放按钮。
@@ -522,6 +544,39 @@ struct BrowserWebView: UIViewRepresentable {
                     self.sheetState = .episodes(payload)
                 }
             }
+        }
+
+        /// 只在「进站自动搜索」模式启用。首次落地页提交表单；此后导航到
+        /// 影片详情页时主动点播放入口。找不到 form 就什么都不做，把首页
+        /// 留给用户手动搜——绝不拼猜测 URL 把人带去错的搜索页。
+        private func injectAutomation(into webView: WKWebView) {
+            guard let kw = autoSearchKeyword, !kw.isEmpty else { return }
+            if !searchSubmitted {
+                searchSubmitted = true
+                let script = BrowserWebView.autoSearchJS(keyword: kw)
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 1_200_000_000)
+                    webView.evaluateJavaScript(script) { _, _ in }
+                }
+                return
+            }
+            guard autoPlayOnDetail else { return }
+            let page = webView.url?.absoluteString.lowercased() ?? ""
+            guard Self.isDetailLike(page) else { return }
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                webView.evaluateJavaScript(FallbackWebView.autoPlayJS) { _, _ in }
+            }
+        }
+
+        private static func isDetailLike(_ u: String) -> Bool {
+            // 表单提交后的结果页常带 /vod/ 或 /search，不能当详情页去点播放。
+            let searchMarks = ["wd=", "vodsearch", "/search", "keyword=", "?q=", "&q="]
+            if searchMarks.contains(where: { u.contains($0) }) { return false }
+            let hints = ["/vod/", "/detail/", "/series/", "/play/", "/watch/",
+                         "/bangumi/", "/drama/", "/video/", "/movie/", "/show/",
+                         "ac=detail", "ids=", "/d/", "/b/"]
+            return hints.contains { u.contains($0) }
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -553,6 +608,47 @@ struct BrowserWebView: UIViewRepresentable {
     }
 
     // MARK: 注入脚本
+
+    /// v53：可见浏览器里的「首页 → 找搜索框 → 填词 → form 原生提交」。
+    /// 与隐藏探针的区别：找不到 form 不拼 ?wd= 猜测 URL，保持首页可用。
+    /// 数组拼接，避免 JS 花括号干扰 Swift 词法自检。
+    static func autoSearchJS(keyword: String) -> String {
+        let kw = keyword
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\n", with: " ")
+        return [
+            "(function(){",
+            "  var names = ['wd','keyword','searchword','q','s','key','kw','word','search','so'];",
+            "  var input = null;",
+            "  for (var i=0;i<names.length;i++){",
+            "    var el = document.querySelector('input[name=\"' + names[i] + '\"]');",
+            "    if (el) { input = el; break; }",
+            "  }",
+            "  if (!input) {",
+            "    var cs = document.querySelectorAll('input[type=\"text\"],input[type=\"search\"],input:not([type])');",
+            "    for (var j=0;j<cs.length;j++){",
+            "      var c = cs[j];",
+            "      var ph = (c.getAttribute('placeholder')||'') + ' ' + (c.id||'') + ' ' + (c.className||'');",
+            "      if (/搜索|关键词|影片|片名|search|keyword/i.test(ph)) { input = c; break; }",
+            "    }",
+            "    if (!input && cs.length) input = cs[0];",
+            "  }",
+            "  if (!input) return 'noform';",
+            "  var form = input.form || (input.closest ? input.closest('form') : null);",
+            "  if (!form) return 'noform';",
+            "  input.value = '" + kw + "';",
+            "  try { input.dispatchEvent(new Event('input', {bubbles:true})); } catch(e){}",
+            "  try { if (typeof form.requestSubmit === 'function') { form.requestSubmit(); return 'requestSubmit'; } } catch(e){}",
+            "  try {",
+            "    var btn = form.querySelector('button[type=\"submit\"],input[type=\"submit\"],button:not([type])');",
+            "    if (btn) { btn.click(); return 'submit-click'; }",
+            "  } catch(e){}",
+            "  try { form.submit(); return 'submit'; } catch(e){}",
+            "  return 'failed';",
+            "})()"
+        ].joined(separator: "\n")
+    }
 
     private static let sniffJS = """
     (function(){
