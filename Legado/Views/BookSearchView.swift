@@ -150,15 +150,20 @@ struct BookSearchView: View {
     private var siteTargets: [SiteTarget] {
         let list = sourceStore.sources.filter { s in
             guard s.enabled, !s.siteURLs.isEmpty else { return false }
-            if s.isVideoLike || s.isComicLike { return true }
+            // v51：v50 诊断里 16 站仍混进起点中文 / 178 漫画网 / 再漫画 / SF 漫画，
+            // 原因是 isComicLike 被当成准入信号、comment 里的「视频」字样误命中。
+            // 影视站内搜索只收影视类源，先按名称与分组剔除文本 / 图片站。
+            let label = (s.bookSourceName + " " + (s.bookSourceGroup ?? "")
+                         + " " + String(s.bookSourceComment.prefix(160))).lowercased()
+            let textSite = ["小说", "漫画", "阅读", "文库", "书城", "起点",
+                            "笔趣", "本子", "画集", "txt"]
+            if textSite.contains(where: { label.contains($0) }) { return false }
+            if s.isVideoLike { return true }
             if BookSource.looksLikeMediaName(s.bookSourceName)
                 || BookSource.looksLikeMediaName(s.bookSourceComment) { return true }
-            // v50：诊断截图里 24 站有一半是纯小说站（全本小说 / 八一中文网 /
-            // 得间小说 / 多看阅读…）。旧条件 !supportsSearch 把它们全放进来，
-            // 白占一半配额且不可能搜出视频。无搜索规则的源再用分组强信号过一遍。
             guard !s.supportsSearch else { return false }
             let g = (s.bookSourceGroup ?? "").lowercased()
-            return ["影视", "视频", "电影", "剧集", "采集", "资源", "动漫"]
+            return ["影视", "视频", "电影", "剧集", "采集", "资源"]
                 .contains { g.contains($0) }
         }
         let visible = Set(siteShortcuts.compactMap { item -> String? in

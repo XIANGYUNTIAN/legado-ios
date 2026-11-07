@@ -271,9 +271,13 @@ enum SiteSearchService {
                         }
                         let out = await SiteFormProbe.search(home: home, keyword: keyword)
                         let pairs = out.links.map { ($0.title, $0.href) }
+                        // v51：base 必须是表单提交后真正落地的页面，v50 传首页
+                        // 导致相对链接解析与「排除页面自身」的基准全错。
+                        let landed = URLSanitizer.sanitize(out.landedURL) ?? home
                         let got = SiteSearchService.hitsFromPairs(
-                            pairs, pageURL: home, target: t,
-                            keyword: keyword, relaxed: true)
+                            pairs, pageURL: landed, target: t,
+                            keyword: keyword, relaxed: true,
+                            looseTitle: out.pageHasKeyword)
                         return FormOutcome(sourceId: one.sourceId,
                                            note: out.note + " · 命中 " + String(got.count) + " 条",
                                            hits: got)
@@ -391,14 +395,17 @@ enum SiteSearchService {
     /// HTTP 与 WebView 两条通道共用的过滤逻辑
     private static func hitsFromPairs(_ pairs: [(String, String)], pageURL: URL,
                                       target: SiteTarget, keyword: String,
-                                      relaxed: Bool = false) -> [SiteSearchHit] {
+                                      relaxed: Bool = false,
+                                      looseTitle: Bool = false) -> [SiteSearchHit] {
         let k = keyword.lowercased()
         var out: [SiteSearchHit] = []
         for (rawTitle, href) in pairs {
             let title = clean(rawTitle)
             guard title.count >= 2 else { continue }
             let lowerTitle = title.lowercased()
-            guard lowerTitle.contains(k) || (!k.isEmpty && k.contains(lowerTitle)) else { continue }
+            guard !isNavTitle(lowerTitle) else { continue }
+            // 落地页正文已含关键词 ⇒ 搜索确实出结果，锚文本被截断也收
+            guard titleMatches(lowerTitle, keyword: k) || looseTitle else { continue }
             let h = href.lowercased()
             if relaxed {
                 guard relaxedDetailOK(h) else { continue }
@@ -509,6 +516,30 @@ enum SiteSearchService {
         return h.count >= 8
     }
 
+    /// v51：搜索结果页的剧名常被截断 / 带前后缀（「更新至第10集」「HD」「详情」），
+    /// v50 要求锚文本包含**完整关键词**，15 个站渲染出 25–59 个链接仍 0 命中。
+    /// 改为关键词 2 字滑窗命中任一即算，并先排掉导航类锚文本。
+    private static func isNavTitle(_ title: String) -> Bool {
+        let navWords = ["首页", "分类", "排行", "最新", "登录", "注册", "更多",
+                        "下一页", "上一页", "搜索", "下载", "app", "会员",
+                        "留言", "关于", "帮助", "联系", "返回", "列表"]
+        return navWords.contains { title.contains($0) }
+    }
+
+    private static func titleMatches(_ title: String, keyword k: String) -> Bool {
+        if k.isEmpty || title.isEmpty { return false }
+        if title.contains(k) || k.contains(title) { return true }
+        let chars = Array(k)
+        guard chars.count >= 2 else { return title.hasPrefix(k) }
+        var i = 0
+        while i + 1 < chars.count {
+            let frag = String(chars[i]) + String(chars[i + 1])
+            if title.contains(frag) { return true }
+            i += 1
+        }
+        return false
+    }
+
     private static func looksLikeDetail(_ h: String) -> Bool {
         if h.hasPrefix("javascript") || h == "#" || h.hasPrefix("mailto") { return false }
         let bad = ["/search", "vodsearch", "/login", "/register", "/tag/", "/topic/",
@@ -517,7 +548,8 @@ enum SiteSearchService {
         if bad.contains(where: { h.contains($0) }) { return false }
         let hints = ["/vod/", "/detail/", "/video/", "/movie/", "/play/", "/show/",
                      "/d/", "/b/", "/html/", ".html", "id=", "ids=", "ac=detail",
-                     "vod-detail", "/index.php/vod/", "/watch/", "/drama/"]
+                     "vod-detail", "/index.php/vod/", "/watch/", "/drama/",
+                     "/series/", "/bangumi/"]
         if hints.contains(where: { h.contains($0) }) { return true }
         let tail: String
         if let first = h.split(separator: "?").first {
