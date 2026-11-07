@@ -45,6 +45,9 @@ struct SourceBrowserView: View {
     var autoSearchKeyword: String? = nil
     /// v53：影片详情页自动点播放入口。
     var autoPlayOnDetail: Bool = false
+    /// v56：非空 = 自动找片，按队列串行试站。
+    var siteQueue: [SiteCandidate] = []
+    var onVerdict: ((String, Bool) -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
     @State private var address: String
@@ -52,25 +55,60 @@ struct SourceBrowserView: View {
     @State private var candidates: [URL] = []
     @State private var sheetState: BrowserSheetState?
     @State private var reloadTick = 0
+    @State private var queueIndex = 0
+    @State private var activeURL: URL
+    @State private var activeTitle: String
+    @State private var autoFindNote: String
 
     init(title: String, initialURL: URL, headers: [String: String] = [:],
-         autoSearchKeyword: String? = nil, autoPlayOnDetail: Bool = false) {
+         autoSearchKeyword: String? = nil, autoPlayOnDetail: Bool = false,
+         siteQueue: [SiteCandidate] = [], onVerdict: ((String, Bool) -> Void)? = nil) {
         self.title = title
         self.initialURL = initialURL
         self.headers = headers
         self.autoSearchKeyword = autoSearchKeyword
         self.autoPlayOnDetail = autoPlayOnDetail
+        self.siteQueue = siteQueue
+        self.onVerdict = onVerdict
         _address = State(initialValue: initialURL.absoluteString)
+        _activeURL = State(initialValue: initialURL)
+        _activeTitle = State(initialValue: title)
+        _autoFindNote = State(initialValue: siteQueue.isEmpty ? "" :
+            "自动找片 · 第 1/\(siteQueue.count) 站 · \(siteQueue[0].name)")
+    }
+
+    /// v56：命中即停；明确空结果 / 超时则回写未命中并切下一站。
+    private func handleVerdict(_ hit: Bool) {
+        guard queueIndex < siteQueue.count else { return }
+        let item = siteQueue[queueIndex]
+        onVerdict?(item.id, hit)
+        if hit {
+            autoFindNote = "✓ 已在 \(item.name) 搜到并播放"
+            return
+        }
+        let next = queueIndex + 1
+        guard next < siteQueue.count else {
+            autoFindNote = "已试完 \(siteQueue.count) 个站点，均未搜到；可返回列表手动进站"
+            return
+        }
+        queueIndex = next
+        let upcoming = siteQueue[next]
+        activeTitle = upcoming.name
+        activeURL = upcoming.url
+        address = upcoming.url.absoluteString
+        autoFindNote = "自动找片 · 第 \(next + 1)/\(siteQueue.count) 站 · \(upcoming.name)"
     }
 
     var body: some View {
         NavigationStack {
             ZStack(alignment: .bottom) {
-                BrowserWebView(initialURL: initialURL,
+                BrowserWebView(initialURL: activeURL,
                                headers: headers,
                                reloadTick: reloadTick,
                                autoSearchKeyword: autoSearchKeyword,
                                autoPlayOnDetail: autoPlayOnDetail,
+                               autoFind: !siteQueue.isEmpty,
+                               onSiteVerdict: { hit in self.handleVerdict(hit) },
                                address: $address,
                                isLoading: $isLoading,
                                candidates: $candidates,
@@ -78,16 +116,28 @@ struct SourceBrowserView: View {
                 if isLoading {
                     ProgressView("加载中…")
                 }
-                Text(address)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(.ultraThinMaterial)
+                VStack(spacing: 0) {
+                    if !autoFindNote.isEmpty {
+                        Text(autoFindNote)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 10)
+                            .padding(.top, 4)
+                            .background(.ultraThinMaterial)
+                    }
+                    Text(address)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(.ultraThinMaterial)
+                }
             }
-            .navigationTitle(title.isEmpty ? "站点浏览" : title)
+            .navigationTitle(activeTitle.isEmpty ? "站点浏览" : activeTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -310,7 +360,11 @@ struct FallbackWebView: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
-        config.userContentController = WKUserContentController()
+        let uc = WKUserContentController()
+        uc.addUserScript(WKUserScript(source: BrowserWebView.fullscreenFixJS,
+                                      injectionTime: .atDocumentStart,
+                                      forMainFrameOnly: false))
+        config.userContentController = uc
         let wv = WKWebView(frame: .zero, configuration: config)
         wv.navigationDelegate = context.coordinator
         if let ua = headers["User-Agent"] ?? headers["user-agent"] {
@@ -378,6 +432,9 @@ struct BrowserWebView: UIViewRepresentable {
     let reloadTick: Int
     var autoSearchKeyword: String? = nil
     var autoPlayOnDetail: Bool = false
+    /// v56：自动找片模式下启用逐站实测判定。
+    var autoFind: Bool = false
+    var onSiteVerdict: ((Bool) -> Void)? = nil
     @Binding var address: String
     @Binding var isLoading: Bool
     @Binding var candidates: [URL]
@@ -388,6 +445,8 @@ struct BrowserWebView: UIViewRepresentable {
                     headers: headers,
                     autoSearchKeyword: autoSearchKeyword,
                     autoPlayOnDetail: autoPlayOnDetail,
+                    autoFind: autoFind,
+                    onSiteVerdict: onSiteVerdict,
                     address: $address,
                     isLoading: $isLoading,
                     candidates: $candidates,
@@ -411,6 +470,10 @@ struct BrowserWebView: UIViewRepresentable {
         uc.addUserScript(WKUserScript(source: BrowserWebView.linkFixJS,
                                       injectionTime: .atDocumentEnd,
                                       forMainFrameOnly: true))
+        // v56：把 H5 播放器的伪全屏改走系统原生视频全屏。
+        uc.addUserScript(WKUserScript(source: BrowserWebView.fullscreenFixJS,
+                                      injectionTime: .atDocumentStart,
+                                      forMainFrameOnly: false))
         config.userContentController = uc
 
         let webView = WKWebView(frame: .zero, configuration: config)
@@ -432,6 +495,7 @@ struct BrowserWebView: UIViewRepresentable {
         let c = context.coordinator
         if c.lastInitialURL != initialURL {
             c.lastInitialURL = initialURL
+            c.resetForNewSite()
             var request = URLRequest(url: initialURL)
             for (k, v) in headers where k.lowercased() != "user-agent" {
                 request.setValue(v, forHTTPHeaderField: k)
@@ -459,8 +523,12 @@ struct BrowserWebView: UIViewRepresentable {
         private let headers: [String: String]
         private let autoSearchKeyword: String?
         private let autoPlayOnDetail: Bool
+        private let autoFind: Bool
+        private let onSiteVerdict: ((Bool) -> Void)?
         private var searchSubmitted = false
         private var currentPage: URL?
+        private var verdictReported = false
+        private var siteGeneration = 0
         var lastInitialURL: URL
         var lastReloadTick: Int
 
@@ -468,6 +536,8 @@ struct BrowserWebView: UIViewRepresentable {
              headers: [String: String],
              autoSearchKeyword: String?,
              autoPlayOnDetail: Bool,
+             autoFind: Bool,
+             onSiteVerdict: ((Bool) -> Void)?,
              address: Binding<String>,
              isLoading: Binding<Bool>,
              candidates: Binding<[URL]>,
@@ -475,6 +545,8 @@ struct BrowserWebView: UIViewRepresentable {
             self.headers = headers
             self.autoSearchKeyword = autoSearchKeyword
             self.autoPlayOnDetail = autoPlayOnDetail
+            self.autoFind = autoFind
+            self.onSiteVerdict = onSiteVerdict
             self.lastInitialURL = initialURL
             self.lastReloadTick = 0
             self.currentPage = initialURL
@@ -483,6 +555,47 @@ struct BrowserWebView: UIViewRepresentable {
             _candidates = candidates
             _sheetState = sheetState
             super.init()
+        }
+
+        /// v56：换站时清掉上一站的提交 / 判定标记，旧延时任务用 generation 作废。
+        func resetForNewSite() {
+            searchSubmitted = false
+            verdictReported = false
+            siteGeneration += 1
+        }
+
+        private func reportVerdict(_ hit: Bool) {
+            guard autoFind, !verdictReported else { return }
+            verdictReported = true
+            DispatchQueue.main.async { self.onSiteVerdict?(hit) }
+        }
+
+        /// v56：只用强信号判定。详情页出现选集 / 播放控件 = 命中；
+        /// 结果页出现明确空结果 / 验证码文案 = 未命中；其余等 14s 硬超时。
+        /// 定时器独立于任何 evaluateJavaScript 回调（导航会吞 completion）。
+        private func scheduleVerdictChecks(on webView: WKWebView, page: String) {
+            guard autoFind, !verdictReported else { return }
+            let gen = siteGeneration
+            let detail = Self.isDetailLike(page)
+            let results = Self.isResultsPage(page)
+            let delays: [UInt64] = [2_000_000_000, 5_000_000_000]
+            for delay in delays {
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: delay)
+                    guard self.siteGeneration == gen, !self.verdictReported else { return }
+                    webView.evaluateJavaScript(BrowserWebView.verdictJS) { res, _ in
+                        guard self.siteGeneration == gen, !self.verdictReported else { return }
+                        let s = res as? String ?? ""
+                        if detail && s == "hit" { self.reportVerdict(true) }
+                        else if results && s == "miss" { self.reportVerdict(false) }
+                    }
+                }
+            }
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 14_000_000_000)
+                guard self.siteGeneration == gen, !self.verdictReported else { return }
+                self.reportVerdict(false)
+            }
         }
 
         /// 明确的媒体后缀才拦截交给播放器；页面 URL 一律留在 WebView 里浏览。
@@ -546,6 +659,8 @@ struct BrowserWebView: UIViewRepresentable {
             address = webView.url?.absoluteString ?? address
             // v53：可见浏览器里复刻用户手动路径（首页提交表单 → 详情页点播放）
             injectAutomation(into: webView)
+            scheduleVerdictChecks(on: webView,
+                                  page: webView.url?.absoluteString.lowercased() ?? "")
             // 采集站 `api.php/provide/vod/?ac=detail` 返回的是 JSON 播放列表而非网页。
             // 落到这种页面时直接解析成剧集 → 原生播放器，避免用户面对一屏 JSON
             // 或被迫回到带广告的网页里找播放按钮。
@@ -793,6 +908,61 @@ struct BrowserWebView: UIViewRepresentable {
             "})()"
         ].joined(separator: "\n")
     }
+
+    /// v56：把 H5 播放器的「全屏」按钮改走 iOS 原生视频全屏。
+    /// WKWebView 里网页自定义全屏通常是「撑满容器 + CSS 旋转 90 度」，
+    /// App 没真转横屏、sheet 的导航栏也没让位，于是画面被转竖、观感崩坏。
+    /// 这里在捕获阶段接管全屏点击，直接调 webkitEnterFullscreen()，
+    /// 由系统播放器负责横屏与铺满；同时禁掉 video 自身的旋转。
+    static let fullscreenFixJS = [
+        "(function(){",
+        "  function nativeFull(){",
+        "    var v = document.querySelector('video');",
+        "    if (v && v.webkitEnterFullscreen) { try { v.webkitEnterFullscreen(); return true; } catch(e){} }",
+        "    return false;",
+        "  }",
+        "  var p = window.Element && window.Element.prototype;",
+        "  if (p) {",
+        "    var orig = p.requestFullscreen;",
+        "    p.requestFullscreen = function(){",
+        "      if (nativeFull()) return Promise.resolve();",
+        "      try { return orig ? orig.apply(this, arguments) : Promise.resolve(); } catch(e){ return Promise.resolve(); }",
+        "    };",
+        "    if (p.webkitRequestFullscreen) p.webkitRequestFullscreen = p.requestFullscreen;",
+        "  }",
+        "  function hook(e){",
+        "    var n = e.target;",
+        "    for (var i=0;i<4 && n;i++,n=n.parentElement){",
+        "      var c = (n.className && n.className.baseVal !== undefined) ? n.className.baseVal : (n.className || '');",
+        "      var sig = String(c) + ' ' + (n.id||'') + ' ' + ((n.getAttribute && (n.getAttribute('title')||n.getAttribute('aria-label')))||'');",
+        "      if (/fullscreen|full-screen|full_screen|quanping|全屏/i.test(sig)) {",
+        "        if (nativeFull()) { try { e.preventDefault(); e.stopPropagation(); } catch(err){} }",
+        "        return;",
+        "      }",
+        "    }",
+        "  }",
+        "  document.addEventListener('click', hook, true);",
+        "  document.addEventListener('touchend', hook, true);",
+        "  try {",
+        "    var st = document.createElement('style');",
+        "    st.appendChild(document.createTextNode('video{object-fit:contain !important;transform:none !important;}'));",
+        "    (document.head || document.documentElement).appendChild(st);",
+        "  } catch(e){}",
+        "  return 'ok';",
+        "})()"
+    ].joined(separator: "\n")
+
+    /// v56：逐站实测判定，只认强信号。
+    static let verdictJS = [
+        "(function(){",
+        "  var t = (document.body ? document.body.innerText : '') || '';",
+        "  var good = /第\\s*\\d+\\s*集|剧集主页|选集|立即播放|开始观看|播放正片|在线播放|上一集|下一集/;",
+        "  var bad = /没有找到匹配数据|没有找到您想要的结果|找到\\s*0\\s*部|暂无相关|暂无数据|没有匹配|无搜索结果|未找到相关|安全验证|请输入验证码|访问验证|人机验证|404 Not Found|搜索\\s*[\"“”'']{2}/;",
+        "  if (good.test(t)) return 'hit';",
+        "  if (bad.test(t)) return 'miss';",
+        "  return 'unknown';",
+        "})()"
+    ].joined(separator: "\n")
 
     private static let sniffJS = """
     (function(){

@@ -33,6 +33,10 @@ struct SearchPlayback: Identifiable {
     var autoSearchKeyword: String? = nil
     /// v53：导航到影片详情页后主动点「开始观看 / 第1集」。
     var autoPlayOnDetail: Bool = false
+    /// v56：非空 = 自动找片，可见浏览器内依次试站，命中即停。
+    var siteQueue: [SiteCandidate] = []
+    /// v56：把某站实测结论（站点 URL → 是否命中）回写给搜索页分层。
+    var onVerdict: ((String, Bool) -> Void)? = nil
 }
 
 /// 无搜索规则、但有可浏览站点的书源：规则搜索遍历不到它们，给一个
@@ -43,6 +47,13 @@ struct SiteShortcut: Identifiable {
     let url: URL
     /// 带关键词的站内搜索结果页；点直达直接落在结果上，不必再手动输一次。
     let searchURL: URL?
+}
+
+/// v56：自动找片队列里的一站。纯值，避免把 BookSource 带进 sheet。
+struct SiteCandidate: Identifiable {
+    let id: String
+    let name: String
+    let url: URL
 }
 
 /// 一个 sheet item 承载两种去向，避免两个 .sheet 同时争抢 presented 状态。
@@ -99,6 +110,9 @@ struct BookSearchView: View {
     @State private var sitePlaylists: [String: [SiteEpisode]] = [:]
     /// 逐站站内搜索诊断：哪个站命中几条、哪个站连搜索页都没拿到
     @State private var siteDiagnostics: [String] = []
+    /// v56：站点实测结论（关键词|域名 → 是否命中）。只记强信号：
+    /// 落到详情页 = 命中；明确空结果 / 验证码 = 未命中。
+    @State private var siteVerdicts: [String: Bool] = [:]
 
     /// 可搜索的书源：配置了含 {{key}} 的 searchUrl 且具备 ruleSearch.bookList
     private var searchableSources: [BookSource] {
@@ -273,6 +287,10 @@ struct BookSearchView: View {
                     Button("关闭") { dismiss() }
                 }
             }
+            .onAppear {
+                if let d = UserDefaults.standard.dictionary(forKey: Self.verdictStoreKey)
+                            as? [String: Bool] { siteVerdicts = d }
+            }
             .onDisappear { searchTask?.cancel() }
             .sheet(item: $playback) { route in
                 Group {
@@ -283,7 +301,9 @@ struct BookSearchView: View {
                         SourceBrowserView(title: target.title,
                                           initialURL: target.url,
                                           autoSearchKeyword: target.autoSearchKeyword,
-                                          autoPlayOnDetail: target.autoPlayOnDetail)
+                                          autoPlayOnDetail: target.autoPlayOnDetail,
+                                          siteQueue: target.siteQueue,
+                                          onVerdict: target.onVerdict)
                     case .direct(let media):
                         BrowserPlayerSheet(media: media)
                     }
@@ -418,11 +438,11 @@ struct BookSearchView: View {
                             // 用 if 分支而非 Text(condition ? a : b)，避免插值字符串
                             // 在 LocalizedStringKey / String 重载间产生歧义。
                             if siteSearching {
-                                Text("影视站点搜索进行中…下方站点可点进去直接搜并播放")
+                                Text("影视站点搜索进行中…下方站点可点进去搜索")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             } else {
-                                Text("已在 \(siteShortcuts.count) 个影视站点自动搜「\(searchKeyword)」· 点下方站点进站即播")
+                                Text("可在 \(siteShortcuts.count) 个影视站点进站搜索「\(searchKeyword)」· 各站片库不同，搜到才播")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -514,36 +534,41 @@ struct BookSearchView: View {
                         }
                     }
                     if hasSiteSection {
-                        Section("影视站点 · 进站自动搜索并播放") {
-                            ForEach(siteShortcuts) { shortcut in
-                                Button {
-                                    // v53 换架构：不再打开 preferredSearchURL 拼出来的
-                                    // CMS 猜测搜索页（v50 逐站诊断证明一个都不命中）。
-                                    // 打开站点首页，让可见 WebView 在完整 Cookie /
-                                    // Referer / JS 会话里自动完成表单搜索与播放。
-                                    playback = .browser(SearchPlayback(
-                                        url: shortcut.url,
-                                        title: shortcut.name,
-                                        autoSearchKeyword: searchKeyword,
-                                        autoPlayOnDetail: true))
-                                } label: {
-                                    HStack {
-                                        Image(systemName: "play.rectangle")
-                                            .foregroundStyle(.tint)
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(shortcut.name)
-                                                .font(.subheadline)
-                                            Text("自动搜「\(searchKeyword)」· 点开影片即播")
-                                                .font(.caption2)
-                                                .foregroundStyle(.secondary)
-                                        }
-                                        Spacer()
-                                        Image(systemName: "chevron.right")
-                                            .font(.caption)
-                                            .foregroundStyle(.tertiary)
+                        Section("影视站点 · 进站搜索") {
+                            // v56：一次点、只把能播的留下。可见浏览器内串行试站，
+                            // 读到明确空结果 / 验证码就自动切下一站，落到详情页即停。
+                            Button {
+                                startAutoFind()
+                            } label: {
+                                HStack {
+                                    Image(systemName: "magnifyingglass")
+                                        .foregroundStyle(.tint)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("自动找片")
+                                            .font(.subheadline.weight(.semibold))
+                                        Text("依次在 \(siteShortcuts.count) 个站点搜「\(searchKeyword)」· 搜到才停")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption)
+                                        .foregroundStyle(.tertiary)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            ForEach(hitSites) { shortcut in
+                                siteRow(shortcut, hit: true)
+                            }
+                            ForEach(untestedSites) { shortcut in
+                                siteRow(shortcut, hit: false)
+                            }
+                            if !missedSites.isEmpty {
+                                DisclosureGroup("未搜到 · " + String(missedSites.count) + " 个站点") {
+                                    ForEach(missedSites) { shortcut in
+                                        siteRow(shortcut, hit: false)
                                     }
                                 }
-                                .buttonStyle(.plain)
                             }
                         }
                     }
@@ -602,16 +627,18 @@ struct BookSearchView: View {
         switch resultKind {
         case .all: base = allResults
         case .media:
-            let matched = allResults.filter { isMediaResult($0) }
-            // v49：视频范围不再出现「当前范围没有匹配项」的空白页
-            base = matched.isEmpty ? allResults : matched
+            // v56：视频范围没有媒体结果时不再把全部书源结果倒出来
+            //（第 13 轮真机两条空标题「来源：涨姿势」行就是这么来的）。
+            // 空白由始终可见的影视站点区承接。
+            base = allResults.filter { isMediaResult($0) }
         case .book: base = allResults.filter { !isMediaResult($0) }
         }
+        let valid = base.filter { hasUsableTitle($0.name) }
         let k = searchKeyword.lowercased()
-        guard !k.isEmpty else { return base }
+        guard !k.isEmpty else { return valid }
         // 全源并发的完成顺序不等于相关度；把精确命中提到最前面，免得要找的剧
         // 被几十条小说命中压在列表底部。
-        return base.sorted { relevance($0, k) > relevance($1, k) }
+        return valid.sorted { relevance($0, k) > relevance($1, k) }
     }
 
     private func relevance(_ book: ExploredBook, _ k: String) -> Int {
@@ -636,6 +663,101 @@ struct BookSearchView: View {
                         "&gt;": ">", "&quot;": "\"", "&#39;": "'"]
         for (k, v) in entities { s = s.replacingOccurrences(of: k, with: v) }
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// v56：书源把空标题 / HTML 残片 / 纯符号当结果返回时不进结果区。
+    private func hasUsableTitle(_ raw: String) -> Bool {
+        let s = cleanTitle(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard s.count >= 2 else { return false }
+        return s.unicodeScalars.contains { CharacterSet.alphanumerics.contains($0) }
+    }
+
+    // MARK: - v56 站点实测分层
+
+    private static let verdictStoreKey = "legado.siteVerdicts.v1"
+
+    private func verdictKey(_ raw: String) -> String {
+        let host = URL(string: raw)?.host ?? raw
+        return searchKeyword.lowercased() + "|" + host.lowercased()
+    }
+
+    private func recordVerdict(_ siteURL: String, hit: Bool) {
+        var d = siteVerdicts
+        d[verdictKey(siteURL)] = hit
+        siteVerdicts = d
+        UserDefaults.standard.set(d, forKey: Self.verdictStoreKey)
+    }
+
+    private var hitSites: [SiteShortcut] {
+        siteShortcuts.filter { siteVerdicts[verdictKey($0.url.absoluteString)] == true }
+    }
+
+    private var missedSites: [SiteShortcut] {
+        siteShortcuts.filter { siteVerdicts[verdictKey($0.url.absoluteString)] == false }
+    }
+
+    private var untestedSites: [SiteShortcut] {
+        siteShortcuts.filter { siteVerdicts[verdictKey($0.url.absoluteString)] == nil }
+    }
+
+    /// v56：按「命中 → 未测 → 未命中」排队列，命中站优先重试。
+    private func startAutoFind() {
+        let ordered = hitSites + untestedSites + missedSites
+        guard let first = ordered.first else { return }
+        let queue = ordered.map {
+            SiteCandidate(id: $0.url.absoluteString, name: $0.name, url: $0.url)
+        }
+        playback = .browser(SearchPlayback(
+            url: first.url,
+            title: first.name,
+            autoSearchKeyword: searchKeyword,
+            autoPlayOnDetail: true,
+            siteQueue: queue,
+            onVerdict: { siteURL, hit in
+                self.recordVerdict(siteURL, hit: hit)
+            }))
+    }
+
+    @ViewBuilder
+    private func siteRow(_ shortcut: SiteShortcut, hit: Bool) -> some View {
+        Button {
+            playback = .browser(SearchPlayback(
+                url: shortcut.url,
+                title: shortcut.name,
+                autoSearchKeyword: searchKeyword,
+                autoPlayOnDetail: true,
+                onVerdict: { siteURL, ok in
+                    self.recordVerdict(siteURL, hit: ok)
+                }))
+        } label: {
+            HStack {
+                if hit {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    Image(systemName: "play.rectangle")
+                        .foregroundStyle(.tint)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(shortcut.name)
+                        .font(.subheadline)
+                    if hit {
+                        Text("✓ 已搜到并播放")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("自动搜「\(searchKeyword)」· 搜到才播")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .buttonStyle(.plain)
     }
 
     private func isMediaResult(_ book: ExploredBook) -> Bool {
