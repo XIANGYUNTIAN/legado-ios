@@ -115,11 +115,16 @@ struct BookSearchView: View {
         guard !searchKeyword.isEmpty else { return [] }
         var out: [SiteShortcut] = []
         for s in sourceStore.sources where s.enabled && !s.supportsSearch {
+            // v55：按 siteURLs 全量判采集类（v54 只看 first 会漏「终极
+            // 全栖接口聚合」），并顺带查 bookSourceUrl 本身。
+            let allURLs = s.siteURLs.map { $0.absoluteString.lowercased() }
+                + [s.bookSourceUrl.lowercased()]
+            let isCollector = allURLs.contains(where: {
+                $0.contains("api.php") || $0.contains("/provide/vod")
+                    || $0.contains("/api/vod")
+            })
+            if isCollector { continue }
             guard let u = s.siteURLs.first else { continue }
-            // v54：采集类书源的 "首页" 其实是 api.php/provide/vod 接口，
-            // 打开只会显示一屏原始 JSON。它们走站内 HTTP 解析，不进网页入口。
-            let host = u.absoluteString.lowercased()
-            if host.contains("api.php") || host.contains("/provide/vod") { continue }
             let name = s.bookSourceName.isEmpty ? (u.host ?? u.absoluteString) : s.bookSourceName
             let target = SiteSearchService.target(source: s)
             out.append(SiteShortcut(id: s.bookSourceUrl + "|" + name, name: name, url: u,
@@ -130,9 +135,14 @@ struct BookSearchView: View {
         // 规则搜索会返回 0 命中，但站内仍能搜到并播放（公子实测的场景）。
         for s in sourceStore.sources where s.enabled && s.supportsSearch
             && (s.isVideoLike || BookSource.looksLikeMediaName(s.bookSourceName)) {
+            let allURLs = s.siteURLs.map { $0.absoluteString.lowercased() }
+                + [s.bookSourceUrl.lowercased()]
+            let isCollector = allURLs.contains(where: {
+                $0.contains("api.php") || $0.contains("/provide/vod")
+                    || $0.contains("/api/vod")
+            })
+            if isCollector { continue }
             guard let u = s.siteURLs.first else { continue }
-            let host = u.absoluteString.lowercased()
-            if host.contains("api.php") || host.contains("/provide/vod") { continue }
             let name = s.bookSourceName.isEmpty ? (u.host ?? u.absoluteString) : s.bookSourceName
             let key = s.bookSourceUrl + "|" + name
             if out.contains(where: { $0.id == key }) { continue }
@@ -203,11 +213,12 @@ struct BookSearchView: View {
         return Array(sorted.prefix(16).map { SiteSearchService.target(source: $0) })
     }
 
-    /// 站点直达区只在搜索结束后出现，避免搜索中列表抖动。
+    /// v55：站点直达是主路径，必须始终可见。v53 交付说明写「始终可见」，
+    /// 代码却仍带 !isSearching —— 精确模式全源遍历几分钟内入口被藏，
+    /// 而站内任务几秒就结束并写上了终局文案，第 10 / 12 轮真机的
+    /// 「图 1 无入口 / 一分钟后图 3 有入口」就是这个时间差。
     private var hasSiteSection: Bool {
-        // v50：站内结果出来后主结果区让给可播剧集行，网页入口只在 0 命中时备用。
-        !isSearching && progressSink.text == nil && !siteShortcuts.isEmpty
-            && siteResults.isEmpty
+        !siteShortcuts.isEmpty
     }
 
     /// 无可用搜索书源时的可操作诊断：按条件逐层排查，告诉用户差在哪、怎么补
@@ -317,7 +328,7 @@ struct BookSearchView: View {
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 200)
                 }
-                Text("精确模式遍历全部书源；视频结果点 ▶ 直达播放，未命中可试「备用网页入口」 · build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?")")
+                Text("精确模式遍历全部书源；视频结果点 ▶ 直达播放，未命中可点下方影视站点进站自动搜并播放 · build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?")")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if siteSearching {
@@ -411,7 +422,7 @@ struct BookSearchView: View {
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             } else {
-                                Text("本轮未识别出视频结果，已显示全部 \(allResults.count) 条")
+                                Text("已在 \(siteShortcuts.count) 个影视站点自动搜「\(searchKeyword)」· 点下方站点进站即播")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -752,8 +763,11 @@ struct BookSearchView: View {
                         ))
                     }
                     guard !added.isEmpty else { return }
+                    // v55：隐藏 WebView 抽链接 → 结果行点 ▶ 这条链路十二轮
+                    // 在放宽（49 条假命中）与收紧（归零）之间摆动，从未稳定。
+                    // 降级为纯诊断，只写 siteDiagnostics / sitePlaylists，
+                    // 不再往结果区塞行；主路径是下方可见网页一条龙。
                     sitePlaylists = playlists
-                    siteResults = added
                     errorMessage = nil
                 }
             }

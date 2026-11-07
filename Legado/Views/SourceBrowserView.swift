@@ -569,11 +569,34 @@ struct BrowserWebView: UIViewRepresentable {
             }
         }
 
-        /// 只在「进站自动搜索」模式启用。首次落地页提交表单；此后导航到
-        /// 影片详情页时主动点播放入口。找不到 form 就什么都不做，把首页
-        /// 留给用户手动搜——绝不拼猜测 URL 把人带去错的搜索页。
+        /// v55：进站一条龙。按「首页 / 搜索结果页 / 详情页」三阶段分派注入，
+        /// 不再用 isDetailLike 二分（v53/v54 结果页零注入，黄果懒加载卡片
+        /// 没人点，U酷提交后回首页也没人补）。全程只点页面自带元素，
+        /// 绝不拼猜测 URL；每个脚本自身幂等，导航后 window 重置可再跑一次。
         private func injectAutomation(into webView: WKWebView) {
             guard let kw = autoSearchKeyword, !kw.isEmpty else { return }
+            let page = webView.url?.absoluteString.lowercased() ?? ""
+            if Self.isResultsPage(page) {
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 800_000_000)
+                    webView.evaluateJavaScript(
+                        BrowserWebView.resultPageJS(keyword: kw)) { _, _ in }
+                }
+                return
+            }
+            if Self.isDetailLike(page) {
+                guard autoPlayOnDetail else { return }
+                Task { @MainActor in
+                    let delays: [UInt64] = [1_500_000_000, 3_500_000_000, 6_000_000_000]
+                    for delay in delays {
+                        try? await Task.sleep(nanoseconds: delay)
+                        webView.evaluateJavaScript(FallbackWebView.autoPlayJS) { _, _ in }
+                    }
+                }
+                return
+            }
+            // 首页：首次填词 + form 原生提交。searchSubmitted 只防重复填词，
+            // 提交后回首页时仍会走看门狗（点搜索按钮 / 派发 Enter）。
             if !searchSubmitted {
                 searchSubmitted = true
                 let script = BrowserWebView.autoSearchJS(keyword: kw)
@@ -581,28 +604,24 @@ struct BrowserWebView: UIViewRepresentable {
                     try? await Task.sleep(nanoseconds: 1_200_000_000)
                     webView.evaluateJavaScript(script) { _, _ in }
                 }
-                return
             }
-            guard autoPlayOnDetail else { return }
-            let page = webView.url?.absoluteString.lowercased() ?? ""
-            guard Self.isDetailLike(page) else { return }
             Task { @MainActor in
-                let delays: [UInt64] = [1_500_000_000, 3_500_000_000, 6_000_000_000]
-                for delay in delays {
-                    try? await Task.sleep(nanoseconds: delay)
-                    webView.evaluateJavaScript(FallbackWebView.autoPlayJS) { _, _ in }
-                }
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                webView.evaluateJavaScript(BrowserWebView.watchdogJS()) { _, _ in }
             }
         }
 
+        private static func isResultsPage(_ u: String) -> Bool {
+            let marks = ["wd=", "vodsearch", "/search", "keyword=", "?q=", "&q=",
+                         "?key=", "&key=", "?s=", "&s=", "/so/", "searchword="]
+            return marks.contains(where: { u.contains($0) })
+        }
+
         private static func isDetailLike(_ u: String) -> Bool {
-            // 表单提交后的结果页常带 /vod/ 或 /search，不能当详情页去点播放。
-            let searchMarks = ["wd=", "vodsearch", "/search", "keyword=", "?q=", "&q="]
-            if searchMarks.contains(where: { u.contains($0) }) { return false }
             let hints = ["/vod/", "/detail/", "/series/", "/play/", "/watch/",
                          "/bangumi/", "/drama/", "/video/", "/movie/", "/show/",
                          "ac=detail", "ids=", "/d/", "/b/"]
-            return hints.contains { u.contains($0) }
+            return hints.contains(where: { u.contains($0) })
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -638,6 +657,105 @@ struct BrowserWebView: UIViewRepresentable {
     /// v53：可见浏览器里的「首页 → 找搜索框 → 填词 → form 原生提交」。
     /// 与隐藏探针的区别：找不到 form 不拼 ?wd= 猜测 URL，保持首页可用。
     /// 数组拼接，避免 JS 花括号干扰 Swift 词法自检。
+    /// v55：表单提交后没导航时的补点（U酷 requestSubmit 后回首页，
+    /// 关键词还留在搜索框里）。只点页面自带的搜索按钮 / 派发 Enter，
+    /// 绝不拼 ?wd= 猜测 URL。同页幂等，跨导航最多补两次。
+    static func watchdogJS() -> String {
+        return [
+            "(function(){",
+            "  if (window.__legadoWatchdogDone) return 'done';",
+            "  window.__legadoWatchdogDone = 1;",
+            "  var low = (location.href || '').toLowerCase();",
+            "  if (low.indexOf('vodsearch') >= 0 || low.indexOf('/search') >= 0",
+            "      || low.indexOf('wd=') >= 0 || low.indexOf('key=') >= 0",
+            "      || low.indexOf('keyword=') >= 0 || low.indexOf('?q=') >= 0) return 'already';",
+            "  var n = 0;",
+            "  try { n = parseInt(sessionStorage.getItem('__legadoWatchdogCount') || '0', 10); } catch(e){}",
+            "  if (n >= 2) return 'limit';",
+            "  try { sessionStorage.setItem('__legadoWatchdogCount', String(n + 1)); } catch(e){}",
+            "  var words = /搜索|搜片|搜一下|立即搜索|开始搜索|search/i;",
+            "  var els = document.querySelectorAll('button,a,div,span,input');",
+            "  for (var i=0;i<els.length;i++){",
+            "    var e = els[i];",
+            "    var t = (e.innerText || e.value || e.getAttribute('title') || '').trim();",
+            "    if (!t || t.length > 12) continue;",
+            "    if (!words.test(t)) continue;",
+            "    if (e.tagName === 'A' && !(e.getAttribute('href') || '').trim()) continue;",
+            "    try { e.click(); return 'clicked'; } catch(err){}",
+            "  }",
+            "  var inputs = document.querySelectorAll('input');",
+            "  for (var j=0;j<inputs.length;j++){",
+            "    var ip = inputs[j];",
+            "    if (!ip.value || !ip.value.trim()) continue;",
+            "    try {",
+            "      ['keydown','keypress','keyup'].forEach(function(ev){",
+            "        ip.dispatchEvent(new KeyboardEvent(ev, {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true}));",
+            "      });",
+            "      return 'enter';",
+            "    } catch(err){}",
+            "  }",
+            "  return 'none';",
+            "})()"
+        ].joined(separator: "\n")
+    }
+
+    /// v55：搜索结果页（黄果 /search?q=、苹果 CMS /vod/search.html?wd=）。
+    /// 轻滚动触发懒加载，再点第一个「锚文本含关键词 + 详情形态」的链接；
+    /// 卡片把标题放在子 div 时，从含关键词的元素向上/向下找 a[href]。
+    /// 同页幂等；点不到就留在结果页由用户手动点，绝不拼 URL。
+    static func resultPageJS(keyword: String) -> String {
+        let kw = keyword
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\n", with: " ")
+        return [
+            "(function(){",
+            "  if (window.__legadoResultDone) return 'done';",
+            "  window.__legadoResultDone = 1;",
+            "  var kw = '" + kw + "';",
+            "  var nav = /首页|分类|排行|最新|登录|注册|更多|下一页|上一页|下载|会员|关于|帮助|联系|返回|列表|公告|域名|替换|电报|频道|电影|电视剧|综艺|动漫/;",
+            "  var marks = ['/vod/','/detail/','/series/','/play/','/watch/','/bangumi/','/drama/','/video/','/movie/','/show/','ac=detail','ids=','.html'];",
+            "  function isDetail(h){",
+            "    for (var i=0;i<marks.length;i++){ if (h.indexOf(marks[i]) >= 0) return true; }",
+            "    return false;",
+            "  }",
+            "  function text(a){ return (a.innerText || a.textContent || a.getAttribute('title') || '').trim(); }",
+            "  function pick(){",
+            "    var links = document.querySelectorAll('a[href]');",
+            "    for (var i=0;i<links.length;i++){",
+            "      var a = links[i];",
+            "      var h = (a.getAttribute('href') || '').trim();",
+            "      var t = text(a);",
+            "      if (!h || h === '#' || h.indexOf('javascript:') === 0) continue;",
+            "      if (nav.test(t) || t.length > 40 || t.length < 2) continue;",
+            "      if (!isDetail(h) || t.indexOf(kw) < 0) continue;",
+            "      try { a.click(); return 'clicked'; } catch(e){}",
+            "    }",
+            "    var nodes = document.querySelectorAll('h1,h2,h3,h4,div,span,p');",
+            "    for (var k=0;k<nodes.length;k++){",
+            "      var nd = nodes[k];",
+            "      var tx = (nd.innerText || nd.textContent || '').trim();",
+            "      if (!tx || tx.length > 40 || tx.indexOf(kw) < 0) continue;",
+            "      var c = nd.closest ? nd.closest('a[href]') : null;",
+            "      if (!c && nd.querySelector) c = nd.querySelector('a[href]');",
+            "      if (c && isDetail((c.getAttribute('href') || '').trim())) {",
+            "        try { c.click(); return 'clicked'; } catch(e){}",
+            "      }",
+            "    }",
+            "    return 'none';",
+            "  }",
+            "  try { window.scrollTo(0, 260); } catch(e){}",
+            "  setTimeout(function(){ try { window.scrollTo(0, 0); } catch(e){} }, 500);",
+            "  var tries = 0;",
+            "  var timer = setInterval(function(){",
+            "    tries++;",
+            "    if (pick() === 'clicked' || tries >= 4) clearInterval(timer);",
+            "  }, 900);",
+            "  return 'scheduled';",
+            "})()"
+        ].joined(separator: "\n")
+    }
+
     static func autoSearchJS(keyword: String) -> String {
         let kw = keyword
             .replacingOccurrences(of: "\\", with: "\\\\")
