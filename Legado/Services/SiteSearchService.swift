@@ -57,6 +57,13 @@ private struct SiteOneResult: Sendable {
     let isCollector: Bool
 }
 
+/// v50：表单驱动搜索的单站产出（纯值，可跨 Task 传递）
+private struct FormOutcome: Sendable {
+    let sourceId: String
+    let note: String
+    let hits: [SiteSearchHit]
+}
+
 /// 逐站诊断：搜索页可见，下一轮一张截图就能定位是哪个站、哪一步失败
 struct SiteSearchReport: Sendable {
     let hits: [SiteSearchHit]
@@ -241,18 +248,46 @@ enum SiteSearchService {
         var hits: [SiteSearchHit] = []
         for one in results { hits.append(contentsOf: one.hits) }
 
-        // 浏览器渲染兜底：只给「有网页」且 HTTP 0 命中的站，最多 10 个，串行。
-        // 采集 API 域名没有网页，跑 WebView 只会白等 7s。
-        let pending = results.filter {
-            $0.hits.isEmpty && $0.domURL != nil && !$0.isCollector
-        }.prefix(10)
-        for one in pending {
-            guard let raw = one.domURL, let url = URL(string: raw),
-                  let t = targets.first(where: { $0.sourceId == one.sourceId }) else { continue }
-            let links = await SiteDomProbe.links(from: url, referer: t.baseURL)
-            let pairs = links.map { ($0.title, $0.href) }
-            let got = hitsFromPairs(pairs, pageURL: url, target: t, keyword: keyword)
-            if !got.isEmpty { hits.append(contentsOf: got) }
+        // v50：不再猜站内搜索 URL。诊断截图证实 24 站全是「搜索页无结果（含网页渲染）」：
+        // 页面能渲染，只是程序拼的 /vodsearch/?wd=… 根本不是这些站真实的搜索入口。
+        // 改为复刻用户手动路径：打开站点首页 → 找页面自带的搜索表单 → 填词提交 →
+        // 收结果页渲染后的详情链接。6 路并发，每站 11s 硬超时。
+        let pending = Array(results.filter {
+            $0.hits.isEmpty && !$0.isCollector
+        }.prefix(16))
+        var formNotes: [String: String] = [:]
+        var cursorForm = 0
+        while cursorForm < pending.count {
+            let endForm = min(cursorForm + 6, pending.count)
+            let slice = Array(pending[cursorForm..<endForm])
+            let batch: [FormOutcome] = await withTaskGroup(
+                of: FormOutcome.self, returning: [FormOutcome].self) { group in
+                for one in slice {
+                    group.addTask {
+                        guard let t = targets.first(where: { $0.sourceId == one.sourceId }),
+                              let home = URLSanitizer.sanitize(t.baseURL) else {
+                            return FormOutcome(sourceId: one.sourceId,
+                                               note: "首页地址不可用", hits: [])
+                        }
+                        let out = await SiteFormProbe.search(home: home, keyword: keyword)
+                        let pairs = out.links.map { ($0.title, $0.href) }
+                        let got = SiteSearchService.hitsFromPairs(
+                            pairs, pageURL: home, target: t,
+                            keyword: keyword, relaxed: true)
+                        return FormOutcome(sourceId: one.sourceId,
+                                           note: out.note + " · 命中 " + String(got.count) + " 条",
+                                           hits: got)
+                    }
+                }
+                var all: [FormOutcome] = []
+                for await item in group { all.append(item) }
+                return all
+            }
+            for item in batch {
+                formNotes[item.sourceId] = item.note
+                hits.append(contentsOf: item.hits)
+            }
+            cursorForm = endForm
         }
 
         // 去重：可播放结果按「剧名 + 来源」收敛，保留集数最多的那份；
@@ -280,10 +315,12 @@ enum SiteSearchService {
                 lines.append("\(one.name)：命中 \(mine.count) 部 / \(epCount) 集直链")
             } else if one.isCollector {
                 lines.append("\(one.name)：\(one.apiTried) 个采集接口均无结果")
+            } else if let note = formNotes[one.sourceId] {
+                lines.append("\(one.name)：表单搜索 \(note)")
             } else if one.domURL == nil {
                 lines.append("\(one.name)：站点地址不可用")
             } else {
-                lines.append("\(one.name)：搜索页无结果（含网页渲染）")
+                lines.append("\(one.name)：未进入表单搜索")
             }
         }
         return SiteSearchReport(hits: Array(out.prefix(60)), lines: lines)
@@ -353,8 +390,8 @@ enum SiteSearchService {
 
     /// HTTP 与 WebView 两条通道共用的过滤逻辑
     private static func hitsFromPairs(_ pairs: [(String, String)], pageURL: URL,
-                                      target: SiteTarget,
-                                      keyword: String) -> [SiteSearchHit] {
+                                      target: SiteTarget, keyword: String,
+                                      relaxed: Bool = false) -> [SiteSearchHit] {
         let k = keyword.lowercased()
         var out: [SiteSearchHit] = []
         for (rawTitle, href) in pairs {
@@ -363,7 +400,11 @@ enum SiteSearchService {
             let lowerTitle = title.lowercased()
             guard lowerTitle.contains(k) || (!k.isEmpty && k.contains(lowerTitle)) else { continue }
             let h = href.lowercased()
-            guard looksLikeDetail(h) else { continue }
+            if relaxed {
+                guard relaxedDetailOK(h) else { continue }
+            } else {
+                guard looksLikeDetail(h) else { continue }
+            }
             let absolute: String
             if h.hasPrefix("http://") || h.hasPrefix("https://") {
                 absolute = href
@@ -455,6 +496,18 @@ enum SiteSearchService {
     }
 
     // MARK: - 详情链接判定
+
+    /// v50：表单提交后的结果页由各站自定义模板渲染，详情页 URL 未必带 /vod/ 等特征。
+    /// 这里只排掉明确的静态资源、导航与搜索页自身，其余交给标题关键词判定。
+    private static func relaxedDetailOK(_ h: String) -> Bool {
+        if h.hasPrefix("javascript") || h.hasPrefix("mailto") || h == "#" { return false }
+        let bad = [".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg",
+                   "/login", "/register", "/upload/", "/static/", "api.php",
+                   "/m3u8/", "/parse/", "/jiexi/", "?wd=", "&wd=", "keyword=",
+                   "vodsearch", "/search", "/tag/", "/topic/"]
+        if bad.contains(where: { h.contains($0) }) { return false }
+        return h.count >= 8
+    }
 
     private static func looksLikeDetail(_ h: String) -> Bool {
         if h.hasPrefix("javascript") || h == "#" || h.hasPrefix("mailto") { return false }

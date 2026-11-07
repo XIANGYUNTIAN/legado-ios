@@ -150,9 +150,16 @@ struct BookSearchView: View {
     private var siteTargets: [SiteTarget] {
         let list = sourceStore.sources.filter { s in
             guard s.enabled, !s.siteURLs.isEmpty else { return false }
-            return !s.supportsSearch || s.isVideoLike || s.isComicLike
-                || BookSource.looksLikeMediaName(s.bookSourceName)
-                || BookSource.looksLikeMediaName(s.bookSourceComment)
+            if s.isVideoLike || s.isComicLike { return true }
+            if BookSource.looksLikeMediaName(s.bookSourceName)
+                || BookSource.looksLikeMediaName(s.bookSourceComment) { return true }
+            // v50：诊断截图里 24 站有一半是纯小说站（全本小说 / 八一中文网 /
+            // 得间小说 / 多看阅读…）。旧条件 !supportsSearch 把它们全放进来，
+            // 白占一半配额且不可能搜出视频。无搜索规则的源再用分组强信号过一遍。
+            guard !s.supportsSearch else { return false }
+            let g = (s.bookSourceGroup ?? "").lowercased()
+            return ["影视", "视频", "电影", "剧集", "采集", "资源", "动漫"]
+                .contains { g.contains($0) }
         }
         let visible = Set(siteShortcuts.compactMap { item -> String? in
             guard let first = item.id.split(separator: "|", maxSplits: 1).first else {
@@ -169,12 +176,14 @@ struct BookSearchView: View {
             if am != bm { return am > bm }
             return a.bookSourceName < b.bookSourceName
         }
-        return Array(sorted.prefix(24).map { SiteSearchService.target(source: $0) })
+        return Array(sorted.prefix(16).map { SiteSearchService.target(source: $0) })
     }
 
     /// 站点直达区只在搜索结束后出现，避免搜索中列表抖动。
     private var hasSiteSection: Bool {
+        // v50：站内结果出来后主结果区让给可播剧集行，网页入口只在 0 命中时备用。
         !isSearching && progressSink.text == nil && !siteShortcuts.isEmpty
+            && siteResults.isEmpty
     }
 
     /// 无可用搜索书源时的可操作诊断：按条件逐层排查，告诉用户差在哪、怎么补
@@ -281,7 +290,7 @@ struct BookSearchView: View {
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 200)
                 }
-                Text("精确模式遍历全部书源；视频结果点 ▶ 直达播放，找不到可试「站点直达」 · build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?")")
+                Text("精确模式遍历全部书源；视频结果点 ▶ 直达播放，未命中可试「备用网页入口」 · build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?")")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if siteSearching {
@@ -446,7 +455,7 @@ struct BookSearchView: View {
                         }
                     }
                     if hasSiteSection {
-                        Section("站点直达 · 打开站内搜索页手动点选") {
+                        Section("备用网页入口 · 站内手动点选") {
                             ForEach(siteShortcuts) { shortcut in
                                 Button {
                                     playback = .browser(SearchPlayback(
