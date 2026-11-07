@@ -110,7 +110,8 @@ struct SourceBrowserView: View {
                     switch state {
                     case .candidates:
                         BrowserCandidateSheet(candidates: candidates, headers: headers) { url in
-                            sheetState = .media(BrowserMedia(url: url, headers: headers))
+                            let media = VodPlaylistParser.normalizedMediaURL(url) ?? url
+                            sheetState = .media(BrowserMedia(url: media, headers: headers))
                         }
                     case .episodes(let list):
                         VodEpisodeSheet(list: list)
@@ -328,24 +329,43 @@ struct FallbackWebView: UIViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
-                webView.evaluateJavaScript(FallbackWebView.autoPlayJS) { _, _ in }
+                let delays: [UInt64] = [1_500_000_000, 3_500_000_000, 6_000_000_000]
+                for delay in delays {
+                    try? await Task.sleep(nanoseconds: delay)
+                    webView.evaluateJavaScript(FallbackWebView.autoPlayJS) { _, _ in }
+                }
             }
         }
     }
 
     /// 用普通字符串数组拼接，避免 raw 多行字符串把 JS 花括号计入 Swift 词法自检
+    /// v54：先关「我记住啦 / 知道了 / 关闭公告」这类模态层，再点播放入口；
+    /// 播放器常异步初始化，故延时 400ms 且由调用方在 1.5/3.5/6s 重复注入，
+    /// 用 window 标记保证同一页面只真正点一次。
     fileprivate static let autoPlayJS = [
         "(function(){",
-        "  var words = /开始观看|立即播放|播放正片|点击播放|马上观看|在线播放|观看正片|立即观看|^播放$|^第?0?1集?$|^1$/i;",
-        "  var els = Array.from(document.querySelectorAll('a,button,span,div,li'));",
-        "  for (var i=0;i<els.length;i++){",
-        "    var t = (els[i].innerText||els[i].textContent||'').trim();",
-        "    if (t.length<=12 && words.test(t)) {",
-        "      try { els[i].click(); return 'clicked'; } catch(e){}",
+        "  var closeWords = /我记住啦|我知道了|知道了|关闭公告|关闭弹窗|不再提示|同意并关闭/i;",
+        "  var all = Array.from(document.querySelectorAll('a,button,span,div,li,input'));",
+        "  for (var j=0;j<all.length;j++){",
+        "    var c = (all[j].innerText||all[j].textContent||all[j].value||'').trim();",
+        "    if (c.length>0 && c.length<=12 && closeWords.test(c)) {",
+        "      try { all[j].click(); } catch(e){}",
         "    }",
         "  }",
-        "  return 'none';",
+        "  if (window.__legadoAutoPlayDone) return 'done';",
+        "  setTimeout(function(){",
+        "    if (window.__legadoAutoPlayDone) return;",
+        "    var words = /开始观看|立即播放|播放正片|点击播放|马上观看|在线播放|观看正片|立即观看|^播放$|^第?0?1集?$|^1$/i;",
+        "    var els = Array.from(document.querySelectorAll('a,button,span,div,li'));",
+        "    for (var i=0;i<els.length;i++){",
+        "      var t = (els[i].innerText||els[i].textContent||'').trim();",
+        "      if (t.length<=12 && words.test(t)) {",
+        "        try { els[i].click(); window.__legadoAutoPlayDone=1; } catch(e){}",
+        "        break;",
+        "      }",
+        "    }",
+        "  }, 400);",
+        "  return 'scheduled';",
         "})()"
     ].joined(separator: "\n")
 }
@@ -469,19 +489,22 @@ struct BrowserWebView: UIViewRepresentable {
         private static func isMediaURL(_ url: URL) -> Bool {
             guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
             let path = comps.path.lowercased()
-            let query = (comps.query ?? "").lowercased()
             let exts = [".m3u8", ".mp4", ".mpd", ".flv", ".ts", ".m4v",
                         ".webm", ".mkv", ".mov", ".m4a", ".mp3"]
-            return exts.contains(where: { path.hasSuffix($0) })
-                || query.contains(".m3u8") || query.contains(".mp4")
+            if exts.contains(where: { path.hasSuffix($0) }) { return true }
+            // v54：?url= 里含 .mp4 的解析页本身不是媒体；只有能解包出
+            // 内层显式媒体地址时才算，play() 会再做一次归一化。
+            return VodPlaylistParser.normalizedMediaURL(url) != nil
         }
 
         private func play(_ url: URL) {
+            // v54：解析页 URL 先解包成内层真实媒体地址。
+            let media = VodPlaylistParser.normalizedMediaURL(url) ?? url
             var h = headers
             if h["Referer"] == nil && h["referer"] == nil {
                 h["Referer"] = currentPage?.absoluteString ?? url.absoluteString
             }
-            sheetState = .media(BrowserMedia(url: url, headers: h))
+            sheetState = .media(BrowserMedia(url: media, headers: h))
         }
 
         // MARK: WKScriptMessageHandler
@@ -564,8 +587,11 @@ struct BrowserWebView: UIViewRepresentable {
             let page = webView.url?.absoluteString.lowercased() ?? ""
             guard Self.isDetailLike(page) else { return }
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
-                webView.evaluateJavaScript(FallbackWebView.autoPlayJS) { _, _ in }
+                let delays: [UInt64] = [1_500_000_000, 3_500_000_000, 6_000_000_000]
+                for delay in delays {
+                    try? await Task.sleep(nanoseconds: delay)
+                    webView.evaluateJavaScript(FallbackWebView.autoPlayJS) { _, _ in }
+                }
             }
         }
 

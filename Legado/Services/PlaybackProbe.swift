@@ -108,11 +108,13 @@ final class PlaybackProbe: NSObject, WKNavigationDelegate {
         var out: [URL] = []
         for item in raw {
             let s = item.replacingOccurrences(of: "\\/", with: "/")
-            guard let u = URLSanitizer.sanitize(s), VodPlaylistParser.isMedia(u) else { continue }
-            let key = u.absoluteString
+            // v54：解析页 URL 要解包成内层真实媒体地址再交给播放器。
+            guard let u = URLSanitizer.sanitize(s),
+                  let play = VodPlaylistParser.normalizedMediaURL(u) else { continue }
+            let key = play.absoluteString
             if seen.contains(key) { continue }
             seen.insert(key)
-            out.append(u)
+            out.append(play)
             if out.count >= 20 { break }
         }
         return out

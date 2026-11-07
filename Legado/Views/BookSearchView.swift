@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import Foundation
 
 /// 搜索进度中转：让后台线程能把进度文本推到主线程 @State，
 /// 规避 @Sendable 闭包直接捕获 @State 的编译/并发问题。
@@ -115,6 +116,10 @@ struct BookSearchView: View {
         var out: [SiteShortcut] = []
         for s in sourceStore.sources where s.enabled && !s.supportsSearch {
             guard let u = s.siteURLs.first else { continue }
+            // v54：采集类书源的 "首页" 其实是 api.php/provide/vod 接口，
+            // 打开只会显示一屏原始 JSON。它们走站内 HTTP 解析，不进网页入口。
+            let host = u.absoluteString.lowercased()
+            if host.contains("api.php") || host.contains("/provide/vod") { continue }
             let name = s.bookSourceName.isEmpty ? (u.host ?? u.absoluteString) : s.bookSourceName
             let target = SiteSearchService.target(source: s)
             out.append(SiteShortcut(id: s.bookSourceUrl + "|" + name, name: name, url: u,
@@ -126,6 +131,8 @@ struct BookSearchView: View {
         for s in sourceStore.sources where s.enabled && s.supportsSearch
             && (s.isVideoLike || BookSource.looksLikeMediaName(s.bookSourceName)) {
             guard let u = s.siteURLs.first else { continue }
+            let host = u.absoluteString.lowercased()
+            if host.contains("api.php") || host.contains("/provide/vod") { continue }
             let name = s.bookSourceName.isEmpty ? (u.host ?? u.absoluteString) : s.bookSourceName
             let key = s.bookSourceUrl + "|" + name
             if out.contains(where: { $0.id == key }) { continue }
@@ -160,8 +167,16 @@ struct BookSearchView: View {
             let label = (s.bookSourceName + " " + (s.bookSourceGroup ?? "")
                          + " " + String(s.bookSourceComment.prefix(160))).lowercased()
             let textSite = ["小说", "漫画", "阅读", "文库", "书城", "起点",
-                            "笔趣", "本子", "画集", "txt"]
+                            "笔趣", "本子", "画集", "txt", "书库", "书屋",
+                            "文章", "博客", "网文", "轻小说", "书源"]
             if textSite.contains(where: { label.contains($0) }) { return false }
+            // v54：诊断里「五六书库 / 霹雳书屋 / 迷途谷 / 乐乎文章 /
+            // 香蕉视频(ios.bxguwen.com)」名称不带黑名单词却占掉 16 站配额。
+            let hosts = s.siteURLs.map { $0.absoluteString.lowercased() }
+                                  .joined(separator: " ")
+            let novelHosts = ["bxguwen", "pinshu", "lofter", "sudugu",
+                              "pilisuwu", "wenku", "novel", "book.", "read."]
+            if novelHosts.contains(where: { hosts.contains($0) }) { return false }
             if s.isVideoLike { return true }
             if BookSource.looksLikeMediaName(s.bookSourceName)
                 || BookSource.looksLikeMediaName(s.bookSourceComment) { return true }
@@ -414,7 +429,7 @@ struct BookSearchView: View {
                                     .clipShape(RoundedRectangle(cornerRadius: 6))
                             }
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(book.name)
+                                Text(cleanTitle(book.name))
                                     .font(.body)
                                     .foregroundStyle(.primary)
                                 if !book.author.isEmpty {
@@ -597,6 +612,21 @@ struct BookSearchView: View {
         return 0
     }
 
+    /// v54：部分书源把 HTML 片段塞进标题
+    ///（`<span class="text">暂无专辑</span>` 会原样显示在结果行）。
+    private func cleanTitle(_ raw: String) -> String {
+        guard raw.contains("<") else { return raw }
+        var s = raw
+        if let rx = try? NSRegularExpression(pattern: "<[^>]+>", options: []) {
+            let range = NSRange(location: 0, length: s.utf16.count)
+            s = rx.stringByReplacingMatches(in: s, range: range, withTemplate: " ")
+        }
+        let entities = ["&nbsp;": " ", "&amp;": "&", "&lt;": "<",
+                        "&gt;": ">", "&quot;": "\"", "&#39;": "'"]
+        for (k, v) in entities { s = s.replacingOccurrences(of: k, with: v) }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func isMediaResult(_ book: ExploredBook) -> Bool {
         // 通用站内搜索产出的结果本来就来自影视站点，不再走名称 / 路径启发式。
         if book.intro.hasPrefix("站内搜索") { return true }
@@ -617,9 +647,11 @@ struct BookSearchView: View {
 
     private func sourceLooksLikeMedia(_ book: ExploredBook) -> Bool {
         guard !book.sourceId.isEmpty else { return false }
+        // v54：漫画源不再作为「视频结果」的准入信号（图 4 里卡拉漫画、
+        // 蜻蜓M 混进视频范围）。漫画阅读仍走 ComicPagesView，不依赖 ▶。
         return sourceStore.sources.contains {
             BookSource.normalizedURL($0.bookSourceUrl) == BookSource.normalizedURL(book.sourceId)
-                && ($0.isVideoLike || $0.isComicLike)
+                && $0.isVideoLike
         }
     }
 
@@ -883,7 +915,18 @@ struct BookSearchView: View {
             return
         }
 
-        // ③ 仍拿不到直链：落到详情页本身（不是搜索页），网页里点播放即可
+        // ③ 仍拿不到直链：落到详情页本身（不是搜索页），网页里点播放即可。
+        // v54：采集接口 URL 不是详情页；① 已经 fetchText 过并尝试解析，
+        // 到这里说明解析失败，降级成网页只会把一屏原始 JSON 甩给用户
+        //（第 11 轮真机图 5）。改给空选集面板，有明确「未解析到」提示。
+        let api = target.absoluteString.lowercased()
+        if api.contains("api.php") || api.contains("/provide/vod")
+            || api.contains("ac=detail") || api.contains("ac=list") {
+            playback = .episodes(VodEpisodeList(title: name, episodes: [],
+                                                headers: headers,
+                                                referer: target.absoluteString))
+            return
+        }
         playback = .browser(SearchPlayback(url: target, title: name))
     }
 

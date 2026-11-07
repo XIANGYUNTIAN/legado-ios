@@ -90,9 +90,10 @@ enum VodPlaylistParser {
             for k in ["name", "title", "episode", "part", "text"] {
                 if let v = dict[k] as? String { label = v; break }
             }
-            if let l = link, let u = resolve(l, base: base), isMedia(u) {
+            if let l = link, let u = resolve(l, base: base),
+               let play = normalizedMediaURL(u) {
                 let n = (label ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                out.append(VodEpisode(name: n.isEmpty ? "第\(out.count + 1)集" : n, url: u))
+                out.append(VodEpisode(name: n.isEmpty ? "第\(out.count + 1)集" : n, url: play))
             }
             // ③ 容器字段继续下钻（list / data / episodes…）
             for (k, v) in dict where containerKeys.contains(k.lowercased()) {
@@ -123,9 +124,10 @@ enum VodPlaylistParser {
                     link = first
                 }
                 guard let l = link?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      let u = resolve(l, base: base), isMedia(u) else { continue }
+                      let u = resolve(l, base: base),
+                      let play = normalizedMediaURL(u) else { continue }
                 let n = (label ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                out.append(VodEpisode(name: n.isEmpty ? "第\(out.count + 1)集" : n, url: u))
+                out.append(VodEpisode(name: n.isEmpty ? "第\(out.count + 1)集" : n, url: play))
             }
         }
     }
@@ -138,8 +140,9 @@ enum VodPlaylistParser {
             var s = ns.substring(with: m.range)
             s = s.replacingOccurrences(of: #"\/"#, with: "/")
             s = s.trimmingCharacters(in: CharacterSet(charactersIn: ",;)]}\"'\\"))
-            guard let u = resolve(s, base: base), isMedia(u) else { continue }
-            out.append(VodEpisode(name: "第\(out.count + 1)集", url: u))
+            guard let u = resolve(s, base: base),
+                  let play = normalizedMediaURL(u) else { continue }
+            out.append(VodEpisode(name: "第\(out.count + 1)集", url: play))
         }
     }
 
@@ -152,33 +155,60 @@ enum VodPlaylistParser {
     }
 
     /// 只认「能真正交给播放器」的地址。
-    /// v48：旧的宽泛 "m3u8" 子串匹配会把 `api.xxx.com/m3u8/?url=`（参数为空）
-    /// 判成播放地址，选集面板显示「第1集」却点不动；搜索页 URL 同样不能当剧集。
-    /// 改为 internal，供 PlaybackProbe / BookSearchView 复用同一套判据。
+    /// v54 头号修复：解析接口页（`dp.283bt.com/?url=https://…/x.mp4`）是 HTML
+    /// 播放器页，不是媒体文件。v48–v53 只要 `?url=` 参数非空就放行，
+    /// 选集面板因此显示「共 1 集」，点下去 AVPlayer 加载一个 HTML →
+    /// 永远缓冲不出（此前多轮误判成 HLS 防盗链）。现在必须解包出内层
+    /// 显式媒体地址才算可播，且播放地址一律用 normalizedMediaURL 归一化。
     static func isMedia(_ url: URL) -> Bool {
+        return normalizedMediaURL(url) != nil
+    }
+
+    /// 显式媒体后缀（不依赖 URL 是否带解析参数）。
+    /// v54 关键：后缀只能看 path。解析页 `?url=https://…/x.mp4` 的
+    /// absoluteString 里也含 ".mp4"，若按整串匹配会误判成媒体而跳过解包。
+    static func isExplicitMedia(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https" else { return false }
-        let s = url.absoluteString.lowercased()
-        // 搜索 / 列表 / 采集接口页面本身不是播放地址
+        let full = url.absoluteString.lowercased()
         let pageMarks = ["vodsearch", "/search", "?wd=", "&wd=", "keyword=",
                          "?s=", "api.php", "/index.php/vod/", "/list/", "/tag/"]
-        if pageMarks.contains(where: { s.contains($0) }) { return false }
-        // 明确媒体后缀，允许后跟 query / fragment / 路径续段
+        if pageMarks.contains(where: { full.contains($0) }) { return false }
+        let path = (URLComponents(url: url, resolvingAgainstBaseURL: false)?.path
+                    ?? url.path).lowercased()
         let suffixes = [".m3u8", ".mp4", ".mpd", ".flv", ".m4v", ".mkv", ".webm", ".ts"]
         for ext in suffixes {
-            guard let r = s.range(of: ext) else { continue }
-            let rest = s[r.upperBound...]
+            guard let r = path.range(of: ext) else { continue }
+            let rest = path[r.upperBound...]
             if rest.isEmpty || rest.hasPrefix("?") || rest.hasPrefix("#")
                 || rest.hasPrefix("&") || rest.hasPrefix("/") { return true }
         }
-        // 解析接口：必须带完整目标参数；?url= 后为空一律排除
-        let parserMarks = ["/m3u8/", "/parse/", "/jiexi/", "/player/", "?url=", "&url="]
-        guard parserMarks.contains(where: { s.contains($0) }),
-              let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let items = comps.queryItems else { return false }
-        return items.contains {
-            ["url", "u", "vid", "v", "playurl"].contains($0.name.lowercased())
-                && ($0.value ?? "").count >= 8
+        return false
+    }
+
+    /// 把 query 里包着的内层媒体地址解出来；解不出返回 nil。
+    static func unwrapMediaURL(_ url: URL) -> URL? {
+        guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let items = comps.queryItems, !items.isEmpty else { return nil }
+        let names: Set<String> = ["url", "u", "vid", "v", "playurl",
+                                  "play_url", "vurl", "m3u8"]
+        for item in items where names.contains(item.name.lowercased()) {
+            guard var raw = item.value, raw.count >= 8 else { continue }
+            raw = (raw.removingPercentEncoding ?? raw)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let inner = URLSanitizer.sanitize(raw) ??
+                    URL(string: raw, relativeTo: url)?.absoluteURL,
+                  isExplicitMedia(inner) else { continue }
+            return inner
         }
+        return nil
+    }
+
+    /// 统一归一化成「真正交给 AVPlayer 的 URL」：显式媒体原样返回，
+    /// 解析页返回解包后的内层地址，其余返回 nil。
+    /// PlaybackProbe / collectVod / WebView 都必须用这个结果。
+    static func normalizedMediaURL(_ url: URL) -> URL? {
+        if isExplicitMedia(url) { return url }
+        return unwrapMediaURL(url)
     }
 }
