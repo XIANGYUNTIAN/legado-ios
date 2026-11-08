@@ -231,13 +231,21 @@ struct BrowserPlayerSheet: View {
     @State private var loader: HeaderProxyLoader?
     @StateObject private var state = PlaybackState()
     @State private var monitor: PlaybackMonitor?
+    /// v59：首播（请求头代理）失败时先重试一次「无代理纯净直连」，再降级网页。
+    @State private var proxyUsed = false
+    @State private var retryNote = ""
 
     private var needsSoftDecoder: Bool {
         VideoPlayAsset.parse(media.url.absoluteString).needsUnsupportedEngine
     }
 
     private func fallbackURL() -> URL? {
-        if let f = media.fallbackURL { return f }
+        // v59：采集接口 URL 不是网页，降级加载它只会甩出一屏原始 JSON（图 3）。
+        let raw = media.fallbackURL?.absoluteString.lowercased() ?? ""
+        let isAPI = raw.contains("api.php") || raw.contains("/provide/vod")
+            || raw.contains("ac=detail") || raw.contains("ac=list")
+            || raw.contains("ac=videolist")
+        if let f = media.fallbackURL, !isAPI { return f }
         guard let scheme = media.url.scheme, let host = media.url.host else { return nil }
         return URL(string: scheme + "://" + host + "/")
     }
@@ -246,7 +254,39 @@ struct BrowserPlayerSheet: View {
         NavigationStack {
             Group {
                 if state.failed, let fallback = fallbackURL() {
-                    FallbackWebView(url: fallback, headers: media.headers)
+                    ZStack(alignment: .top) {
+                        FallbackWebView(url: fallback, headers: media.headers)
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("原生播放未成功 · 已切换网页播放")
+                                .font(.subheadline.weight(.semibold))
+                            Text("直链：" + media.url.absoluteString)
+                                .font(.caption2)
+                                .lineLimit(2)
+                            Text("路径：" + (proxyUsed ? "请求头代理" : "纯净直连")
+                                 + " · " + (retryNote.isEmpty ? "未重试" : retryNote))
+                                .font(.caption2)
+                            HStack {
+                                Button("重试原生播放") {
+                                    state.failed = false
+                                    state.cleanRetried = false
+                                    retryNote = ""
+                                    start(clean: false)
+                                }
+                                .buttonStyle(.bordered)
+                                Button("纯净直连重试") {
+                                    state.failed = false
+                                    state.cleanRetried = true
+                                    retryNote = "手动纯净直连"
+                                    start(clean: true)
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                        }
+                        .padding(10)
+                        .background(.regularMaterial)
+                        .cornerRadius(10)
+                        .padding(8)
+                    }
                 } else if needsSoftDecoder {
                     SoftPlayerView(url: media.url, headers: media.headers)
                 } else {
@@ -263,15 +303,24 @@ struct BrowserPlayerSheet: View {
                 }
             }
         }
-        .onAppear { start() }
+        .onAppear { start(clean: false) }
+        .onChange(of: state.cleanRetryRequest) { _, _ in
+            guard state.cleanRetryRequest > 0 else { return }
+            start(clean: true)
+        }
         .onDisappear { player.pause(); monitor = nil }
     }
 
-    private func start() {
+    /// v59：clean = true 表示「无代理纯净直连」——不套自定义 scheme、不注入
+    /// 额外请求头，整条流交给 iOS 原生 HLS 栈。首播失败先这样重试一次，
+    /// 覆盖代理改写 / 206 语义 / 起播超时误判；再失败才降级网页。
+    private func start(clean: Bool) {
         guard !needsSoftDecoder else { return }
         let isHLS = media.url.absoluteString.lowercased().contains("m3u8")
         // 只对 HLS 套请求头代理：MP4 走代理要整段下载后再切片，大文件极慢。
-        if isHLS, !media.headers.isEmpty {
+        let useProxy = !clean && isHLS && !media.headers.isEmpty
+        proxyUsed = useProxy
+        if useProxy {
             let proxy = HeaderProxyLoader(headers: media.headers)
             loader = proxy
             if let proxied = proxy.proxiedURL(for: media.url) {
@@ -279,16 +328,31 @@ struct BrowserPlayerSheet: View {
                 asset.resourceLoader.setDelegate(proxy, queue: DispatchQueue(label: "legado.browser.resource"))
                 player.replaceCurrentItem(with: AVPlayerItem(asset: asset))
             } else {
+                loader = nil
+                proxyUsed = false
                 player.replaceCurrentItem(with: AVPlayerItem(url: media.url))
             }
         } else {
+            loader = nil
             player.replaceCurrentItem(with: AVPlayerItem(url: media.url))
         }
         player.play()
         // 捕获列表只能捕获局部变量，不能直接捕获 self 的属性
         let box = state
-        monitor = PlaybackMonitor(player: player) { [weak box] in
-            box?.failed = true
+        let shouldRetry = !clean
+        // 纯净直连重试给 18s：master -> variant -> 首个 ts 三级加载比代理慢
+        let timeout = clean ? 18 : 10
+        monitor = PlaybackMonitor(player: player, timeout: timeout) { [weak box] in
+            guard let box else { return }
+            if shouldRetry && !box.cleanRetried {
+                box.cleanRetried = true
+                box.cleanRetryRequest += 1
+            } else {
+                box.failed = true
+            }
+        }
+        if clean {
+            retryNote = "已自动重试无代理直连"
         }
     }
 }
@@ -296,6 +360,10 @@ struct BrowserPlayerSheet: View {
 /// @State 是值类型，闭包里改不动；用引用类型承接播放失败状态。
 final class PlaybackState: ObservableObject {
     @Published var failed = false
+    /// v59：是否已做过一次「无代理纯净直连」重试（只由失败回调写）。
+    var cleanRetried = false
+    /// v59：失败回调不捕获 View struct，只累加计数；由 onChange 触发重试。
+    @Published var cleanRetryRequest = 0
 }
 
 /// v52：截图实证症状是「原生播放器黑屏、进度条 --:--」，即拿到了直链却
@@ -307,9 +375,12 @@ final class PlaybackMonitor: NSObject {
     private var timer: Timer?
     private var fired = false
     private var elapsed = 0
+    /// v59：纯净直连重试走更长超时，避免 master/variant/ts 慢加载被误判失败。
+    private let timeout: Int
 
-    init(player: AVPlayer, onFail: @escaping () -> Void) {
+    init(player: AVPlayer, timeout: Int = 10, onFail: @escaping () -> Void) {
         self.player = player
+        self.timeout = timeout
         self.onFail = onFail
         super.init()
         statusObs = player.observe(\.status, options: [.initial, .new]) { [weak self] p, _ in
@@ -336,7 +407,7 @@ final class PlaybackMonitor: NSObject {
             return
         }
         elapsed += 1
-        if elapsed >= 10 { fire() }
+        if elapsed >= timeout { fire() }
     }
 
     private func fire() {

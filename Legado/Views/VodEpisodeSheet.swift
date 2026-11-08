@@ -48,14 +48,35 @@ struct VodEpisodeSheet: View {
     }
 
     private func play(_ ep: VodEpisode) {
+        // v59：采集接口（api.php / provide/vod / ac=detail…）不是详情页。
+        // 第 15 轮真机图 3 就是播放失败后把这一屏 JSON 当网页降级出来；
+        // 同时它还被当成 Referer 灌给 CDN，把纯净直链硬拖进自定义 scheme 代理。
+        let ref = list.referer
+        let low = ref.lowercased()
+        let isCollectAPI = low.contains("api.php") || low.contains("/provide/vod")
+            || low.contains("ac=detail") || low.contains("ac=list")
+            || low.contains("ac=videolist")
         var h = list.headers
+        if isCollectAPI {
+            h.removeValue(forKey: "Referer")
+            h.removeValue(forKey: "referer")
+            h.removeValue(forKey: "Origin")
+            h.removeValue(forKey: "origin")
+        }
         if h["Referer"] == nil && h["referer"] == nil {
-            h["Referer"] = list.referer
+            if isCollectAPI {
+                // 防盗链只认直链所在站点根，别把采集接口域名当来源
+                if let scheme = ep.url.scheme, let host = ep.url.host {
+                    h["Referer"] = scheme + "://" + host + "/"
+                }
+            } else {
+                h["Referer"] = ref
+            }
         }
         // v52：原生播放失败时自动降级到详情页网页内联播放。
-        // list.referer 在探针分支就是详情页；若是直链则交给播放器回退到站点根。
+        // v59：采集接口一律不作 fallback，交给播放器回退到媒体站点根。
         var fallback: URL? = nil
-        if let r = URL(string: list.referer),
+        if !isCollectAPI, let r = URL(string: ref),
            !VideoPlayAsset.parse(r.absoluteString).isExplicitMediaURL {
             fallback = r
         }
