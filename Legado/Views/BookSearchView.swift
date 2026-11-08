@@ -352,7 +352,7 @@ struct BookSearchView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if siteSearching {
-                    Text("正在影视站点内搜索同名剧集…")
+                    Text("正在运行逐站诊断…")
                         .font(.caption2)
                         .foregroundStyle(.tint)
                 }
@@ -361,8 +361,29 @@ struct BookSearchView: View {
                         .font(.caption2)
                         .foregroundStyle(.green)
                 }
-                if !siteDiagnostics.isEmpty {
-                    DisclosureGroup("站内逐站诊断 · \(siteDiagnostics.count) 个站点") {
+                if resultKind != .book && !siteTargets.isEmpty {
+                    DisclosureGroup("站内逐站诊断（手动）· " + String(siteDiagnostics.count) + " 站") {
+                        if siteSearching {
+                            HStack(spacing: 6) {
+                                ProgressView().controlSize(.small)
+                                Text("正在逐站诊断…")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Button("停止诊断") {
+                                siteTask?.cancel()
+                                siteTask = nil
+                                siteSearching = false
+                            }
+                            .font(.caption2)
+                        } else {
+                            Button("运行逐站诊断") { runSiteDiagnostics() }
+                                .font(.caption2)
+                                .disabled(searchKeyword.isEmpty || siteTargets.isEmpty)
+                            Text("按当前关键词逐站试搜，会创建隐藏网页并消耗流量；默认不自动运行。")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                         ForEach(siteDiagnostics, id: \.self) { line in
                             Text(line)
                                 .font(.caption2)
@@ -433,12 +454,13 @@ struct BookSearchView: View {
                     if resultKind == .media && !allResults.isEmpty
                         && !allResults.contains(where: { isMediaResult($0) }) {
                         Section {
-                            // v53：第 10 轮真机里站内搜索仍在后台跑、UI 却已宣告
-                            // 「未识别出视频结果」，把「还在搜」伪装成「彻底失败」。
+                            // v58：逐站诊断改为手动触发，siteSearching 只在用户
+                            // 主动点「运行逐站诊断」时才为 true，不再把主搜索的
+                            // 等待伪装成「站点还在搜」。
                             // 用 if 分支而非 Text(condition ? a : b)，避免插值字符串
                             // 在 LocalizedStringKey / String 重载间产生歧义。
                             if siteSearching {
-                                Text("影视站点搜索进行中…下方站点可点进去搜索")
+                                Text("逐站诊断进行中…下方站点可点进去搜索")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             } else {
@@ -806,10 +828,12 @@ struct BookSearchView: View {
 
         searchTask?.cancel()
         siteTask?.cancel()
-        // 「书籍」范围不跑站内搜索；其余范围与规则搜索并行发起。
-        let runSite = resultKind != .book
-        let siteTargetsCopy = runSite ? siteTargets : []
-        siteSearching = runSite
+        siteTask = nil
+        // v58：逐站诊断改为诊断区手动触发。v55 起其结果已不进结果区，
+        // 自动跑只是白烧 8 站并发 HTTP（峰值约 80 请求）+ 最多 16 站 /
+        // 6 路并发隐藏 WKWebView（每站 11s 超时）。功能完整保留在
+        // runSiteDiagnostics()，只是默认不再随每次搜索启动。
+        siteSearching = false
         results = []
         siteResults = []
         siteDiagnostics = []
@@ -855,46 +879,55 @@ struct BookSearchView: View {
                 progressSink.text = nil
             }
         }
-        // 精确模式全源遍历可能要几分钟，站内搜索必须并行跑，几秒内就能出视频结果。
-        // 结果单独写 siteResults，by design 不与规则搜索的 results 互相覆盖。
-        if runSite, !siteTargetsCopy.isEmpty {
-            siteTask = Task.detached(priority: .userInitiated) {
-                let report = await SiteSearchService.searchReport(targets: siteTargetsCopy,
-                                                                   keyword: keywordCopy)
-                await MainActor.run {
-                    siteSearching = false
-                    siteDiagnostics = report.lines
-                    var seen = Set<String>()
-                    var added: [ExploredBook] = []
-                    var playlists: [String: [SiteEpisode]] = [:]
-                    for h in report.hits {
-                        let key = h.url.lowercased()
-                        if seen.contains(key) { continue }
-                        seen.insert(key)
-                        // 纯值结构可安全跨 actor；VodEpisode 在主线程还原
-                        if !h.episodes.isEmpty { playlists[h.url] = h.episodes }
-                        added.append(ExploredBook(
-                            name: h.name,
-                            author: "",
-                            intro: "站内搜索 · 影视",
-                            bookUrl: h.url,
-                            coverUrl: "",
-                            lastChapter: "",
-                            sourceId: h.sourceId,
-                            sourceName: h.sourceName
-                        ))
-                    }
-                    guard !added.isEmpty else { return }
-                    // v55：隐藏 WebView 抽链接 → 结果行点 ▶ 这条链路十二轮
-                    // 在放宽（49 条假命中）与收紧（归零）之间摆动，从未稳定。
-                    // 降级为纯诊断，只写 siteDiagnostics / sitePlaylists，
-                    // 不再往结果区塞行；主路径是下方可见网页一条龙。
-                    sitePlaylists = playlists
-                    errorMessage = nil
+    }
+
+    /// v58：逐站诊断改为手动触发。执行内容与原先自动运行的
+    /// SiteSearchService.searchReport 完全一致（含 sitePlaylists 回填），
+    /// 只是不再随每次搜索自动消耗 CPU / 内存 / 流量。
+    private func runSiteDiagnostics() {
+        guard !siteSearching else { return }
+        let kw = searchKeyword
+        let targets = siteTargets
+        guard !kw.isEmpty, !targets.isEmpty else { return }
+        siteTask?.cancel()
+        siteDiagnostics = []
+        sitePlaylists = [:]
+        siteSearching = true
+        siteTask = Task.detached(priority: .userInitiated) {
+            let report = await SiteSearchService.searchReport(targets: targets,
+                                                               keyword: kw)
+            if Task.isCancelled { return }
+            await MainActor.run {
+                siteSearching = false
+                siteDiagnostics = report.lines
+                var seen = Set<String>()
+                var added: [ExploredBook] = []
+                var playlists: [String: [SiteEpisode]] = [:]
+                for h in report.hits {
+                    let key = h.url.lowercased()
+                    if seen.contains(key) { continue }
+                    seen.insert(key)
+                    // 纯值结构可安全跨 actor；VodEpisode 在主线程还原
+                    if !h.episodes.isEmpty { playlists[h.url] = h.episodes }
+                    added.append(ExploredBook(
+                        name: h.name,
+                        author: "",
+                        intro: "站内搜索 · 影视",
+                        bookUrl: h.url,
+                        coverUrl: "",
+                        lastChapter: "",
+                        sourceId: h.sourceId,
+                        sourceName: h.sourceName
+                    ))
                 }
+                guard !added.isEmpty else { return }
+                // v55：隐藏 WebView 抽链接 → 结果行点 ▶ 这条链路十二轮
+                // 在放宽（49 条假命中）与收紧（归零）之间摆动，从未稳定。
+                // 降级为纯诊断，只写 siteDiagnostics / sitePlaylists，
+                // 不再往结果区塞行；主路径是下方可见网页一条龙。
+                sitePlaylists = playlists
+                errorMessage = nil
             }
-        } else {
-            siteSearching = false
         }
     }
 
